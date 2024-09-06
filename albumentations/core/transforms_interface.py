@@ -7,11 +7,12 @@ from warnings import warn
 
 import cv2
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Annotated
+
 
 from albumentations.core.validation import ValidatedTransformMeta
 
 from .serialization import Serializable, SerializableMeta, get_shortest_class_fullname
+from albumentations.core.pydantic import ProbabilityType
 from .types import (
     BoxInternalType,
     BoxType,
@@ -39,7 +40,7 @@ class BaseTransformInitSchema(BaseModel):
         default=None,
         deprecated="Deprecated. Use `p=1` instead to always apply the transform",
     )
-    p: Annotated[float, Field(default=0.5, description="Probability of applying the transform", ge=0, le=1)]
+    p: ProbabilityType = 0.5
 
 
 class CombinedMeta(SerializableMeta, ValidatedTransformMeta):
@@ -101,13 +102,21 @@ class BasicTransform(Serializable, metaclass=CombinedMeta):
 
         if force_apply or (random.random() < self.p):
             params = self.get_params()
+            params = self.update_params_shape(params=params, data=kwargs)
 
-            if self.targets_as_params:
-                if not all(key in kwargs for key in self.targets_as_params):
-                    msg = f"{self.__class__.__name__} requires {self.targets_as_params}"
+            if self.targets_as_params:  # check if all required targets are in kwargs.
+                missing_keys = set(self.targets_as_params).difference(kwargs.keys())
+                if missing_keys and not (missing_keys == {"image"} and "images" in kwargs):
+                    msg = f"{self.__class__.__name__} requires {self.targets_as_params} missing keys: {missing_keys}"
                     raise ValueError(msg)
 
-                targets_as_params = {k: kwargs[k] for k in self.targets_as_params}
+            params_dependent_on_data = self.get_params_dependent_on_data(params=params, data=kwargs)
+            params.update(params_dependent_on_data)
+
+            if self.targets_as_params:  # this block will be removed after removing `get_params_dependent_on_targets`
+                targets_as_params = {k: kwargs.get(k, None) for k in self.targets_as_params}
+                if missing_keys:  # here we expecting case when missing_keys == {"image"} and "images" in kwargs
+                    targets_as_params["image"] = kwargs["images"][0]
                 params_dependent_on_targets = self.get_params_dependent_on_targets(targets_as_params)
                 params.update(params_dependent_on_targets)
             if self.deterministic:
@@ -118,7 +127,7 @@ class BasicTransform(Serializable, metaclass=CombinedMeta):
 
     def apply_with_params(self, params: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Apply transforms with parameters."""
-        params = self.update_params(params, **kwargs)
+        params = self.update_params(params, **kwargs)  # remove after move parameters like interpolation
         res = {}
         for key, arg in kwargs.items():
             if key in self._key2func and arg is not None:
@@ -153,9 +162,25 @@ class BasicTransform(Serializable, metaclass=CombinedMeta):
         """Apply transform on image."""
         raise NotImplementedError
 
+    def apply_to_images(self, images: np.ndarray, **params: Any) -> list[np.ndarray]:
+        """Apply transform on images."""
+        return [self.apply(image, **params) for image in images]
+
     def get_params(self) -> dict[str, Any]:
         """Returns parameters independent of input."""
         return {}
+
+    def update_params_shape(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        """Updates parameters with input image shape."""
+        # here we expects `image` or `images` in kwargs. it's checked at Compose._check_args
+        shape = data["image"].shape if "image" in data else data["images"][0].shape
+        params["shape"] = shape
+        params.update({"cols": shape[1], "rows": shape[0]})
+        return params
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        """Returns parameters dependent on input."""
+        return params
 
     @property
     def targets(self) -> dict[str, Callable[..., Any]]:
@@ -183,18 +208,26 @@ class BasicTransform(Serializable, metaclass=CombinedMeta):
         return self._available_keys
 
     def update_params(self, params: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-        """Update parameters with transform specific params."""
+        """Update parameters with transform specific params.
+        This method is deprecated, use:
+        - `get_params` for transform specific params like interpolation and
+        - `update_params_shape` for data like shape.
+        """
         if hasattr(self, "interpolation"):
             params["interpolation"] = self.interpolation
         if hasattr(self, "fill_value"):
             params["fill_value"] = self.fill_value
         if hasattr(self, "mask_fill_value"):
             params["mask_fill_value"] = self.mask_fill_value
-        params.update({"cols": kwargs["image"].shape[1], "rows": kwargs["image"].shape[0]})
+
+        # here we expects `image` or `images` in kwargs. it's checked at Compose._check_args
+        shape = kwargs["image"].shape if "image" in kwargs else kwargs["images"][0].shape
+        params["shape"] = shape
+        params.update({"cols": shape[1], "rows": shape[0]})
         return params
 
     def add_targets(self, additional_targets: dict[str, str]) -> None:
-        """Add targets to transform them the same way as one of existing targets
+        """Add targets to transform them the same way as one of existing targets.
         ex: {'target_image': 'image'}
         ex: {'obj1_mask': 'mask', 'obj2_mask': 'mask'}
         by the way you must have at least one object with key 'image'
@@ -216,16 +249,18 @@ class BasicTransform(Serializable, metaclass=CombinedMeta):
 
     @property
     def targets_as_params(self) -> list[str]:
-        """Targets used to get params"""
+        """Targets used to get params dependent on targets.
+        This is used to check input has all required targets.
+        """
         return []
 
     def get_params_dependent_on_targets(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Returns parameters dependent on targets.
+        """This method is deprecated.
+        Use `get_params_dependent_on_data` instead.
+        Returns parameters dependent on targets.
         Dependent target is defined in `self.targets_as_params`
         """
-        raise NotImplementedError(
-            "Method get_params_dependent_on_targets is not implemented in class " + self.__class__.__name__,
-        )
+        return {}
 
     @classmethod
     def get_class_fullname(cls) -> str:
@@ -302,6 +337,7 @@ class DualTransform(BasicTransform):
     def targets(self) -> dict[str, Callable[..., Any]]:
         return {
             "image": self.apply,
+            "images": self.apply_to_images,
             "mask": self.apply_to_mask,
             "masks": self.apply_to_masks,
             "bboxes": self.apply_to_bboxes,
@@ -355,7 +391,7 @@ class ImageOnlyTransform(BasicTransform):
 
     @property
     def targets(self) -> dict[str, Callable[..., Any]]:
-        return {"image": self.apply}
+        return {"image": self.apply, "images": self.apply_to_images}
 
 
 class NoOp(DualTransform):

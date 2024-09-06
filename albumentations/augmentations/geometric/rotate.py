@@ -54,10 +54,10 @@ class RandomRotate90(DualTransform):
         return {"factor": random.randint(0, 3)}
 
     def apply_to_bbox(self, bbox: BoxInternalType, factor: int, **params: Any) -> BoxInternalType:
-        return fgeometric.bbox_rot90(bbox, factor, **params)
+        return fgeometric.bbox_rot90(bbox, factor, params["shape"][0], params["shape"][1])
 
     def apply_to_keypoint(self, keypoint: KeypointInternalType, factor: int, **params: Any) -> BoxInternalType:
-        return fgeometric.keypoint_rot90(keypoint, factor, **params)
+        return fgeometric.keypoint_rot90(keypoint, factor, params["shape"][0], params["shape"][1])
 
     def get_transform_init_args_names(self) -> tuple[()]:
         return ()
@@ -233,14 +233,10 @@ class Rotate(DualTransform):
             "y_max": min(height, int(height / 2 + hr / 2)),
         }
 
-    @property
-    def targets_as_params(self) -> list[str]:
-        return ["image"]
-
-    def get_params_dependent_on_targets(self, params: dict[str, Any]) -> dict[str, Any]:
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         out_params = {"angle": random.uniform(self.limit[0], self.limit[1])}
         if self.crop_border:
-            height, width = params["image"].shape[:2]
+            height, width = params["shape"][:2]
             out_params.update(self._rotated_rect_with_max_area(height, width, out_params["angle"]))
         else:
             out_params.update({"x_min": -1, "x_max": -1, "y_min": -1, "y_max": -1})
@@ -248,7 +244,7 @@ class Rotate(DualTransform):
         return out_params
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
-        return ("limit", "interpolation", "border_mode", "value", "mask_value", "rotate_method", "crop_border")
+        return "limit", "interpolation", "border_mode", "value", "mask_value", "rotate_method", "crop_border"
 
 
 class SafeRotate(DualTransform):
@@ -324,15 +320,10 @@ class SafeRotate(DualTransform):
     ) -> KeypointInternalType:
         return fgeometric.keypoint_safe_rotate(keypoint, params["matrix"], angle, scale_x, scale_y, cols, rows)
 
-    @property
-    def targets_as_params(self) -> list[str]:
-        return ["image"]
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        height, width = params["shape"][:2]
 
-    def get_params_dependent_on_targets(self, params: dict[str, Any]) -> dict[str, Any]:
-        angle = random.uniform(self.limit[0], self.limit[1])
-
-        image = params["image"]
-        height, width = image.shape[:2]
+        angle = random.uniform(*self.limit)
 
         # https://stackoverflow.com/questions/43892506/opencv-python-rotate-image-without-cropping-sides
         image_center = center(width, height)

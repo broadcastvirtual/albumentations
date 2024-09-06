@@ -7,7 +7,7 @@ from setuptools import find_packages, setup
 
 INSTALL_REQUIRES = [
     "numpy>=1.24.4", "scipy>=1.10.0", "scikit-image>=0.21.0",
-    "PyYAML", "typing-extensions>=4.9.0", "scikit-learn>=1.3.2",
+    "PyYAML", "typing-extensions>=4.9.0",
     "pydantic>=2.7.0",
     "albucore>=0.0.11",
     "eval-type-backport"
@@ -69,6 +69,7 @@ setup(
     install_requires=get_install_requirements(INSTALL_REQUIRES, CHOOSE_INSTALL_REQUIRES),
     extras_require={
         "hub": ["huggingface_hub"],
+        "text": ["pillow"]
     },
     classifiers=[
     "Development Status :: 5 - Production/Stable",

@@ -1,7 +1,7 @@
 import random
 from functools import partial
 from typing import Any, Dict, Optional, Tuple, Type
-from deepdiff import DeepDiff
+
 import cv2
 import numpy as np
 
@@ -10,7 +10,6 @@ import warnings
 from torchvision import transforms as torch_transforms
 
 from albumentations.core.bbox_utils import denormalize_bboxes, normalize_bboxes
-from albumentations.core.pydantic import valid_interpolations, valid_border_modes
 
 from albucore.utils import clip
 import albumentations as A
@@ -21,7 +20,7 @@ from albumentations.core.transforms_interface import BasicTransform
 from albumentations.core.types import ImageCompressionType
 from albumentations.random_utils import get_random_seed
 from albumentations.augmentations.transforms import RandomSnow
-from tests.conftest import IMAGES, RECTANGULAR_FLOAT_IMAGE, SQUARE_FLOAT_IMAGE, SQUARE_MULTI_UINT8_IMAGE, SQUARE_UINT8_IMAGE
+from tests.conftest import IMAGES, SQUARE_FLOAT_IMAGE, SQUARE_MULTI_UINT8_IMAGE, SQUARE_UINT8_IMAGE
 
 from .utils import get_dual_transforms, get_image_only_transforms, get_transforms, set_seed
 
@@ -114,14 +113,13 @@ def test_elastic_transform_interpolation(monkeypatch, interpolation):
         "albumentations.augmentations.geometric.ElasticTransform.get_params", lambda *_: {"random_seed": random_seed}
     )
 
-    aug = A.ElasticTransform(alpha=1, sigma=50, alpha_affine=50, interpolation=interpolation, p=1)
+    aug = A.ElasticTransform(alpha=1, sigma=50, interpolation=interpolation, p=1)
 
     data = aug(image=image, mask=mask)
     expected_image = FGeometric.elastic_transform(
         image,
         alpha=1,
         sigma=50,
-        alpha_affine=50,
         interpolation=interpolation,
         border_mode=cv2.BORDER_REFLECT_101,
         random_state=np.random.RandomState(random_seed),
@@ -130,7 +128,6 @@ def test_elastic_transform_interpolation(monkeypatch, interpolation):
         mask,
         alpha=1,
         sigma=50,
-        alpha_affine=50,
         interpolation=cv2.INTER_NEAREST,
         border_mode=cv2.BORDER_REFLECT_101,
         random_state=np.random.RandomState(random_seed),
@@ -207,7 +204,8 @@ def test_binary_mask_interpolation(augmentation_cls, params):
             A.PixelDropout,
             A.MixUp,
             A.XYMasking,
-            A.OverlayElements
+            A.OverlayElements,
+            A.TextImage
         },
     ),
 )
@@ -260,7 +258,8 @@ def __test_multiprocessing_support_proc(args):
             A.PixelDistributionAdaptation,
             A.MaskDropout,
             A.MixUp,
-            A.OverlayElements
+            A.OverlayElements,
+            A.TextImage
         },
     ),
 )
@@ -328,6 +327,9 @@ def test_force_apply():
                 "templates": SQUARE_UINT8_IMAGE,
             },
         },
+        except_augmentations={
+            A.TextImage
+        }
     ),
 )
 def test_additional_targets_for_image_only(augmentation_cls, params):
@@ -371,10 +373,10 @@ def test_lambda_transform():
         return new_mask
 
     def vflip_bbox(bbox, **kwargs):
-        return FGeometric.bbox_vflip(bbox, **kwargs)
+        return FGeometric.bbox_vflip(bbox, kwargs["shape"][0], kwargs["shape"][1])
 
     def vflip_keypoint(keypoint, **kwargs):
-        return FGeometric.keypoint_vflip(keypoint, **kwargs)
+        return FGeometric.keypoint_vflip(keypoint, kwargs["shape"][0], kwargs["shape"][1])
 
     aug = A.Lambda(
         image=negate_image, mask=partial(one_hot_mask, num_channels=16), bbox=vflip_bbox, keypoint=vflip_keypoint, p=1
@@ -569,7 +571,10 @@ def test_resize_keypoints():
 def test_multiplicative_noise_grayscale(image):
     m = 0.5
     aug = A.MultiplicativeNoise((m, m), elementwise=False, p=1)
-    params = aug.get_params_dependent_on_targets({"image": image})
+    params = aug.get_params_dependent_on_data(
+        params={"shape": image.shape},
+        data={"image": image},
+    )
     assert m == params["multiplier"]
     result_e = aug(image=image)["image"]
 
@@ -578,24 +583,31 @@ def test_multiplicative_noise_grayscale(image):
     assert np.allclose(clip(expected, image.dtype), result_e)
 
     aug = A.MultiplicativeNoise((m, m), elementwise=True, p=1)
-    params = aug.get_params_dependent_on_targets({"image": image})
+    params = aug.get_params_dependent_on_data(
+        params={"shape": image.shape},
+        data={"image": image},
+    )
     result_ne = aug.apply(image, params["multiplier"])
 
     expected = image.astype(np.float32) * params["multiplier"]
 
     assert np.allclose(clip(expected, image.dtype), result_ne)
 
+
 @pytest.mark.parametrize(
     "image", IMAGES
 )
 @pytest.mark.parametrize(
-    "elementwise", ( True, False )
+    "elementwise", (True, False)
 )
 def test_multiplicative_noise_rgb(image, elementwise):
     dtype = image.dtype
 
     aug = A.MultiplicativeNoise(multiplier=(0.9, 1.1), elementwise=elementwise, p=1)
-    params = aug.get_params_dependent_on_targets({"image": image})
+    params = aug.get_params_dependent_on_data(
+        params={"shape": image.shape},
+        data={"image": image},
+    )
     mul = params["multiplier"]
 
     if elementwise:
@@ -688,7 +700,10 @@ def test_grid_dropout_params(ratio, holes_number_xy, unit_size_range, shift_xy):
     # with fill_value = 0 the sum of pixels is smaller
     assert result.sum() < img.sum()
     assert result.shape == img.shape
-    params = aug.get_params_dependent_on_targets({"image": img})
+    params = aug.get_params_dependent_on_data(
+        params={"shape": img.shape},
+        data={"image": img},
+    )
     holes = params["holes"]
     assert len(holes[0]) == 4
     # check grid offsets
@@ -759,7 +774,10 @@ def test_grid_dropout_holes_generation(params, expected_holes):
     transform = A.GridDropout(p=1, **params)
     image = np.zeros((20, 30, 3), dtype=np.uint8)
 
-    holes = transform.get_params_dependent_on_targets({"image": image})["holes"]
+    holes = transform.get_params_dependent_on_data(
+        params={"shape": image.shape},
+        data={"image": image},
+    )["holes"]
 
     assert holes == expected_holes, f"Failed on holes generation with value {holes}"
 
@@ -973,7 +991,10 @@ def test_template_transform(img_weight, template_weight, template_transform, ima
 
     assert result.shape == img.shape
 
-    params = aug.get_params_dependent_on_targets({"image": img})
+    params = aug.get_params_dependent_on_data(
+        params={},
+        data={"image": img},
+    )
     template = params["template"]
     assert template.shape == img.shape
     assert template.dtype == img.dtype
@@ -1017,8 +1038,12 @@ def test_affine_scale_ratio(params):
     set_seed(0)
     aug = A.Affine(**params, p=1.0)
     image = SQUARE_UINT8_IMAGE
-    target = {"image": image}
-    apply_params = aug.get_params_dependent_on_targets(target)
+
+    data = {"image": image}
+    call_params = aug.get_params()
+    call_params = aug.update_params_shape(call_params, data)
+
+    apply_params = aug.get_params_dependent_on_data(params=call_params, data=data)
 
     if "keep_ratio" not in params:
         # default(keep_ratio=False)
@@ -1168,6 +1193,7 @@ def test_rotate_equal(img, aug_cls, angle):
     assert diff[:, :2].max() <= 2
     assert (diff[:, -1] % 360).max() <= 1
 
+
 @pytest.mark.parametrize("seed", list(range(10)))
 def test_motion_blur_allow_shifted(seed):
     set_seed(seed)
@@ -1219,6 +1245,7 @@ def test_non_rgb_transform_warning(augmentation, img_channels):
     message = "This transformation expects 3-channel images"
     assert str(exc_info.value).startswith(message)
 
+
 @pytest.mark.parametrize("height, width", [(100, 200), (200, 100)])
 @pytest.mark.parametrize("scale", [(0.08, 1.0), (0.5, 1.0)])
 @pytest.mark.parametrize("ratio", [(0.75, 1.33), (1.0, 1.0)])
@@ -1258,6 +1285,7 @@ def test_random_crop_interfaces_vs_torchvision(height, width, scale, ratio):
     assert transformed_image_albu.shape == transformed_image_pt_np.shape
     assert transform_albu_height_is_size.shape == transformed_image_pt_np.shape
 
+
 @pytest.mark.parametrize("num_shadows_limit, num_shadows_lower, num_shadows_upper, expected_warning", [
     ((1, 1), None, None, None),
     ((1, 2), None, None, None),
@@ -1295,6 +1323,7 @@ def test_deprecation_warnings_random_shadow(
         else:
             assert not w, "Unexpected warnings raised"
 
+
 @pytest.mark.parametrize("image", IMAGES)
 @pytest.mark.parametrize("grid", [
     (3, 3), (4, 4), (5, 7)
@@ -1320,14 +1349,19 @@ def test_grid_shuffle(image, grid):
     np.testing.assert_allclose(res["image"].sum(axis=(0, 1)), image.sum(axis=(0, 1)), atol=0.04)
     np.testing.assert_allclose(res["mask"].sum(axis=(0, 1)), mask.sum(axis=(0, 1)), atol=0.03)
 
+
 @pytest.mark.parametrize("image", IMAGES)
-@pytest.mark.parametrize("crop_left, crop_right, crop_top, crop_bottom", [
-    (0, 0, 0, 0),
-    (0, 1, 0, 1),
-    (1, 0, 1, 0),
-    (0.5, 0.5, 0.5, 0.5),
-    ( 0.1, 0.1, 0.1, 0.1 ),
-                                                                          ( 0.3, 0.3, 0.3, 0.3 )])
+@pytest.mark.parametrize(
+    "crop_left, crop_right, crop_top, crop_bottom",
+    [
+        (0, 0, 0, 0),
+        (0, 1, 0, 1),
+        (1, 0, 1, 0),
+        (0.5, 0.5, 0.5, 0.5),
+        ( 0.1, 0.1, 0.1, 0.1 ),
+        ( 0.3, 0.3, 0.3, 0.3 ),
+    ]
+)
 def test_random_crop_from_borders(image, bboxes, keypoints, crop_left, crop_right, crop_top, crop_bottom):
     set_seed(0)
     aug = A.Compose([A.RandomCropFromBorders(crop_left=crop_left,
@@ -1421,8 +1455,8 @@ def test_coarse_dropout_invalid_input(params):
                 "fill_value": 0,
             },
             A.Superpixels: {"p_replace": (1, 1),
-                             "n_segments": (10, 10),
-                             "max_size": 10
+                            "n_segments": (10, 10),
+                            "max_size": 10
                             },
             A.ZoomBlur: {"max_factor": (1.05, 3)},
         },
@@ -1439,8 +1473,8 @@ def test_coarse_dropout_invalid_input(params):
             A.NoOp,
             A.Lambda,
             A.ToRGB,
-            A.RandomRotate90,
-            A.FancyPCA
+            A.RandomRotate90,            
+            A.TextImage
         },
     ),
 )
@@ -1517,10 +1551,10 @@ def test_change_image(augmentation_cls, params):
             A.ChannelShuffle,
             A.ChromaticAberration,
             A.RandomRotate90,
-            A.FancyPCA,
             A.PlanckianJitter,
             A.OverlayElements,
             A.FromFloat,
+            A.TextImage
         },
     ),
 )
@@ -1561,6 +1595,7 @@ def test_downscale_functionality(params, expected):
     for key, value in expected.items():
         assert aug_dict[key] == value, f"Failed on {key} with value {value}"
 
+
 @pytest.mark.parametrize("params", [
     ({"scale_range": (0.9, 0.1)}),  # Invalid range, max < min
     ({"scale_range": (1.1, 1.2)}),  # Values outside valid scale range (0, 1)
@@ -1595,6 +1630,7 @@ def test_pad_if_needed_functionality(params, expected):
     # Assert each expected key/value pair
     for key, value in expected.items():
         assert aug_dict[key] == value, f"Failed on {key} with value {value}"
+
 
 @pytest.mark.parametrize("params, expected", [
     # Test default initialization values
@@ -1665,6 +1701,7 @@ def test_random_snow_invalid_input(params):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
+            A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf")
         },
         except_augmentations={
             A.RandomSizedBBoxSafeCrop,
@@ -1825,6 +1862,7 @@ def test_random_fog_initialization(params, expected):
     for key, value in expected.items():
         assert getattr(img_fog, key) == value, f"Failed on {key} with value {value}"
 
+
 @pytest.mark.parametrize("params", [
     ({"fog_coef_range": (1.2, 1.5)}),  # Invalid fog coefficient range -> upper bound
     ({"fog_coef_range": (0.9, 0.7)}),  # Invalid range  -> decreasing
@@ -1840,7 +1878,10 @@ def test_gauss_noise(mean, image):
     set_seed(42)
     aug = A.GaussNoise(p=1, noise_scale_factor=1.0, mean=mean)
 
-    apply_params = aug.get_params_dependent_on_targets(params = {"image":image })
+    apply_params = aug.get_params_dependent_on_data(
+        params={"shape": image.shape},
+        data={"image": image},
+    )
 
     assert np.abs(mean - apply_params["gauss"].mean()) < 0.5
     result = A.Compose([aug])(image=image)
@@ -1985,7 +2026,8 @@ def test_rot90(bboxes, angle, keypoints):
             A.PixelDistributionAdaptation,
             A.MaskDropout,
             A.MixUp,
-            A.OverlayElements
+            A.OverlayElements,
+            A.TextImage
         },
     ),
 )
@@ -1995,3 +2037,37 @@ def test_return_nonzero(augmentation_cls, params):
     aug = A.Compose([augmentation_cls(p=1, **params)])
 
     assert not np.array_equal(aug(image=image)["image"], np.zeros_like(image))
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        A.PadIfNeeded(min_height=6, min_width=6, value=128, border_mode=cv2.BORDER_CONSTANT, p=1),
+        A.CropAndPad(px=2, pad_mode=cv2.BORDER_CONSTANT, pad_cval=128, p=1, interpolation=cv2.INTER_NEAREST_EXACT),
+        A.CropAndPad(percent=(0, 0.3, 0, 0), pad_cval=128, p=1, interpolation=cv2.INTER_NEAREST_EXACT),
+        A.Affine(translate_px={"x": -1, "y": -1}, cval=128, p=1, interpolation=cv2.INTER_NEAREST),
+        A.Rotate(p=1, limit=(45, 45), interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT, value=128),
+    ]
+)
+@pytest.mark.parametrize("num_channels", [1, 3, 5])
+def test_padding_color(transform, num_channels):
+    # Create an image with zeros
+    if num_channels == 1:
+        image = np.zeros((4, 4), dtype=np.uint8)
+    else:
+        image = np.zeros((4, 4, num_channels), dtype=np.uint8)
+
+    pipeline = A.Compose([transform])
+
+    # Apply the transform
+    augmented = pipeline(image=image)["image"]
+
+    # Check the unique values in each channel of the padded image
+    if num_channels == 1:
+        channels = [augmented]
+    else:
+        channels = [augmented[:, :, i] for i in range(num_channels)]
+
+    for channel_id, channel in enumerate(channels):
+        unique_values = np.unique(channel)
+        assert set(unique_values) == {0, 128}, f"{channel_id}"
