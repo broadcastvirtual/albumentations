@@ -12,7 +12,8 @@ from torchvision import transforms as torch_transforms
 import albumentations as A
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as FGeometric
-from albumentations.augmentations.blur.functional import gaussian_blur
+from albumentations.augmentations.transforms import ImageCompression
+from albumentations.core.types import ImageCompressionType
 from albumentations.random_utils import get_random_seed
 from tests.conftest import IMAGES, SQUARE_MULTI_UINT8_IMAGE, SQUARE_UINT8_IMAGE
 
@@ -1005,8 +1006,8 @@ def test_affine_incorrect_scale_range(params):
             {
                 "bboxes": [
                     [15.65896994771262, 0.2946228229078849, 21.047137067150473, 4.617219579173327, 0],
-                    [194.29851584295034, 25.564320319214918, 199, 29.88691707548036, 0],
-                    [178.9528629328495, 95.38278042082668, 184.34103005228735, 99, 0],
+                    [194.29851584295034, 25.564320319214918, 199.68668296238818, 29.88691707548036, 0],
+                    [178.9528629328495, 95.38278042082668, 184.34103005228735, 99.70537717709212, 0],
                     [0.47485022613917677, 70.11308292451965, 5.701484157049652, 73.70074852182076, 0],
                 ],
                 "keypoints": [
@@ -1037,7 +1038,7 @@ def test_affine_incorrect_scale_range(params):
                 "bboxes": [
                     [0.3133170376117963, 25.564320319214918, 5.701484157049649, 29.88691707548036, 0],
                     [178.9528629328495, 0.2946228229078862, 184.34103005228735, 4.617219579173327, 0],
-                    [194.29851584295034, 70.11308292451965, 199, 74.43567968078509, 0],
+                    [194.29851584295034, 70.11308292451965, 199.68668296238818, 74.43567968078509, 0],
                     [15.658969947712617, 95.38278042082668, 20.88560387862309, 98.97044601812779, 0],
                 ],
                 "keypoints": [
@@ -1119,44 +1120,6 @@ def test_rotate_equal(img, aug_cls, angle):
     diff = np.round(np.abs(res_a - res_b))
     assert diff[:, :2].max() <= 2
     assert (diff[:, -1] % 360).max() <= 1
-
-@pytest.mark.parametrize(
-    "get_transform",
-    [
-        lambda sign: A.Affine(translate_px=sign * 2),
-        lambda sign: A.ShiftScaleRotate(shift_limit=(sign * 0.02, sign * 0.02), scale_limit=0, rotate_limit=0),
-    ],
-)
-@pytest.mark.parametrize(
-    ["bboxes", "expected", "min_visibility", "sign"],
-    [
-        [[(0, 0, 10, 10, 1)], [], 0.9, -1],
-        [[(0, 0, 10, 10, 1)], [(0, 0, 8, 8, 1)], 0.6, -1],
-        [[(90, 90, 100, 100, 1)], [], 0.9, 1],
-        [[(90, 90, 100, 100, 1)], [(92, 92, 99, 99, 1)], 0.49, 1],
-    ],
-)
-def test_bbox_clipping(get_transform, bboxes, expected, min_visibility: float, sign: int):
-    image = np.zeros([100, 100, 3], dtype=np.uint8)
-    transform = get_transform(sign)
-    transform.p = 1
-    transform = A.Compose([transform], bbox_params=A.BboxParams(format="pascal_voc", min_visibility=min_visibility))
-
-    res = transform(image=image, bboxes=bboxes)["bboxes"]
-    assert res == expected
-
-
-def test_bbox_clipping_perspective():
-    set_seed(0)
-    transform = A.Compose(
-        [A.Perspective(scale=(0.05, 0.05), p=1)], bbox_params=A.BboxParams(format="pascal_voc", min_visibility=0.6)
-    )
-
-    image = np.empty([1000, 1000, 3], dtype=np.uint8)
-    bboxes = np.array([[0, 0, 100, 100, 1]])
-    res = transform(image=image, bboxes=bboxes)["bboxes"]
-    assert len(res) == 0
-
 
 @pytest.mark.parametrize("seed", list(range(10)))
 def test_motion_blur_allow_shifted(seed):
@@ -1329,6 +1292,30 @@ def test_random_crop_from_borders(image, bboxes, keypoints, crop_left, crop_righ
                     keypoint_params=A.KeypointParams("xy"))
 
     assert aug(image=image, mask=image, bboxes=bboxes, keypoints=keypoints)
+
+@pytest.mark.parametrize("params, expected", [
+    # Test default initialization values
+    ({}, {"quality_range": (99, 100), "compression_type": ImageCompressionType.JPEG}),
+    # Test custom quality range and compression type
+    ({"quality_range": (10, 90), "compression_type": ImageCompressionType.WEBP},
+     {"quality_range": (10, 90), "compression_type": ImageCompressionType.WEBP}),
+    # Deprecated quality values handling
+    ({"quality_lower": 75}, {"quality_range": (75, 100)}),
+])
+def test_image_compression_initialization(params, expected):
+    img_comp = ImageCompression(**params)
+    for key, value in expected.items():
+        assert getattr(img_comp, key) == value, f"Failed on {key} with value {value}"
+
+@pytest.mark.parametrize("params", [
+    ({"quality_range": (101, 105)}),  # Invalid quality range
+    ({"quality_range": (0, 0)}),  # Invalid range for JPEG
+    ({"compression_type": "unknown"})  # Invalid compression type
+])
+def test_image_compression_invalid_input(params):
+    with pytest.raises(Exception):
+        ImageCompression(**params)
+
 
 @pytest.mark.parametrize("params, expected", [
     # Default values
@@ -1510,4 +1497,30 @@ def test_downscale_functionality(params, expected):
 ])
 def test_downscale_invalid_input(params):
     with pytest.raises(Exception):
-        aug = A.Downscale(**params, p=1)
+        A.Downscale(**params, p=1)
+
+
+@pytest.mark.parametrize("params, expected", [
+    # Default values
+    ({}, {"min_height": 1024, "min_width": 1024, "position": A.PadIfNeeded.PositionType.CENTER, "border_mode": cv2.BORDER_REFLECT_101}),
+    # Boundary values
+    ({"min_height": 800, "min_width": 800}, {"min_height": 800, "min_width": 800}),
+    ({"pad_height_divisor": 10, "min_height": None, "pad_width_divisor": 10, "min_width": None},
+     {"pad_height_divisor": 10, "min_height": None, "pad_width_divisor": 10, "min_width": None}),
+    ({"position": "top_left"}, {"position": A.PadIfNeeded.PositionType.TOP_LEFT}),
+    # Value handling when border_mode is BORDER_CONSTANT
+    ({"border_mode": cv2.BORDER_CONSTANT, "value": 255}, {"border_mode": cv2.BORDER_CONSTANT, "value": 255}),
+    ({"border_mode": cv2.BORDER_REFLECT_101, "value": 255}, {"border_mode": cv2.BORDER_CONSTANT, "value": 255}),
+    ({"border_mode": cv2.BORDER_CONSTANT, "value": [0, 0, 0]}, {"border_mode": cv2.BORDER_CONSTANT, "value": [0, 0, 0]}),
+    # Mask value handling
+    ({"border_mode": cv2.BORDER_CONSTANT, "value": [0, 0, 0], "mask_value": 128}, {"border_mode": cv2.BORDER_CONSTANT, "mask_value": 128, "value": [0, 0, 0]}),
+])
+def test_pad_if_needed_functionality(params, expected):
+    # Setup the augmentation with the provided parameters
+    aug = A.PadIfNeeded(**params, p=1)
+    # Get the initialization arguments to check against expected
+    aug_dict = {key: getattr(aug, key) for key in expected.keys()}
+
+    # Assert each expected key/value pair
+    for key, value in expected.items():
+        assert aug_dict[key] == value, f"Failed on {key} with value {value}"

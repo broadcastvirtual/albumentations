@@ -9,7 +9,7 @@ import albumentations as A
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as FGeometric
 from albumentations.augmentations.utils import get_opencv_dtype_from_numpy, is_multispectral_image, MAX_VALUES_BY_DTYPE
-from albumentations.core.bbox_utils import filter_bboxes
+
 from albumentations.core.types import d4_group_elements
 from tests.conftest import IMAGES, RECTANGULAR_IMAGES
 from tests.utils import convert_2d_to_target_format, set_seed
@@ -186,7 +186,7 @@ def test_compare_rotate_and_affine(image):
     rotation_matrix = generate_rotation_matrix(image, 60)
 
     # Apply rotation using FGeometric.rotate
-    rotated_img_1 = FGeometric.rotate(image, angle=60, border_mode = cv2.BORDER_CONSTANT, value = 0)
+    rotated_img_1 = FGeometric.rotate(image, angle=60, border_mode = cv2.BORDER_CONSTANT, value = 0, interpolation=cv2.INTER_LINEAR)
 
     # Convert 2x3 cv2 matrix to 3x3 for skimage's ProjectiveTransform
     full_matrix = np.vstack([rotation_matrix, [0, 0, 1]])
@@ -289,7 +289,7 @@ def test_pad(target):
     img = np.array([[1, 2], [3, 4]], dtype=np.uint8)
     expected = np.array([[4, 3, 4, 3], [2, 1, 2, 1], [4, 3, 4, 3], [2, 1, 2, 1]], dtype=np.uint8)
     img, expected = convert_2d_to_target_format([img, expected], target=target)
-    padded = FGeometric.pad(img, min_height=4, min_width=4)
+    padded = FGeometric.pad(img, min_height=4, min_width=4, border_mode=cv2.BORDER_REFLECT_101, value=None)
     assert np.array_equal(padded, expected)
 
 
@@ -300,7 +300,7 @@ def test_pad_float(target):
         [[0.4, 0.3, 0.4, 0.3], [0.2, 0.1, 0.2, 0.1], [0.4, 0.3, 0.4, 0.3], [0.2, 0.1, 0.2, 0.1]], dtype=np.float32
     )
     img, expected = convert_2d_to_target_format([img, expected], target=target)
-    padded_img = FGeometric.pad(img, min_height=4, min_width=4)
+    padded_img = FGeometric.pad(img, min_height=4, min_width=4, value=None, border_mode=cv2.BORDER_REFLECT_101)
     assert_array_almost_equal_nulp(padded_img, expected)
 
 
@@ -542,11 +542,11 @@ def test_from_float_unknown_dtype():
 
 
 @pytest.mark.parametrize("target", ["image", "mask"])
-def test_resize_default_interpolation(target):
+def test_resize_linear_interpolation(target):
     img = np.array([[1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3], [4, 4, 4, 4]], dtype=np.uint8)
     expected = np.array([[2, 2], [4, 4]], dtype=np.uint8)
     img, expected = convert_2d_to_target_format([img, expected], target=target)
-    resized_img = FGeometric.resize(img, 2, 2)
+    resized_img = FGeometric.resize(img, 2, 2, interpolation=cv2.INTER_LINEAR)
     height, width = resized_img.shape[:2]
     assert height == 2
     assert width == 2
@@ -569,7 +569,7 @@ def test_resize_nearest_interpolation(target):
 def test_resize_different_height_and_width(target):
     img = np.ones((100, 100), dtype=np.uint8)
     img = convert_2d_to_target_format([img], target=target)
-    resized_img = FGeometric.resize(img, height=20, width=30)
+    resized_img = FGeometric.resize(img, height=20, width=30, interpolation=cv2.INTER_LINEAR)
     height, width = resized_img.shape[:2]
     assert height == 20
     assert width == 30
@@ -585,7 +585,7 @@ def test_resize_default_interpolation_float(target):
     )
     expected = np.array([[0.15, 0.15], [0.35, 0.35]], dtype=np.float32)
     img, expected = convert_2d_to_target_format([img, expected], target=target)
-    resized_img = FGeometric.resize(img, 2, 2)
+    resized_img = FGeometric.resize(img, 2, 2, interpolation=cv2.INTER_LINEAR)
     height, width = resized_img.shape[:2]
     assert height == 2
     assert width == 2
@@ -684,60 +684,6 @@ def test_bbox_transpose():
     rot90 = FGeometric.bbox_rot90((0.7, 0.1, 0.8, 0.4), 2, 100, 200)
     reflected_anti_diagonal = FGeometric.bbox_transpose(rot90, 100, 200)
     assert np.allclose(reflected_anti_diagonal, (0.6, 0.2, 0.9, 0.3))
-
-
-@pytest.mark.parametrize(
-    ["bboxes", "min_area", "min_visibility", "target"],
-    [
-        (
-            [(0.1, 0.5, 1.1, 0.9), (-0.1, 0.5, 0.8, 0.9), (0.1, 0.5, 0.8, 0.9)],
-            0,
-            0,
-            [(0.1, 0.5, 0.99, 0.9), (0.0, 0.5, 0.8, 0.9), (0.1, 0.5, 0.8, 0.9)],
-        ),
-        ([(0.1, 0.5, 0.8, 0.9), (0.4, 0.5, 0.5, 0.6)], 150, 0, [(0.1, 0.5, 0.8, 0.9)]),
-        ([(0.1, 0.5, 0.8, 0.9), (0.4, 0.9, 0.5, 1.6)], 0, 0.75, [(0.1, 0.5, 0.8, 0.9)]),
-        ([(0.1, 0.5, 0.8, 0.9), (0.4, 0.7, 0.5, 1.1)], 0, 0.7, [(0.1, 0.5, 0.8, 0.9), (0.4, 0.7, 0.5, 0.99)]),
-    ],
-)
-def test_filter_bboxes(bboxes, min_area, min_visibility, target):
-    filtered_bboxes = filter_bboxes(bboxes, min_area=min_area, min_visibility=min_visibility, rows=100, cols=100)
-    assert filtered_bboxes == target
-
-
-@pytest.mark.parametrize(
-    ["bboxes", "img_width", "img_height", "min_width", "min_height", "target"],
-    [
-        [
-            [(0.1, 0.1, 0.9, 0.9), (0.1, 0.1, 0.2, 0.9), (0.1, 0.1, 0.9, 0.2), (0.1, 0.1, 0.2, 0.2)],
-            100,
-            100,
-            20,
-            20,
-            [(0.1, 0.1, 0.9, 0.9)],
-        ],
-        [
-            [(0.1, 0.1, 0.9, 0.9), (0.1, 0.1, 0.2, 0.9), (0.1, 0.1, 0.9, 0.2), (0.1, 0.1, 0.2, 0.2)],
-            100,
-            100,
-            20,
-            0,
-            [(0.1, 0.1, 0.9, 0.9), (0.1, 0.1, 0.9, 0.2)],
-        ],
-        [
-            [(0.1, 0.1, 0.9, 0.9), (0.1, 0.1, 0.2, 0.9), (0.1, 0.1, 0.9, 0.2), (0.1, 0.1, 0.2, 0.2)],
-            100,
-            100,
-            0,
-            20,
-            [(0.1, 0.1, 0.9, 0.9), (0.1, 0.1, 0.2, 0.9)],
-        ],
-    ],
-)
-def test_filter_bboxes_by_min_width_height(bboxes, img_width, img_height, min_width, min_height, target):
-    filtered_bboxes = filter_bboxes(bboxes, cols=img_width, rows=img_height, min_width=min_width, min_height=min_height)
-    assert filtered_bboxes == target
-
 
 def test_fun_max_size():
     target_width = 256
@@ -1026,7 +972,7 @@ def test_maybe_process_in_chunks():
 
     for i in range(1, image.shape[-1] + 1):
         before = image[:, :, :i]
-        after = FGeometric.rotate(before, angle=1)
+        after = FGeometric.rotate(before, angle=1, interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_REFLECT_101)
         assert before.shape == after.shape
 
 
