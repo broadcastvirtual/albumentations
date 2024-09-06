@@ -5,6 +5,7 @@ import warnings
 from enum import IntEnum
 from types import LambdaType
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, cast
+from warnings import warn
 
 import cv2
 import numpy as np
@@ -13,6 +14,7 @@ from scipy.ndimage import gaussian_filter
 
 from albumentations import random_utils
 from albumentations.augmentations.blur.functional import blur
+from albumentations.augmentations.functional import split_uniform_grid
 from albumentations.augmentations.utils import (
     get_num_channels,
     is_grayscale_image,
@@ -21,6 +23,7 @@ from albumentations.augmentations.utils import (
 from albumentations.core.transforms_interface import DualTransform, ImageOnlyTransform, Interpolation, NoOp, to_tuple
 from albumentations.core.types import (
     BoxInternalType,
+    ChromaticAberrationMode,
     ImageMode,
     KeypointInternalType,
     ScaleFloatType,
@@ -75,6 +78,7 @@ __all__ = [
     "UnsharpMask",
     "PixelDropout",
     "Spatter",
+    "ChromaticAberration",
 ]
 
 HUNDRED = 100
@@ -103,6 +107,11 @@ class RandomGridShuffle(DualTransform):
     def __init__(self, grid: Tuple[int, int] = (3, 3), always_apply: bool = False, p: float = 0.5):
         super().__init__(always_apply, p)
 
+        n, m = grid
+
+        if not all(isinstance(dim, int) and dim > 0 for dim in [n, m]):
+            raise ValueError(f"Grid dimensions must be positive integers. Current grid dimensions: [{n}, {m}]")
+
         self.grid = grid
 
     def apply(self, img: np.ndarray, tiles: Optional[np.ndarray] = None, **params: Any) -> np.ndarray:
@@ -115,78 +124,49 @@ class RandomGridShuffle(DualTransform):
         self,
         keypoint: KeypointInternalType,
         tiles: np.ndarray,
-        rows: int = 0,
-        cols: int = 0,
+        mapping: Dict[int, int],
         **params: Any,
     ) -> KeypointInternalType:
-        for (
-            current_left_up_corner_row,
-            current_left_up_corner_col,
-            old_left_up_corner_row,
-            old_left_up_corner_col,
-            height_tile,
-            width_tile,
-        ) in tiles:
-            x, y = keypoint[:2]
+        x, y = keypoint[:2]
 
-            if (old_left_up_corner_row <= y < (old_left_up_corner_row + height_tile)) and (
-                old_left_up_corner_col <= x < (old_left_up_corner_col + width_tile)
-            ):
-                x = x - old_left_up_corner_col + current_left_up_corner_col
-                y = y - old_left_up_corner_row + current_left_up_corner_row
-                keypoint_result = (x, y, *keypoint[2:])
-                break
+        # Find which original tile the keypoint belongs to
+        for original_index, (start_y, start_x, end_y, end_x) in enumerate(tiles):
+            if start_y <= y < end_y and start_x <= x < end_x:
+                # Find this tile's new index after shuffling
+                new_index = mapping[original_index]
+                # Get the new tile's coordinates
+                new_start_y, new_start_x = tiles[new_index][:2]
 
-        return cast(KeypointInternalType, keypoint_result)
+                # Map the keypoint to the new tile's position
+                new_x = (x - start_x) + new_start_x
+                new_y = (y - start_y) + new_start_y
+
+                return (new_x, new_y, *keypoint[2:])
+
+        # If the keypoint wasn't in any tile (shouldn't happen), log a warning for debugging purposes
+        warn(
+            "Keypoint not in any tile, returning it unchanged. This is unexpected and should be investigated.",
+            RuntimeWarning,
+        )
+        return keypoint
 
     def get_params_dependent_on_targets(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        height, width = params["image"].shape[:2]
-        n, m = self.grid
+        # Generate the original grid
+        original_tiles = split_uniform_grid(params["image"].shape[:2], self.grid)
 
-        if n <= 0 or m <= 0:
-            raise ValueError(f"Grid's values must be positive. Current grid [{n}, {m}]")
+        # Copy the original grid to keep track of the initial positions
+        indexed_tiles = np.array(list(enumerate(original_tiles)), dtype=object)
 
-        if n > height // 2 or m > width // 2:
-            msg = "Incorrect size cell of grid. Just shuffle pixels of image"
-            raise ValueError(msg)
+        # Shuffle the tiles while keeping track of original indices
+        random_utils.shuffle(indexed_tiles)
 
-        height_split = np.linspace(0, height, n + 1, dtype=np.int32)
-        width_split = np.linspace(0, width, m + 1, dtype=np.int32)
+        # Create a mapping from original positions to new positions
+        mapping = {original_index: i for i, (original_index, tile) in enumerate(indexed_tiles)}
 
-        height_matrix, width_matrix = np.meshgrid(height_split, width_split, indexing="ij")
+        # Extract the shuffled tiles without indices
+        shuffled_tiles = np.array([tile for _, tile in indexed_tiles])
 
-        index_height_matrix = height_matrix[:-1, :-1]
-        index_width_matrix = width_matrix[:-1, :-1]
-
-        shifted_index_height_matrix = height_matrix[1:, 1:]
-        shifted_index_width_matrix = width_matrix[1:, 1:]
-
-        height_tile_sizes = shifted_index_height_matrix - index_height_matrix
-        width_tile_sizes = shifted_index_width_matrix - index_width_matrix
-
-        tiles_sizes = np.stack((height_tile_sizes, width_tile_sizes), axis=2)
-
-        index_matrix = np.indices((n, m))
-        new_index_matrix = np.stack(index_matrix, axis=2)
-
-        for bbox_size in np.unique(tiles_sizes.reshape(-1, 2), axis=0):
-            eq_mat = np.all(tiles_sizes == bbox_size, axis=2)
-            new_index_matrix[eq_mat] = random_utils.permutation(new_index_matrix[eq_mat])
-
-        new_index_matrix = np.split(new_index_matrix, 2, axis=2)
-
-        old_x = index_height_matrix[new_index_matrix[0], new_index_matrix[1]].reshape(-1)
-        old_y = index_width_matrix[new_index_matrix[0], new_index_matrix[1]].reshape(-1)
-
-        shift_x = height_tile_sizes.reshape(-1)
-        shift_y = width_tile_sizes.reshape(-1)
-
-        curr_x = index_height_matrix.reshape(-1)
-        curr_y = index_width_matrix.reshape(-1)
-
-        tiles = np.stack([curr_x, curr_y, old_x, old_y, shift_x, shift_y], axis=1)
-
-        return {"tiles": tiles}
+        return {"tiles": shuffled_tiles, "mapping": mapping}
 
     @property
     def targets_as_params(self) -> List[str]:
@@ -341,8 +321,9 @@ class RandomSnow(ImageOnlyTransform):
         super().__init__(always_apply, p)
 
         if not 0 <= snow_point_lower <= snow_point_upper <= 1:
-            msg = "Invalid combination of snow_point_lower and snow_point_upper. Got: {}".format(
-                (snow_point_lower, snow_point_upper)
+            msg = (
+                "Invalid combination of snow_point_lower and snow_point_upper. "
+                f"Got: {(snow_point_lower, snow_point_upper)}"
             )
             raise ValueError(msg)
         if brightness_coeff < 0:
@@ -741,8 +722,9 @@ class RandomSunFlare(ImageOnlyTransform):
         if not 0 <= angle_lower < angle_upper <= 1:
             raise ValueError(f"Invalid combination of angle_lower nad angle_upper. Got: {(angle_lower, angle_upper)}")
         if not 0 <= num_flare_circles_lower < num_flare_circles_upper:
-            msg = "Invalid combination of num_flare_circles_lower nad num_flare_circles_upper. Got: {}".format(
-                (num_flare_circles_lower, num_flare_circles_upper)
+            msg = (
+                "Invalid combination of num_flare_circles_lower and num_flare_circles_upper. "
+                f"Got: {(num_flare_circles_lower, num_flare_circles_upper)}"
             )
             raise ValueError(msg)
 
@@ -889,9 +871,8 @@ class RandomShadow(ImageOnlyTransform):
         if not 0 <= shadow_lower_x <= shadow_upper_x <= 1 or not 0 <= shadow_lower_y <= shadow_upper_y <= 1:
             raise ValueError(f"Invalid shadow_roi. Got: {shadow_roi}")
         if not 0 <= num_shadows_lower <= num_shadows_upper:
-            msg = "Invalid combination of num_shadows_lower nad num_shadows_upper. Got: {}".format(
-                (num_shadows_lower, num_shadows_upper)
-            )
+            msg = "Invalid combination of num_shadows_lower nad num_shadows_upper. "
+            f"Got: {(num_shadows_lower, num_shadows_upper)}"
             raise ValueError(msg)
 
         self.shadow_roi = shadow_roi
@@ -1171,8 +1152,8 @@ class Equalize(ImageOnlyTransform):
     def targets_as_params(self) -> List[str]:
         return ["image", *list(self.mask_params)]
 
-    def get_transform_init_args_names(self) -> Tuple[str, str]:
-        return ("mode", "by_channels")
+    def get_transform_init_args_names(self) -> Tuple[str, ...]:
+        return ("mode", "by_channels", "mask", "mask_params")
 
 
 class RGBShift(ImageOnlyTransform):
@@ -1695,8 +1676,8 @@ class Downscale(ImageOnlyTransform):
     """Decreases image quality by downscaling and upscaling back.
 
     Args:
-        scale_min: lower bound on the image scale. Should be < 1.
-        scale_max:  lower bound on the image scale. Should be .
+        scale_min: lower bound on the image scale. Should be <= scale_max.
+        scale_max: upper bound on the image scale. Should be < 1.
         interpolation: cv2 interpolation method. Could be:
             - single cv2 interpolation flag - selected method will be used for downscale and upscale.
             - dict(downscale=flag, upscale=flag)
@@ -2325,9 +2306,8 @@ class TemplateTransform(ImageOnlyTransform):
         if get_num_channels(template) not in [1, get_num_channels(img)]:
             msg = (
                 "Template must be a single channel or "
-                "has the same number of channels as input image ({}), got {}".format(
-                    get_num_channels(img), get_num_channels(template)
-                )
+                "has the same number of channels as input "
+                f"image ({get_num_channels(img)}), got {get_num_channels(template)}"
             )
             raise ValueError(msg)
 
@@ -2766,3 +2746,123 @@ class Spatter(ImageOnlyTransform):
 
     def get_transform_init_args_names(self) -> Tuple[str, str, str, str, str, str, str]:
         return "mean", "std", "gauss_sigma", "intensity", "cutout_threshold", "mode", "color"
+
+
+class ChromaticAberration(ImageOnlyTransform):
+    """Add lateral chromatic aberration by distorting the red and blue channels of the input image.
+
+    Args:
+        primary_distortion_limit: range of the primary radial distortion coefficient.
+            If primary_distortion_limit is a single float value, the range will be
+            (-primary_distortion_limit, primary_distortion_limit).
+            Controls the distortion in the center of the image (positive values result in pincushion distortion,
+            negative values result in barrel distortion).
+            Default: 0.02.
+        secondary_distortion_limit: range of the secondary radial distortion coefficient.
+            If secondary_distortion_limit is a single float value, the range will be
+            (-secondary_distortion_limit, secondary_distortion_limit).
+            Controls the distortion in the corners of the image (positive values result in pincushion distortion,
+            negative values result in barrel distortion).
+            Default: 0.05.
+        mode: type of color fringing.
+            Supported modes are 'green_purple', 'red_blue' and 'random'.
+            'random' will choose one of the modes 'green_purple' or 'red_blue' randomly.
+            Default: 'green_purple'.
+        interpolation: flag that is used to specify the interpolation algorithm. Should be one of:
+            cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_CUBIC, cv2.INTER_AREA, cv2.INTER_LANCZOS4.
+            Default: cv2.INTER_LINEAR.
+        p: probability of applying the transform.
+            Default: 0.5.
+
+    Targets:
+        image
+
+    Image types:
+        uint8, float32
+
+    """
+
+    def __init__(
+        self,
+        primary_distortion_limit: ScaleFloatType = 0.02,
+        secondary_distortion_limit: ScaleFloatType = 0.05,
+        mode: ChromaticAberrationMode = "green_purple",
+        interpolation: int = cv2.INTER_LINEAR,
+        always_apply: bool = False,
+        p: float = 0.5,
+    ):
+        super().__init__(always_apply, p)
+        self.primary_distortion_limit = to_tuple(primary_distortion_limit)
+        self.secondary_distortion_limit = to_tuple(secondary_distortion_limit)
+        self.mode = self._validate_mode(mode)
+        self.interpolation = interpolation
+
+    @staticmethod
+    def _validate_mode(
+        mode: ChromaticAberrationMode,
+    ) -> ChromaticAberrationMode:
+        valid_modes = ["green_purple", "red_blue", "random"]
+        if mode not in valid_modes:
+            msg = f"Unsupported mode: {mode}. Supported modes are 'green_purple', 'red_blue', 'random'."
+            raise ValueError(msg)
+        return mode
+
+    def apply(
+        self,
+        img: np.ndarray,
+        primary_distortion_red: float = -0.02,
+        secondary_distortion_red: float = -0.05,
+        primary_distortion_blue: float = -0.02,
+        secondary_distortion_blue: float = -0.05,
+        **params: Any,
+    ) -> np.ndarray:
+        return F.chromatic_aberration(
+            img,
+            primary_distortion_red,
+            secondary_distortion_red,
+            primary_distortion_blue,
+            secondary_distortion_blue,
+            cast(int, self.interpolation),
+        )
+
+    def get_params(self) -> Dict[str, float]:
+        primary_distortion_red = random_utils.uniform(*self.primary_distortion_limit)
+        secondary_distortion_red = random_utils.uniform(*self.secondary_distortion_limit)
+        primary_distortion_blue = random_utils.uniform(*self.primary_distortion_limit)
+        secondary_distortion_blue = random_utils.uniform(*self.secondary_distortion_limit)
+
+        secondary_distortion_red = self._match_sign(primary_distortion_red, secondary_distortion_red)
+        secondary_distortion_blue = self._match_sign(primary_distortion_blue, secondary_distortion_blue)
+
+        if self.mode == "green_purple":
+            # distortion coefficients of the red and blue channels have the same sign
+            primary_distortion_blue = self._match_sign(primary_distortion_red, primary_distortion_blue)
+            secondary_distortion_blue = self._match_sign(secondary_distortion_red, secondary_distortion_blue)
+        if self.mode == "red_blue":
+            # distortion coefficients of the red and blue channels have the opposite sign
+            primary_distortion_blue = self._unmatch_sign(primary_distortion_red, primary_distortion_blue)
+            secondary_distortion_blue = self._unmatch_sign(secondary_distortion_red, secondary_distortion_blue)
+
+        return {
+            "primary_distortion_red": primary_distortion_red,
+            "secondary_distortion_red": secondary_distortion_red,
+            "primary_distortion_blue": primary_distortion_blue,
+            "secondary_distortion_blue": secondary_distortion_blue,
+        }
+
+    @staticmethod
+    def _match_sign(a: float, b: float) -> float:
+        # Match the sign of b to a
+        if (a < 0 < b) or (a > 0 > b):
+            b = -b
+        return b
+
+    @staticmethod
+    def _unmatch_sign(a: float, b: float) -> float:
+        # Unmatch the sign of b to a
+        if (a < 0 and b < 0) or (a > 0 and b > 0):
+            b = -b
+        return b
+
+    def get_transform_init_args_names(self) -> Tuple[str, str, str, str]:
+        return "primary_distortion_limit", "secondary_distortion_limit", "mode", "interpolation"

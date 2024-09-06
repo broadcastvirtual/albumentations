@@ -22,10 +22,15 @@ Here is an example of how you can apply some [pixel-level](#pixel-level-transfor
 - [**Written by experts**](#authors). The authors have experience both working on production computer vision systems and participating in competitive machine learning. Many core team members are Kaggle Masters and Grandmasters.
 - The library is [**widely used**](#who-is-using-albumentations) in industry, deep learning research, machine learning competitions, and open source projects.
 
+## Sponsors
+
+<a href="https://roboflow.com/" target="_blank"><img src="https://avatars.githubusercontent.com/u/53104118?s=200&v=4" width="100"/></a>
+
 ## Table of contents
 
 - [Albumentations](#albumentations)
   - [Why Albumentations](#why-albumentations)
+  - [Sponsors](#sponsors)
   - [Table of contents](#table-of-contents)
   - [Authors](#authors)
   - [Installation](#installation)
@@ -153,6 +158,7 @@ Pixel-level transforms will change just an input image and will leave any additi
 - [CLAHE](https://albumentations.ai/docs/api_reference/augmentations/transforms/#albumentations.augmentations.transforms.CLAHE)
 - [ChannelDropout](https://albumentations.ai/docs/api_reference/augmentations/dropout/channel_dropout/#albumentations.augmentations.dropout.channel_dropout.ChannelDropout)
 - [ChannelShuffle](https://albumentations.ai/docs/api_reference/augmentations/transforms/#albumentations.augmentations.transforms.ChannelShuffle)
+- [ChromaticAberration](https://albumentations.ai/docs/api_reference/augmentations/transforms/#albumentations.augmentations.transforms.ChromaticAberration)
 - [ColorJitter](https://albumentations.ai/docs/api_reference/augmentations/transforms/#albumentations.augmentations.transforms.ColorJitter)
 - [Defocus](https://albumentations.ai/docs/api_reference/augmentations/blur/transforms/#albumentations.augmentations.blur.transforms.Defocus)
 - [Downscale](https://albumentations.ai/docs/api_reference/augmentations/transforms/#albumentations.augmentations.transforms.Downscale)
@@ -309,8 +315,8 @@ To create a pull request to the repository, follow the documentation at [CONTRIB
 
 ## Community and Support
 
-* [Twitter](https://twitter.com/albumentations)
-* [Discord](https://discord.gg/AKPrrDYNAt)
+- [Twitter](https://twitter.com/albumentations)
+- [Discord](https://discord.gg/AKPrrDYNAt)
 
 ## Comments
 

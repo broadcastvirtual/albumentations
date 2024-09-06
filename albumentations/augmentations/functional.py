@@ -18,7 +18,13 @@ from albumentations.augmentations.utils import (
     preserve_channel_dim,
     preserve_shape,
 )
-from albumentations.core.types import ColorType, ImageMode, ScalarType, SpatterMode, image_modes
+from albumentations.core.types import (
+    ColorType,
+    ImageMode,
+    ScalarType,
+    SpatterMode,
+    image_modes,
+)
 
 __all__ = [
     "add_fog",
@@ -61,6 +67,8 @@ __all__ = [
     "gray_to_rgb",
     "unsharp_mask",
     "MAX_VALUES_BY_DTYPE",
+    "split_uniform_grid",
+    "chromatic_aberration",
 ]
 
 TWO = 2
@@ -986,25 +994,24 @@ def noop(input_obj: Any, **params: Any) -> Any:
 
 
 def swap_tiles_on_image(image: np.ndarray, tiles: np.ndarray) -> np.ndarray:
-    """Swap tiles on image.
+    """Swap tiles on the image according to the new format.
 
     Args:
         image: Input image.
-        tiles: array of tuples(
-            current_left_up_corner_row, current_left_up_corner_col,
-            old_left_up_corner_row, old_left_up_corner_col,
-            height_tile, width_tile)
+        tiles: Array of tiles with each tile as [start_y, start_x, end_y, end_x].
 
     Returns:
-        np.ndarray: Output image.
-
+        np.ndarray: Output image with tiles swapped according to the random shuffle.
     """
-    new_image = image.copy()
+    # If no tiles are provided, return a copy of the original image
+    if tiles.size == 0:
+        return image.copy()
 
-    for tile in tiles:
-        new_image[tile[0] : tile[0] + tile[4], tile[1] : tile[1] + tile[5]] = image[
-            tile[2] : tile[2] + tile[4], tile[3] : tile[3] + tile[5]
-        ]
+    # Create a copy of the image to retain original for reference
+    new_image = np.empty_like(image)
+    for start_y, start_x, end_y, end_x in tiles:
+        # Assign the corresponding tile from the original image to the new image
+        new_image[start_y:end_y, start_x:end_x] = image[start_y:end_y, start_x:end_x]
 
     return new_image
 
@@ -1395,3 +1402,99 @@ def spatter(
         raise ValueError("Unsupported spatter mode: " + str(mode))
 
     return img * 255
+
+
+def split_uniform_grid(image_shape: Tuple[int, int], grid: Tuple[int, int]) -> np.ndarray:
+    """Splits an image shape into a uniform grid specified by the grid dimensions.
+
+    Args:
+        image_shape (Tuple[int, int]): The shape of the image as (height, width).
+        grid (Tuple[int, int]): The grid size as (rows, columns).
+
+    Returns:
+        np.ndarray: An array containing the tiles' coordinates in the format (start_y, start_x, end_y, end_x).
+    """
+    height, width = image_shape
+    n_rows, n_cols = grid
+
+    # Compute split points for the grid
+    height_splits = np.linspace(0, height, n_rows + 1, dtype=int)
+    width_splits = np.linspace(0, width, n_cols + 1, dtype=int)
+
+    # Calculate tiles coordinates
+    tiles = [
+        (height_splits[i], width_splits[j], height_splits[i + 1], width_splits[j + 1])
+        for i in range(n_rows)
+        for j in range(n_cols)
+    ]
+
+    return np.array(tiles)
+
+
+def chromatic_aberration(
+    img: np.ndarray,
+    primary_distortion_red: float,
+    secondary_distortion_red: float,
+    primary_distortion_blue: float,
+    secondary_distortion_blue: float,
+    interpolation: int,
+) -> np.ndarray:
+    non_rgb_warning(img)
+
+    height, width = img.shape[:2]
+
+    # Build camera matrix
+    camera_mat = np.eye(3, dtype=np.float32)
+    camera_mat[0, 0] = width
+    camera_mat[1, 1] = height
+    camera_mat[0, 2] = width / 2.0
+    camera_mat[1, 2] = height / 2.0
+
+    # Build distortion coefficients
+    distortion_coeffs_red = np.array([primary_distortion_red, secondary_distortion_red, 0, 0], dtype=np.float32)
+    distortion_coeffs_blue = np.array([primary_distortion_blue, secondary_distortion_blue, 0, 0], dtype=np.float32)
+
+    # Distort the red and blue channels
+    red_distorted = _distort_channel(
+        img[..., 0],
+        camera_mat,
+        distortion_coeffs_red,
+        height,
+        width,
+        interpolation,
+    )
+    blue_distorted = _distort_channel(
+        img[..., 2],
+        camera_mat,
+        distortion_coeffs_blue,
+        height,
+        width,
+        interpolation,
+    )
+
+    return np.dstack([red_distorted, img[..., 1], blue_distorted])
+
+
+def _distort_channel(
+    channel: np.ndarray,
+    camera_mat: np.ndarray,
+    distortion_coeffs: np.ndarray,
+    height: int,
+    width: int,
+    interpolation: int,
+) -> np.ndarray:
+    map_x, map_y = cv2.initUndistortRectifyMap(
+        cameraMatrix=camera_mat,
+        distCoeffs=distortion_coeffs,
+        R=None,
+        newCameraMatrix=camera_mat,
+        size=(width, height),
+        m1type=cv2.CV_32FC1,
+    )
+    return cv2.remap(
+        channel,
+        map_x,
+        map_y,
+        interpolation=interpolation,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
