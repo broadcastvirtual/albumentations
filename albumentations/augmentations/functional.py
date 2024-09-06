@@ -1,9 +1,11 @@
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from warnings import warn
 
 import cv2
 import numpy as np
 import skimage
+from typing_extensions import Literal
 
 from albumentations import random_utils
 from albumentations.augmentations.utils import (
@@ -23,7 +25,6 @@ from albumentations.core.types import (
     ImageMode,
     ScalarType,
     SpatterMode,
-    image_modes,
 )
 
 __all__ = [
@@ -75,6 +76,8 @@ __all__ = [
 
 TWO = 2
 THREE = 3
+NUM_RGB_CHANNELS = 3
+GRAYSCALE_SHAPE_LENGTH = 2
 FOUR = 4
 EIGHT = 8
 THREE_SIXTY = 360
@@ -101,22 +104,82 @@ def normalize_numpy(img: np.ndarray, mean: np.ndarray, denominator: np.ndarray) 
     return img
 
 
-def normalize(img: np.ndarray, mean: np.ndarray, std: np.ndarray, max_pixel_value: float = 255.0) -> np.ndarray:
-    mean = np.array(mean, dtype=np.float32)
-    mean *= max_pixel_value
+@preserve_shape
+def normalize(img: np.ndarray, mean: ColorType, std: ColorType, max_pixel_value: float = 255.0) -> np.ndarray:
+    mean_np = np.array(mean, dtype=np.float32)
+    mean_np *= max_pixel_value
 
-    std = np.array(std, dtype=np.float32)
-    std *= max_pixel_value
+    std_np = np.array(std, dtype=np.float32)
+    std_np *= max_pixel_value
 
-    denominator = np.reciprocal(std, dtype=np.float32)
+    denominator = np.reciprocal(std_np, dtype=np.float32)
 
-    if img.ndim == THREE and img.shape[-1] == THREE:
-        return normalize_cv2(img, mean, denominator)
-    return normalize_numpy(img, mean, denominator)
+    if is_rgb_image(img):
+        return normalize_cv2(img, mean_np, denominator)
+
+    return normalize_numpy(img, mean_np, denominator)
+
+
+@preserve_shape
+def normalize_per_image(
+    img: np.ndarray,
+    normalization: Literal["image", "image_per_channel", "min_max", "min_max_per_channel"],
+) -> np.ndarray:
+    """Apply per-image normalization based on the specified strategy.
+
+    Args:
+        img (np.ndarray): The image to be normalized, expected to be in HWC format.
+        normalization (str): The normalization strategy to apply. Options include:
+                             "image", "image_per_channel", "min_max", "min_max_per_channel".
+
+    Returns:
+        np.ndarray: The normalized image.
+
+    Reference:
+        https://github.com/ChristofHenkel/kaggle-landmark-2021-1st-place/blob/main/data/ch_ds_1.py
+    """
+    img = img.astype(np.float32)
+
+    if img.ndim == GRAYSCALE_SHAPE_LENGTH:
+        img = np.expand_dims(img, axis=-1)  # Ensure the image is at least 3D
+
+    if normalization == "image":
+        # Normalize the whole image based on its global mean and std
+        mean = img.mean()
+        std = img.std() + 1e-4  # Adding a small epsilon to avoid division by zero
+        normalized_img = (img - mean) / std
+        normalized_img = normalized_img.clip(-20, 20)  # Clipping outliers
+
+    elif normalization == "image_per_channel":
+        # Normalize the image per channel based on each channel's mean and std
+        pixel_mean = img.mean(axis=(0, 1))
+        pixel_std = img.std(axis=(0, 1)) + 1e-4
+        normalized_img = (img - pixel_mean[None, None, :]) / pixel_std[None, None, :]
+        normalized_img = normalized_img.clip(-20, 20)
+
+    elif normalization == "min_max":
+        # Apply min-max normalization to the whole image
+        img_min = img.min()
+        img_max = img.max()
+        normalized_img = (img - img_min) / (img_max - img_min)
+
+    elif normalization == "min_max_per_channel":
+        # Apply min-max normalization per channel
+        img_min = img.min(axis=(0, 1), keepdims=True)
+        img_max = img.max(axis=(0, 1), keepdims=True)
+        normalized_img = (img - img_min) / (img_max - img_min)
+
+    else:
+        raise ValueError(f"Unknown normalization method: {normalization}")
+
+    return normalized_img
 
 
 def _shift_hsv_uint8(
-    img: np.ndarray, hue_shift: np.ndarray, sat_shift: np.ndarray, val_shift: np.ndarray
+    img: np.ndarray,
+    hue_shift: np.ndarray,
+    sat_shift: np.ndarray,
+    val_shift: np.ndarray,
 ) -> np.ndarray:
     dtype = img.dtype
     img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
@@ -142,7 +205,10 @@ def _shift_hsv_uint8(
 
 
 def _shift_hsv_non_uint8(
-    img: np.ndarray, hue_shift: np.ndarray, sat_shift: np.ndarray, val_shift: np.ndarray
+    img: np.ndarray,
+    hue_shift: np.ndarray,
+    sat_shift: np.ndarray,
+    val_shift: np.ndarray,
 ) -> np.ndarray:
     dtype = img.dtype
     img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
@@ -174,7 +240,7 @@ def shift_hsv(img: np.ndarray, hue_shift: np.ndarray, sat_shift: np.ndarray, val
             sat_shift = 0
             warn(
                 "HueSaturationValue: hue_shift and sat_shift are not applicable to grayscale image. "
-                "Set them to 0 or use RGB image"
+                "Set them to 0 or use RGB image",
             )
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
 
@@ -320,13 +386,10 @@ def _equalize_cv(img: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarr
     return cv2.LUT(img, lut)
 
 
-def _check_preconditions(img: np.ndarray, mask: Optional[np.ndarray], mode: str, by_channels: bool) -> None:
+def _check_preconditions(img: np.ndarray, mask: Optional[np.ndarray], by_channels: bool) -> None:
     if img.dtype != np.uint8:
         msg = "Image must have uint8 channel type"
         raise TypeError(msg)
-
-    if mode not in image_modes:
-        raise ValueError(f"Unsupported equalization mode. Supports: {image_modes}. Got: {mode}")
 
     if mask is not None:
         if is_rgb_image(mask) and is_grayscale_image(img):
@@ -337,7 +400,10 @@ def _check_preconditions(img: np.ndarray, mask: Optional[np.ndarray], mode: str,
 
 
 def _handle_mask(
-    mask: Optional[np.ndarray], img: np.ndarray, by_channels: bool, i: Optional[int] = None
+    mask: Optional[np.ndarray],
+    img: np.ndarray,
+    by_channels: bool,
+    i: Optional[int] = None,
 ) -> Optional[np.ndarray]:
     if mask is None:
         return None
@@ -350,9 +416,12 @@ def _handle_mask(
 
 @preserve_channel_dim
 def equalize(
-    img: np.ndarray, mask: Optional[np.ndarray] = None, mode: ImageMode = "cv", by_channels: bool = True
+    img: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    mode: ImageMode = "cv",
+    by_channels: bool = True,
 ) -> np.ndarray:
-    _check_preconditions(img, mask, mode, by_channels)
+    _check_preconditions(img, mask, by_channels)
 
     function = _equalize_pil if mode == "pil" else _equalize_cv
 
@@ -466,9 +535,9 @@ def clahe(img: np.ndarray, clip_limit: float = 2.0, tile_grid_size: Tuple[int, i
         msg = "clahe supports only uint8 inputs"
         raise TypeError(msg)
 
-    clahe_mat = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    clahe_mat = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=[int(x) for x in tile_grid_size])
 
-    if len(img.shape) == TWO or img.shape[2] == 1:
+    if is_grayscale_image(img):
         return clahe_mat.apply(img)
 
     img = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
@@ -740,18 +809,18 @@ def add_sun_flare(
 
 @ensure_contiguous
 @preserve_shape
-def add_shadow(img: np.ndarray, vertices_list: List[List[Tuple[int, int]]]) -> np.ndarray:
+def add_shadow(img: np.ndarray, vertices_list: List[np.ndarray]) -> np.ndarray:
     """Add shadows to the image.
-
-    From https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
 
     Args:
         img (numpy.ndarray):
-        vertices_list (list):
+        vertices_list (list[numpy.ndarray]):
 
     Returns:
         numpy.ndarray:
 
+    Reference:
+        https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
     """
     non_rgb_warning(img)
     input_dtype = img.dtype
@@ -767,8 +836,7 @@ def add_shadow(img: np.ndarray, vertices_list: List[List[Tuple[int, int]]]) -> n
     mask = np.zeros_like(img)
 
     # adding all shadow polygons on empty mask, single 255 denotes only red channel
-    for vertices in vertices_list:
-        cv2.fillPoly(mask, vertices, 255)
+    cv2.fillPoly(mask, vertices_list, 255)
 
     # if red channel is hot, image's "Lightness" channel's brightness is lowered
     red_max_value_ind = mask[:, :, 0] == MAX_VALUES_BY_DTYPE[np.dtype("uint8")]
@@ -848,7 +916,10 @@ def gauss_noise(image: np.ndarray, gauss: np.ndarray) -> np.ndarray:
 
 @clipped
 def _brightness_contrast_adjust_non_uint(
-    img: np.ndarray, alpha: float = 1, beta: float = 0, beta_by_max: bool = False
+    img: np.ndarray,
+    alpha: float = 1,
+    beta: float = 0,
+    beta_by_max: bool = False,
 ) -> np.ndarray:
     dtype = img.dtype
     img = img.astype("float32")
@@ -866,7 +937,10 @@ def _brightness_contrast_adjust_non_uint(
 
 @preserve_shape
 def _brightness_contrast_adjust_uint(
-    img: np.ndarray, alpha: float = 1, beta: float = 0, beta_by_max: bool = False
+    img: np.ndarray,
+    alpha: float = 1,
+    beta: float = 0,
+    beta_by_max: bool = False,
 ) -> np.ndarray:
     dtype = np.dtype("uint8")
 
@@ -887,7 +961,10 @@ def _brightness_contrast_adjust_uint(
 
 
 def brightness_contrast_adjust(
-    img: np.ndarray, alpha: float = 1, beta: float = 0, beta_by_max: bool = False
+    img: np.ndarray,
+    alpha: float = 1,
+    beta: float = 0,
+    beta_by_max: bool = False,
 ) -> np.ndarray:
     if img.dtype == np.uint8:
         return _brightness_contrast_adjust_uint(img, alpha, beta, beta_by_max)
@@ -954,7 +1031,10 @@ def gray_to_rgb(img: np.ndarray) -> np.ndarray:
 
 @preserve_shape
 def downscale(
-    img: np.ndarray, scale: float, down_interpolation: int = cv2.INTER_AREA, up_interpolation: int = cv2.INTER_LINEAR
+    img: np.ndarray,
+    scale: float,
+    down_interpolation: int = cv2.INTER_AREA,
+    up_interpolation: int = cv2.INTER_LINEAR,
 ) -> np.ndarray:
     height, width = img.shape[:2]
 
@@ -995,25 +1075,28 @@ def noop(input_obj: Any, **params: Any) -> Any:
     return input_obj
 
 
-def swap_tiles_on_image(image: np.ndarray, tiles: np.ndarray) -> np.ndarray:
+def swap_tiles_on_image(image: np.ndarray, tiles: np.ndarray, mapping: Optional[List[int]] = None) -> np.ndarray:
     """Swap tiles on the image according to the new format.
 
     Args:
         image: Input image.
         tiles: Array of tiles with each tile as [start_y, start_x, end_y, end_x].
+        mapping: List of new tile indices.
 
     Returns:
         np.ndarray: Output image with tiles swapped according to the random shuffle.
     """
     # If no tiles are provided, return a copy of the original image
-    if tiles.size == 0:
+    if tiles.size == 0 or mapping is None:
         return image.copy()
 
     # Create a copy of the image to retain original for reference
     new_image = np.empty_like(image)
-    for start_y, start_x, end_y, end_x in tiles:
+    for num, new_index in enumerate(mapping):
+        start_y, start_x, end_y, end_x = tiles[new_index]
+        start_y_orig, start_x_orig, end_y_orig, end_x_orig = tiles[num]
         # Assign the corresponding tile from the original image to the new image
-        new_image[start_y:end_y, start_x:end_x] = image[start_y:end_y, start_x:end_x]
+        new_image[start_y:end_y, start_x:end_x] = image[start_y_orig:end_y_orig, start_x_orig:end_x_orig]
 
     return new_image
 
@@ -1272,7 +1355,11 @@ def adjust_hue_torchvision(img: np.ndarray, factor: float) -> np.ndarray:
 
 @preserve_shape
 def superpixels(
-    image: np.ndarray, n_segments: int, replace_samples: Sequence[bool], max_size: Optional[int], interpolation: int
+    image: np.ndarray,
+    n_segments: int,
+    replace_samples: Sequence[bool],
+    max_size: Optional[int],
+    interpolation: int,
 ) -> np.ndarray:
     if not np.any(replace_samples):
         return image
@@ -1288,7 +1375,10 @@ def superpixels(
             image = resize_fn(image)
 
     segments = skimage.segmentation.slic(
-        image, n_segments=n_segments, compactness=10, channel_axis=-1 if image.ndim > TWO else None
+        image,
+        n_segments=n_segments,
+        compactness=10,
+        channel_axis=-1 if image.ndim > TWO else None,
     )
 
     min_value = 0
@@ -1321,7 +1411,9 @@ def superpixels(
 
     if orig_shape != image.shape:
         resize_fn = _maybe_process_in_chunks(
-            cv2.resize, dsize=(orig_shape[1], orig_shape[0]), interpolation=interpolation
+            cv2.resize,
+            dsize=(orig_shape[1], orig_shape[0]),
+            interpolation=interpolation,
         )
         return resize_fn(image)
 
@@ -1329,14 +1421,20 @@ def superpixels(
 
 
 @clipped
+@preserve_shape
 def add_weighted(img1: np.ndarray, alpha: float, img2: np.ndarray, beta: float) -> np.ndarray:
-    return img1.astype(float) * alpha + img2.astype(float) * beta
+    img2 = img2.reshape(img1.shape).astype(img1.dtype)
+    return cv2.addWeighted(img1, alpha, img2, beta, 0)
 
 
 @clipped
 @preserve_shape
 def unsharp_mask(
-    image: np.ndarray, ksize: int, sigma: float = 0.0, alpha: float = 0.2, threshold: int = 10
+    image: np.ndarray,
+    ksize: int,
+    sigma: float = 0.0,
+    alpha: float = 0.2,
+    threshold: int = 10,
 ) -> np.ndarray:
     blur_fn = _maybe_process_in_chunks(cv2.GaussianBlur, ksize=(ksize, ksize), sigmaX=sigma)
 
@@ -1406,7 +1504,56 @@ def spatter(
     return img * 255
 
 
-def split_uniform_grid(image_shape: Tuple[int, int], grid: Tuple[int, int]) -> np.ndarray:
+def almost_equal_intervals(n: int, parts: int) -> np.ndarray:
+    """Generates an array of nearly equal integer intervals that sum up to `n`.
+
+    This function divides the number `n` into `parts` nearly equal parts. It ensures that
+    the sum of all parts equals `n`, and the difference between any two parts is at most one.
+    This is useful for distributing a total amount into nearly equal discrete parts.
+
+    Args:
+        n (int): The total value to be split.
+        parts (int): The number of parts to split into.
+
+    Returns:
+        np.ndarray: An array of integers where each integer represents the size of a part.
+
+    Example:
+        >>> almost_equal_intervals(20, 3)
+        array([7, 7, 6])  # Splits 20 into three parts: 7, 7, and 6
+        >>> almost_equal_intervals(16, 4)
+        array([4, 4, 4, 4])  # Splits 16 into four equal parts
+    """
+    part_size, remainder = divmod(n, parts)
+    # Create an array with the base part size and adjust the first `remainder` parts by adding 1
+    return np.array([part_size + 1 if i < remainder else part_size for i in range(parts)])
+
+
+def generate_shuffled_splits(
+    size: int,
+    divisions: int,
+    random_state: Optional[np.random.RandomState] = None,
+) -> np.ndarray:
+    """Generate shuffled splits for a given dimension size and number of divisions.
+
+    Args:
+        size (int): Total size of the dimension (height or width).
+        divisions (int): Number of divisions (rows or columns).
+        random_state (Optional[np.random.RandomState]): Seed for the random number generator for reproducibility.
+
+    Returns:
+        np.ndarray: Cumulative edges of the shuffled intervals.
+    """
+    intervals = almost_equal_intervals(size, divisions)
+    intervals = random_utils.shuffle(intervals, random_state=random_state)
+    return np.insert(np.cumsum(intervals), 0, 0)
+
+
+def split_uniform_grid(
+    image_shape: Tuple[int, int],
+    grid: Tuple[int, int],
+    random_state: Optional[np.random.RandomState] = None,
+) -> np.ndarray:
     """Splits an image shape into a uniform grid specified by the grid dimensions.
 
     Args:
@@ -1416,12 +1563,10 @@ def split_uniform_grid(image_shape: Tuple[int, int], grid: Tuple[int, int]) -> n
     Returns:
         np.ndarray: An array containing the tiles' coordinates in the format (start_y, start_x, end_y, end_x).
     """
-    height, width = image_shape
     n_rows, n_cols = grid
 
-    # Compute split points for the grid
-    height_splits = np.linspace(0, height, n_rows + 1, dtype=int)
-    width_splits = np.linspace(0, width, n_cols + 1, dtype=int)
+    height_splits = generate_shuffled_splits(image_shape[0], grid[0], random_state)
+    width_splits = generate_shuffled_splits(image_shape[1], grid[1], random_state)
 
     # Calculate tiles coordinates
     tiles = [
@@ -1431,6 +1576,43 @@ def split_uniform_grid(image_shape: Tuple[int, int], grid: Tuple[int, int]) -> n
     ]
 
     return np.array(tiles)
+
+
+def create_shape_groups(tiles: np.ndarray) -> Dict[Tuple[int, int], List[int]]:
+    """Groups tiles by their shape and stores the indices for each shape."""
+    shape_groups = defaultdict(list)
+    for index, (start_y, start_x, end_y, end_x) in enumerate(tiles):
+        shape = (end_y - start_y, end_x - start_x)
+        shape_groups[shape].append(index)
+    return shape_groups
+
+
+def shuffle_tiles_within_shape_groups(
+    shape_groups: Dict[Tuple[int, int], List[int]],
+    random_state: Optional[np.random.RandomState] = None,
+) -> List[int]:
+    """Shuffles indices within each group of similar shapes and creates a list where each
+    index points to the index of the tile it should be mapped to.
+
+    Args:
+        shape_groups (Dict[Tuple[int, int], List[int]]): Groups of tile indices categorized by shape.
+        random_state (Optional[np.random.RandomState]): Seed for the random number generator for reproducibility.
+
+    Returns:
+        List[int]: A list where each index is mapped to the new index of the tile after shuffling.
+    """
+    # Initialize the output list with the same size as the total number of tiles, filled with -1
+    num_tiles = sum(len(indices) for indices in shape_groups.values())
+    mapping = [-1] * num_tiles
+
+    # Prepare the random number generator
+
+    for indices in shape_groups.values():
+        shuffled_indices = random_utils.shuffle(indices.copy(), random_state=random_state)
+        for old, new in zip(indices, shuffled_indices):
+            mapping[old] = new
+
+    return mapping
 
 
 def chromatic_aberration(

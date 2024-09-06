@@ -1,13 +1,15 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 from .serialization import Serializable
-from .types import BoxOrKeypointType, SizeType
+from .types import BoxOrKeypointType, ScalarType, ScaleType, SizeType
 
 if TYPE_CHECKING:
     import torch
+
+PAIR = 2
 
 
 def get_shape(img: Union["np.ndarray", "torch.Tensor"]) -> SizeType:
@@ -24,7 +26,7 @@ def get_shape(img: Union["np.ndarray", "torch.Tensor"]) -> SizeType:
         pass
 
     raise RuntimeError(
-        f"Albumentations supports only numpy.ndarray and torch.Tensor data type for image. Got: {type(img)}"
+        f"Albumentations supports only numpy.ndarray and torch.Tensor data type for image. Got: {type(img)}",
     )
 
 
@@ -50,14 +52,18 @@ class DataProcessor(ABC):
         self.params = params
         self.data_fields = [self.default_data_name]
         if additional_targets is not None:
-            for k, v in additional_targets.items():
-                if v == self.default_data_name:
-                    self.data_fields.append(k)
+            self.add_targets(additional_targets)
 
     @property
     @abstractmethod
     def default_data_name(self) -> str:
         raise NotImplementedError
+
+    def add_targets(self, additional_targets: Dict[str, str]) -> None:
+        """Add targets to transform them the same way as one of existing targets"""
+        for k, v in additional_targets.items():
+            if v == self.default_data_name and k not in self.data_fields:
+                self.data_fields.append(k)
 
     def ensure_data_valid(self, data: Dict[str, Any]) -> None:
         pass
@@ -82,7 +88,11 @@ class DataProcessor(ABC):
             data[data_name] = self.check_and_convert(data[data_name], rows, cols, direction="to")
 
     def check_and_convert(
-        self, data: List[BoxOrKeypointType], rows: int, cols: int, direction: str = "to"
+        self,
+        data: List[BoxOrKeypointType],
+        rows: int,
+        cols: int,
+        direction: str = "to",
     ) -> List[BoxOrKeypointType]:
         if self.params.format == "albumentations":
             self.check(data, rows, cols)
@@ -109,7 +119,10 @@ class DataProcessor(ABC):
 
     @abstractmethod
     def convert_from_albumentations(
-        self, data: List[BoxOrKeypointType], rows: int, cols: int
+        self,
+        data: List[BoxOrKeypointType],
+        rows: int,
+        cols: int,
     ) -> List[BoxOrKeypointType]:
         pass
 
@@ -137,3 +150,47 @@ class DataProcessor(ABC):
             if label_fields_len:
                 data[data_name] = [d[:-label_fields_len] for d in data[data_name]]
         return data
+
+
+def to_tuple(
+    param: ScaleType,
+    low: Optional[ScaleType] = None,
+    bias: Optional[ScalarType] = None,
+) -> Union[Tuple[int, int], Tuple[float, float]]:
+    """Convert input argument to a min-max tuple.
+
+    Args:
+        param: Input value which could be a scalar or a sequence of exactly 2 scalars.
+        low: Second element of the tuple, provided as an optional argument for when `param` is a scalar.
+        bias: An offset added to both elements of the tuple.
+
+    Returns:
+        A tuple of two scalars, optionally adjusted by `bias`.
+        Raises ValueError for invalid combinations or types of arguments.
+
+    """
+    # Validate mutually exclusive arguments
+    if low is not None and bias is not None:
+        msg = "Arguments 'low' and 'bias' cannot be used together."
+        raise ValueError(msg)
+
+    if isinstance(param, Sequence) and len(param) == PAIR:
+        min_val, max_val = min(param), max(param)
+
+    # Handle scalar input
+    elif isinstance(param, (int, float)):
+        if isinstance(low, (int, float)):
+            # Use low and param to create a tuple
+            min_val, max_val = (low, param) if low < param else (param, low)
+        else:
+            # Create a symmetric tuple around 0
+            min_val, max_val = -param, param
+    else:
+        msg = "Argument 'param' must be either a scalar or a sequence of 2 elements."
+        raise ValueError(msg)
+
+    # Apply bias if provided
+    if bias is not None:
+        return (bias + min_val, bias + max_val)
+
+    return min_val, max_val

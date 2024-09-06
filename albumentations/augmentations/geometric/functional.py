@@ -15,7 +15,7 @@ from albumentations.augmentations.utils import (
     preserve_shape,
 )
 from albumentations.core.bbox_utils import denormalize_bbox, normalize_bbox
-from albumentations.core.types import BoxInternalType, ColorType, ImageColorType, KeypointInternalType
+from albumentations.core.types import BoxInternalType, ColorType, D4Type, KeypointInternalType
 
 __all__ = [
     "optical_distortion",
@@ -28,9 +28,6 @@ __all__ = [
     "rotate",
     "bbox_rotate",
     "keypoint_rotate",
-    "shift_scale_rotate",
-    "keypoint_shift_scale_rotate",
-    "bbox_shift_scale_rotate",
     "elastic_transform",
     "resize",
     "scale",
@@ -68,10 +65,16 @@ __all__ = [
     "normalize_bbox",
     "denormalize_bbox",
     "vflip",
+    "d4",
+    "bbox_d4",
+    "keypoint_d4",
 ]
 
 TWO = 2
 THREE = 3
+
+ROT90_180_FACTOR = 2
+ROT90_270_FACTOR = 3
 
 
 def bbox_rot90(bbox: BoxInternalType, factor: int, rows: int, cols: int) -> BoxInternalType:
@@ -93,16 +96,64 @@ def bbox_rot90(bbox: BoxInternalType, factor: int, rows: int, cols: int) -> BoxI
     x_min, y_min, x_max, y_max = bbox[:4]
     if factor == 1:
         bbox = y_min, 1 - x_max, y_max, 1 - x_min
-    elif factor == TWO:
+    elif factor == ROT90_180_FACTOR:
         bbox = 1 - x_max, 1 - y_max, 1 - x_min, 1 - y_min
-    elif factor == THREE:
+    elif factor == ROT90_270_FACTOR:
         bbox = 1 - y_max, x_min, 1 - y_min, x_max
     return bbox
 
 
+def bbox_d4(bbox: BoxInternalType, group_member: D4Type, rows: int, cols: int) -> BoxInternalType:
+    """Applies a `D_4` symmetry group transformation to a bounding box.
+
+    The function transforms a bounding box according to the specified group member from the `D_4` group.
+    These transformations include rotations and reflections, specified to work on an image's bounding box given
+    its dimensions.
+
+    Parameters:
+    - bbox (BoxInternalType): The bounding box to transform. This should be a structure specifying coordinates
+        like (xmin, ymin, xmax, ymax).
+    - group_member (D4Type): A string identifier for the `D_4` group transformation to apply.
+        Valid values are 'e', 'r90', 'r180', 'r270', 'v', 'hvt', 'h', 't'.
+    - rows (int): The number of rows in the image, used to adjust transformations that depend on image dimensions.
+    - cols (int): The number of columns in the image, used for the same purposes as rows.
+
+    Returns:
+    - BoxInternalType: The transformed bounding box.
+
+    Raises:
+    - ValueError: If an invalid group member is specified.
+
+    Examples:
+    - Applying a 90-degree rotation:
+      `bbox_d4((10, 20, 110, 120), 'r90', 100, 100)`
+      This would rotate the bounding box 90 degrees within a 100x100 image.
+    """
+    transformations = {
+        "e": lambda x: x,  # Identity transformation
+        "r90": lambda x: bbox_rot90(x, 1, rows, cols),  # Rotate 90 degrees
+        "r180": lambda x: bbox_rot90(x, 2, rows, cols),  # Rotate 180 degrees
+        "r270": lambda x: bbox_rot90(x, 3, rows, cols),  # Rotate 270 degrees
+        "v": lambda x: bbox_vflip(x, rows, cols),  # Vertical flip
+        "hvt": lambda x: bbox_transpose(bbox_rot90(x, 2, rows, cols), rows, cols),  # Reflect over anti-diagonal
+        "h": lambda x: bbox_hflip(x, rows, cols),  # Horizontal flip
+        "t": lambda x: bbox_transpose(x, rows, cols),  # Transpose (reflect over main diagonal)
+    }
+
+    # Execute the appropriate transformation
+    if group_member in transformations:
+        return transformations[group_member](bbox)
+
+    raise ValueError(f"Invalid group member: {group_member}")
+
+
 @angle_2pi_range
 def keypoint_rot90(
-    keypoint: KeypointInternalType, factor: int, rows: int, cols: int, **params: Any
+    keypoint: KeypointInternalType,
+    factor: int,
+    rows: int,
+    cols: int,
+    **params: Any,
 ) -> KeypointInternalType:
     """Rotates a keypoint by 90 degrees CCW (see np.rot90)
 
@@ -127,12 +178,63 @@ def keypoint_rot90(
 
     if factor == 1:
         x, y, angle = y, (cols - 1) - x, angle - math.pi / 2
-    elif factor == TWO:
+    elif factor == ROT90_180_FACTOR:
         x, y, angle = (cols - 1) - x, (rows - 1) - y, angle - math.pi
-    elif factor == THREE:
+    elif factor == ROT90_270_FACTOR:
         x, y, angle = (rows - 1) - y, x, angle + math.pi / 2
 
     return x, y, angle, scale
+
+
+def keypoint_d4(
+    keypoint: KeypointInternalType,
+    group_member: D4Type,
+    rows: int,
+    cols: int,
+    **params: Any,
+) -> KeypointInternalType:
+    """Applies a `D_4` symmetry group transformation to a keypoint.
+
+    This function adjusts a keypoint's coordinates according to the specified `D_4` group transformation,
+    which includes rotations and reflections suitable for image processing tasks. These transformations account
+    for the dimensions of the image to ensure the keypoint remains within its boundaries.
+
+    Parameters:
+    - keypoint (KeypointInternalType): The keypoint to transform. T
+        his should be a structure or tuple specifying coordinates
+        like (x, y, [additional parameters]).
+    - group_member (D4Type): A string identifier for the `D_4` group transformation to apply.
+        Valid values are 'e', 'r90', 'r180', 'r270', 'v', 'hv', 'h', 't'.
+    - rows (int): The number of rows in the image.
+    - cols (int): The number of columns in the image.
+    - params (Any): Not used
+
+    Returns:
+    - KeypointInternalType: The transformed keypoint.
+
+    Raises:
+    - ValueError: If an invalid group member is specified, indicating that the specified transformation does not exist.
+
+    Examples:
+    - Rotating a keypoint by 90 degrees in a 100x100 image:
+      `keypoint_d4((50, 30), 'r90', 100, 100)`
+      This would move the keypoint from (50, 30) to (70, 50) assuming standard coordinate transformations.
+    """
+    transformations = {
+        "e": lambda x: x,  # Identity transformation
+        "r90": lambda x: keypoint_rot90(x, 1, rows, cols),  # Rotate 90 degrees
+        "r180": lambda x: keypoint_rot90(x, 2, rows, cols),  # Rotate 180 degrees
+        "r270": lambda x: keypoint_rot90(x, 3, rows, cols),  # Rotate 270 degrees
+        "v": lambda x: keypoint_vflip(x, rows, cols),  # Vertical flip
+        "hvt": lambda x: keypoint_transpose(keypoint_rot90(x, 2, rows, cols), rows, cols),  # Reflect over anti diagonal
+        "h": lambda x: keypoint_hflip(x, rows, cols),  # Horizontal flip
+        "t": lambda x: keypoint_transpose(x, rows, cols),  # Transpose (reflect over main diagonal)
+    }
+    # Execute the appropriate transformation
+    if group_member in transformations:
+        return transformations[group_member](keypoint)
+
+    raise ValueError(f"Invalid group member: {group_member}")
 
 
 @preserve_channel_dim
@@ -141,7 +243,7 @@ def rotate(
     angle: float,
     interpolation: int = cv2.INTER_LINEAR,
     border_mode: int = cv2.BORDER_REFLECT_101,
-    value: Optional[ImageColorType] = None,
+    value: Optional[ColorType] = None,
 ) -> np.ndarray:
     height, width = img.shape[:2]
     # for images we use additional shifts of (0.5, 0.5) as otherwise
@@ -149,7 +251,12 @@ def rotate(
     matrix = cv2.getRotationMatrix2D((width / 2 - 0.5, height / 2 - 0.5), angle, 1.0)
 
     warp_fn = _maybe_process_in_chunks(
-        cv2.warpAffine, M=matrix, dsize=(width, height), flags=interpolation, borderMode=border_mode, borderValue=value
+        cv2.warpAffine,
+        M=matrix,
+        dsize=(width, height),
+        flags=interpolation,
+        borderMode=border_mode,
+        borderValue=value,
     )
     return warp_fn(img)
 
@@ -198,7 +305,11 @@ def bbox_rotate(bbox: BoxInternalType, angle: float, method: str, rows: int, col
 
 @angle_2pi_range
 def keypoint_rotate(
-    keypoint: KeypointInternalType, angle: float, rows: int, cols: int, **params: Any
+    keypoint: KeypointInternalType,
+    angle: float,
+    rows: int,
+    cols: int,
+    **params: Any,
 ) -> KeypointInternalType:
     """Rotate a keypoint by angle.
 
@@ -219,110 +330,6 @@ def keypoint_rotate(
     return x, y, a + math.radians(angle), s
 
 
-@preserve_channel_dim
-def shift_scale_rotate(
-    img: np.ndarray,
-    angle: float,
-    scale: float,
-    dx: int,
-    dy: int,
-    interpolation: int = cv2.INTER_LINEAR,
-    border_mode: int = cv2.BORDER_REFLECT_101,
-    value: Optional[Tuple[int, ...]] = None,
-) -> np.ndarray:
-    height, width = img.shape[:2]
-    # for images we use additional shifts of (0.5, 0.5) as otherwise
-    # we get an ugly black border for 90deg rotations
-    center = (width / 2 - 0.5, height / 2 - 0.5)
-    matrix = cv2.getRotationMatrix2D(center, angle, scale)
-    matrix[0, 2] += dx * width
-    matrix[1, 2] += dy * height
-
-    warp_affine_fn = _maybe_process_in_chunks(
-        cv2.warpAffine, M=matrix, dsize=(width, height), flags=interpolation, borderMode=border_mode, borderValue=value
-    )
-    return warp_affine_fn(img)
-
-
-@angle_2pi_range
-def keypoint_shift_scale_rotate(
-    keypoint: KeypointInternalType, angle: float, scale: float, dx: int, dy: int, rows: int, cols: int, **params: Any
-) -> KeypointInternalType:
-    (
-        x,
-        y,
-        a,
-        s,
-    ) = keypoint[:4]
-    height, width = rows, cols
-    center = (cols - 1) * 0.5, (rows - 1) * 0.5
-    matrix = cv2.getRotationMatrix2D(center, angle, scale)
-    matrix[0, 2] += dx * width
-    matrix[1, 2] += dy * height
-
-    x, y = cv2.transform(np.array([[[x, y]]]), matrix).squeeze()
-    angle = a + math.radians(angle)
-    scale *= s
-
-    return x, y, angle, scale
-
-
-def bbox_shift_scale_rotate(
-    bbox: BoxInternalType,
-    angle: float,
-    scale: float,
-    dx: int,
-    dy: int,
-    rotate_method: str,
-    rows: int,
-    cols: int,
-    **kwargs: Any,
-) -> BoxInternalType:
-    """Rotates, shifts and scales a bounding box. Rotation is made by angle degrees,
-    scaling is made by scale factor and shifting is made by dx and dy.
-
-
-    Args:
-        bbox (tuple): A bounding box `(x_min, y_min, x_max, y_max)`.
-        angle (int): Angle of rotation in degrees.
-        scale (int): Scale factor.
-        dx (int): Shift along x-axis in pixel units.
-        dy (int): Shift along y-axis in pixel units.
-        rotate_method(str): Rotation method used. Should be one of: "largest_box", "ellipse".
-            Default: "largest_box".
-        rows (int): Image rows.
-        cols (int): Image cols.
-
-    Returns:
-        A bounding box `(x_min, y_min, x_max, y_max)`.
-
-    """
-    height, width = rows, cols
-    center = (width / 2, height / 2)
-    if rotate_method == "ellipse":
-        x_min, y_min, x_max, y_max = bbox_rotate(bbox, angle, rotate_method, rows, cols)
-        matrix = cv2.getRotationMatrix2D(center, 0, scale)
-    else:
-        x_min, y_min, x_max, y_max = bbox[:4]
-        matrix = cv2.getRotationMatrix2D(center, angle, scale)
-    matrix[0, 2] += dx * width
-    matrix[1, 2] += dy * height
-    x = np.array([x_min, x_max, x_max, x_min])
-    y = np.array([y_min, y_min, y_max, y_max])
-    ones = np.ones(shape=(len(x)))
-    points_ones = np.vstack([x, y, ones]).transpose()
-    points_ones[:, 0] *= width
-    points_ones[:, 1] *= height
-    tr_points = matrix.dot(points_ones.T).T
-    tr_points[:, 0] /= width
-    tr_points[:, 1] /= height
-
-    x_min, x_max = min(tr_points[:, 0]), max(tr_points[:, 0])
-    y_min, y_max = min(tr_points[:, 1]), max(tr_points[:, 1])
-
-    return x_min, y_min, x_max, y_max
-
-
 @preserve_shape
 def elastic_transform(
     img: np.ndarray,
@@ -331,7 +338,7 @@ def elastic_transform(
     alpha_affine: float,
     interpolation: int = cv2.INTER_LINEAR,
     border_mode: int = cv2.BORDER_REFLECT_101,
-    value: Optional[ImageColorType] = None,
+    value: Optional[ColorType] = None,
     random_state: Optional[np.random.RandomState] = None,
     approximate: bool = False,
     same_dxdy: bool = False,
@@ -362,12 +369,17 @@ def elastic_transform(
         dtype=np.float32,
     )
     pts2 = pts1 + random_utils.uniform(-alpha_affine, alpha_affine, size=pts1.shape, random_state=random_state).astype(
-        np.float32
+        np.float32,
     )
     matrix = cv2.getAffineTransform(pts1, pts2)
 
     warp_fn = _maybe_process_in_chunks(
-        cv2.warpAffine, M=matrix, dsize=(width, height), flags=interpolation, borderMode=border_mode, borderValue=value
+        cv2.warpAffine,
+        M=matrix,
+        dsize=(width, height),
+        flags=interpolation,
+        borderMode=border_mode,
+        borderValue=value,
     )
     img = warp_fn(img)
 
@@ -386,14 +398,14 @@ def elastic_transform(
             dy *= alpha
     else:
         dx = np.float32(
-            gaussian_filter((random_utils.rand(height, width, random_state=random_state) * 2 - 1), sigma) * alpha
+            gaussian_filter((random_utils.rand(height, width, random_state=random_state) * 2 - 1), sigma) * alpha,
         )
         if same_dxdy:
             # Speed up
             dy = dx
         else:
             dy = np.float32(
-                gaussian_filter((random_utils.rand(height, width, random_state=random_state) * 2 - 1), sigma) * alpha
+                gaussian_filter((random_utils.rand(height, width, random_state=random_state) * 2 - 1), sigma) * alpha,
             )
 
     x, y = np.meshgrid(np.arange(width), np.arange(height))
@@ -402,7 +414,12 @@ def elastic_transform(
     map_y = np.float32(y + dy)
 
     remap_fn = _maybe_process_in_chunks(
-        cv2.remap, map1=map_x, map2=map_y, interpolation=interpolation, borderMode=border_mode, borderValue=value
+        cv2.remap,
+        map1=map_x,
+        map2=map_y,
+        interpolation=interpolation,
+        borderMode=border_mode,
+        borderValue=value,
     )
     return remap_fn(img)
 
@@ -574,7 +591,12 @@ def warp_affine(
 
     dsize = int(np.round(output_shape[1])), int(np.round(output_shape[0]))
     warp_fn = _maybe_process_in_chunks(
-        cv2.warpAffine, M=matrix.params[:2], dsize=dsize, flags=interpolation, borderMode=mode, borderValue=cval
+        cv2.warpAffine,
+        M=matrix.params[:2],
+        dsize=dsize,
+        flags=interpolation,
+        borderMode=mode,
+        borderValue=cval,
     )
     return warp_fn(image)
 
@@ -613,7 +635,7 @@ def bbox_affine(
                 [x_max, y_min],
                 [x_max, y_max],
                 [x_min, y_max],
-            ]
+            ],
         )
     elif rotate_method == "ellipse":
         w = (x_max - x_min) / 2
@@ -661,7 +683,7 @@ def bbox_safe_rotate(bbox: BoxInternalType, matrix: np.ndarray, cols: int, rows:
             [x2, y1, 1],
             [x2, y2, 1],
             [x1, y2, 1],
-        ]
+        ],
     )
     points = points @ matrix.T
     x1 = points[:, 0].min()
@@ -716,12 +738,21 @@ def piecewise_affine(
     if matrix is None:
         return img
     return skimage.transform.warp(
-        img, matrix, order=interpolation, mode=mode, cval=cval, preserve_range=True, output_shape=img.shape
+        img,
+        matrix,
+        order=interpolation,
+        mode=mode,
+        cval=cval,
+        preserve_range=True,
+        output_shape=img.shape,
     )
 
 
 def to_distance_maps(
-    keypoints: Sequence[Tuple[float, float]], height: int, width: int, inverted: bool = False
+    keypoints: Sequence[Tuple[float, float]],
+    height: int,
+    width: int,
+    inverted: bool = False,
 ) -> np.ndarray:
     """Generate a ``(H,W,N)`` array of distance maps for ``N`` keypoints.
 
@@ -784,7 +815,10 @@ def validate_if_not_found_coords(
 
 
 def find_keypoint(
-    position: Tuple[int, int], distance_map: np.ndarray, threshold: Optional[float], inverted: bool
+    position: Tuple[int, int],
+    distance_map: np.ndarray,
+    threshold: Optional[float],
+    inverted: bool,
 ) -> Optional[Tuple[float, float]]:
     """Determine if a valid keypoint can be found at the given position."""
     y, x = position
@@ -882,12 +916,76 @@ def hflip_cv2(img: np.ndarray) -> np.ndarray:
 
 
 @preserve_shape
+def d4(img: np.ndarray, group_member: D4Type) -> np.ndarray:
+    """Applies a `D_4` symmetry group transformation to an image array.
+
+    This function manipulates an image using transformations such as rotations and flips,
+    corresponding to the `D_4` dihedral group symmetry operations.
+    Each transformation is identified by a unique group member code.
+
+    Parameters:
+    - img (np.ndarray): The input image array to transform.
+    - group_member (D4Type): A string identifier indicating the specific transformation to apply. Valid codes include:
+      - 'e': Identity (no transformation).
+      - 'r90': Rotate 90 degrees counterclockwise.
+      - 'r180': Rotate 180 degrees.
+      - 'r270': Rotate 270 degrees counterclockwise.
+      - 'v': Vertical flip.
+      - 'hvt': Transpose over second diagonal
+      - 'h': Horizontal flip.
+      - 't': Transpose (reflect over the main diagonal).
+
+    Returns:
+    - np.ndarray: The transformed image array.
+
+    Raises:
+    - ValueError: If an invalid group member is specified.
+
+    Examples:
+    - Rotating an image by 90 degrees:
+      `transformed_image = d4(original_image, 'r90')`
+    - Applying a horizontal flip to an image:
+      `transformed_image = d4(original_image, 'h')`
+    """
+    transformations = {
+        "e": lambda x: x,  # Identity transformation
+        "r90": lambda x: rot90(x, 1),  # Rotate 90 degrees
+        "r180": lambda x: rot90(x, 2),  # Rotate 180 degrees
+        "r270": lambda x: rot90(x, 3),  # Rotate 270 degrees
+        "v": vflip,  # Vertical flip
+        "hvt": lambda x: transpose(rot90(x, 2)),  # Reflect over anti-diagonal
+        "h": hflip,  # Horizontal flip
+        "t": transpose,  # Transpose (reflect over main diagonal)
+    }
+
+    # Execute the appropriate transformation
+    if group_member in transformations:
+        return np.ascontiguousarray(transformations[group_member](img))
+
+    raise ValueError(f"Invalid group member: {group_member}")
+
+
+@preserve_shape
 def random_flip(img: np.ndarray, code: int) -> np.ndarray:
     return cv2.flip(img, code)
 
 
 def transpose(img: np.ndarray) -> np.ndarray:
-    return img.transpose(1, 0, 2) if len(img.shape) > TWO else img.transpose(1, 0)
+    """Transposes the first two dimensions of an array of any dimensionality.
+    Retains the order of any additional dimensions.
+
+    Args:
+        img (np.ndarray): Input array.
+
+    Returns:
+        np.ndarray: Transposed array.
+    """
+    # Generate the new axes order
+    new_axes = list(range(img.ndim))
+    new_axes[0], new_axes[1] = 1, 0  # Swap the first two dimensions
+
+    # Transpose the array using the new axes order
+    return img.transpose(new_axes)
 
 
 def rot90(img: np.ndarray, factor: int) -> np.ndarray:
@@ -955,12 +1053,11 @@ def bbox_flip(bbox: BoxInternalType, d: int, rows: int, cols: int) -> BoxInterna
     return bbox
 
 
-def bbox_transpose(bbox: KeypointInternalType, axis: int, rows: int, cols: int) -> KeypointInternalType:
+def bbox_transpose(bbox: KeypointInternalType, rows: int, cols: int) -> KeypointInternalType:
     """Transposes a bounding box along given axis.
 
     Args:
         bbox: A bounding box `(x_min, y_min, x_max, y_max)`.
-        axis: 0 - main axis, 1 - secondary axis.
         rows: Image rows.
         cols: Image cols.
 
@@ -972,14 +1069,7 @@ def bbox_transpose(bbox: KeypointInternalType, axis: int, rows: int, cols: int) 
 
     """
     x_min, y_min, x_max, y_max = bbox[:4]
-    if axis not in {0, 1}:
-        msg = "Axis must be either 0 or 1."
-        raise ValueError(msg)
-    if axis == 0:
-        bbox = (y_min, x_min, y_max, x_max)
-    if axis == 1:
-        bbox = (1 - y_max, 1 - x_max, 1 - y_min, 1 - x_min)
-    return bbox
+    return (y_min, x_min, y_max, x_max)
 
 
 @angle_2pi_range
@@ -1018,6 +1108,7 @@ def keypoint_hflip(keypoint: KeypointInternalType, rows: int, cols: int) -> Keyp
     return (cols - 1) - x, y, angle, scale
 
 
+@angle_2pi_range
 def keypoint_flip(keypoint: KeypointInternalType, d: int, rows: int, cols: int) -> KeypointInternalType:
     """Flip a keypoint either vertically, horizontally or both depending on the value of `d`.
 
@@ -1049,21 +1140,30 @@ def keypoint_flip(keypoint: KeypointInternalType, d: int, rows: int, cols: int) 
     return keypoint
 
 
-def keypoint_transpose(keypoint: KeypointInternalType) -> KeypointInternalType:
-    """Rotate a keypoint by angle.
+@angle_2pi_range
+def keypoint_transpose(keypoint: KeypointInternalType, rows: int, cols: int) -> KeypointInternalType:
+    """Transposes a keypoint along a specified axis: main diagonal (0) or secondary diagonal (1).
 
     Args:
         keypoint: A keypoint `(x, y, angle, scale)`.
+        rows: Total number of rows (height) in the image.
+        cols: Total number of columns (width) in the image.
 
     Returns:
-        A keypoint `(x, y, angle, scale)`.
+        A transformed keypoint `(x, y, angle, scale)`.
+
+    Raises:
+        ValueError: If axis is not 0 or 1.
 
     """
     x, y, angle, scale = keypoint[:4]
 
-    angle = np.pi - angle if angle <= np.pi else 3 * np.pi - angle
+    # Transpose over the main diagonal: swap x and y.
+    new_x, new_y = y, x
+    # Adjust angle to reflect the coordinate swap.
+    angle = np.pi / 2 - angle if angle <= np.pi else 3 * np.pi / 2 - angle
 
-    return y, x, angle, scale
+    return new_x, new_y, angle, scale
 
 
 @preserve_channel_dim
@@ -1072,7 +1172,7 @@ def pad(
     min_height: int,
     min_width: int,
     border_mode: int = cv2.BORDER_REFLECT_101,
-    value: Optional[ImageColorType] = None,
+    value: Optional[ColorType] = None,
 ) -> np.ndarray:
     height, width = img.shape[:2]
 
@@ -1094,7 +1194,7 @@ def pad(
 
     if img.shape[:2] != (max(min_height, height), max(min_width, width)):
         raise RuntimeError(
-            f"Invalid result shape. Got: {img.shape[:2]}. Expected: {(max(min_height, height), max(min_width, width))}"
+            f"Invalid result shape. Got: {img.shape[:2]}. Expected: {(max(min_height, height), max(min_width, width))}",
         )
 
     return img
@@ -1108,7 +1208,7 @@ def pad_with_params(
     w_pad_left: int,
     w_pad_right: int,
     border_mode: int = cv2.BORDER_REFLECT_101,
-    value: Optional[ImageColorType] = None,
+    value: Optional[ColorType] = None,
 ) -> np.ndarray:
     pad_fn = _maybe_process_in_chunks(
         cv2.copyMakeBorder,
@@ -1130,7 +1230,7 @@ def optical_distortion(
     dy: int = 0,
     interpolation: int = cv2.INTER_LINEAR,
     border_mode: int = cv2.BORDER_REFLECT_101,
-    value: Optional[ImageColorType] = None,
+    value: Optional[ColorType] = None,
 ) -> np.ndarray:
     """Barrel / pincushion distortion. Unconventional augment.
 
@@ -1163,7 +1263,7 @@ def grid_distortion(
     ysteps: Tuple[()] = (),
     interpolation: int = cv2.INTER_LINEAR,
     border_mode: int = cv2.BORDER_REFLECT_101,
-    value: Optional[ImageColorType] = None,
+    value: Optional[ColorType] = None,
 ) -> np.ndarray:
     """Perform a grid distortion of an input image.
 
@@ -1227,7 +1327,7 @@ def elastic_transform_approx(
     alpha_affine: float,
     interpolation: int = cv2.INTER_LINEAR,
     border_mode: int = cv2.BORDER_REFLECT_101,
-    value: Optional[ImageColorType] = None,
+    value: Optional[ColorType] = None,
     random_state: Optional[np.random.RandomState] = None,
 ) -> np.ndarray:
     """Elastic deformation of images as described in [Simard2003]_ (with modifications for speed).
@@ -1256,7 +1356,7 @@ def elastic_transform_approx(
         dtype=np.float32,
     )
     pts2 = pts1 + random_utils.uniform(-alpha_affine, alpha_affine, size=pts1.shape, random_state=random_state).astype(
-        np.float32
+        np.float32,
     )
     matrix = cv2.getAffineTransform(pts1, pts2)
 

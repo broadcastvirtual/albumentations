@@ -1,8 +1,10 @@
 import random
 from functools import partial
+from typing import Optional, Tuple, Type
 
 import cv2
 import numpy as np
+
 import pytest
 import warnings
 from torchvision import transforms as torch_transforms
@@ -45,24 +47,6 @@ def test_rotate_crop_border():
     expected_size = int(np.round(100 / np.sqrt(2)))
     assert aug_img.shape[0] == expected_size
     assert (aug_img == border_value).sum() == 0
-
-
-@pytest.mark.parametrize("interpolation", [cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_CUBIC])
-def test_shift_scale_rotate_interpolation(interpolation):
-    image = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
-    mask = np.random.randint(low=0, high=2, size=(100, 100), dtype=np.uint8)
-    aug = A.ShiftScaleRotate(
-        shift_limit=(0.2, 0.2), scale_limit=(1.1, 1.1), rotate_limit=(45, 45), interpolation=interpolation, p=1
-    )
-    data = aug(image=image, mask=mask)
-    expected_image = FGeometric.shift_scale_rotate(
-        image, angle=45, scale=2.1, dx=0.2, dy=0.2, interpolation=interpolation, border_mode=cv2.BORDER_REFLECT_101
-    )
-    expected_mask = FGeometric.shift_scale_rotate(
-        mask, angle=45, scale=2.1, dx=0.2, dy=0.2, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_REFLECT_101
-    )
-    assert np.array_equal(data["image"], expected_image)
-    assert np.array_equal(data["mask"], expected_mask)
 
 
 @pytest.mark.parametrize("interpolation", [cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_CUBIC])
@@ -162,6 +146,7 @@ def test_elastic_transform_interpolation(monkeypatch, interpolation):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
+            A.D4: {},
         },
         except_augmentations={A.RandomCropNearBBox, A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop, A.PixelDropout,
                               A.MixUp},
@@ -328,6 +313,15 @@ def test_additional_targets_for_image_only(augmentation_cls, params):
         aug2 = res["image2"]
         assert np.array_equal(aug1, aug2)
 
+    aug = A.Compose([augmentation_cls(always_apply=True, **params)])
+    aug.add_targets(additional_targets={"image2": "image"})
+    for _i in range(10):
+        image1 = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
+        image2 = image1.copy()
+        res = aug(image=image1, image2=image2)
+        aug1 = res["image"]
+        aug2 = res["image2"]
+        assert np.array_equal(aug1, aug2)
 
 def test_image_invert():
     for _ in range(10):
@@ -546,7 +540,7 @@ def test_resize_keypoints():
 )
 def test_multiplicative_noise_grayscale(image):
     m = 0.5
-    aug = A.MultiplicativeNoise(m, p=1)
+    aug = A.MultiplicativeNoise((m, m), p=1)
     result = aug(image=image)["image"]
     image = F.clip(image * m, image.dtype, F.MAX_VALUES_BY_DTYPE[image.dtype])
     assert np.allclose(image, result)
@@ -569,7 +563,7 @@ def test_multiplicative_noise_rgb(image):
     dtype = image.dtype
 
     m = 0.5
-    aug = A.MultiplicativeNoise(m, p=1)
+    aug = A.MultiplicativeNoise((m, m), p=1)
     result = aug(image=image)["image"]
     image = F.clip(image * m, dtype, F.MAX_VALUES_BY_DTYPE[dtype])
     assert np.allclose(image, result)
@@ -660,7 +654,7 @@ def test_grid_dropout_mask(image):
         (0.00001, 10, 10, 100, 100, 50, 50),
         (0.9, 100, None, 200, None, 0, 0),
         (0.4556, 10, 20, None, 200, 0, 0),
-        (0.00004, None, None, 2, 100, None, None),
+        (0.00004, None, None, 2, 100, 0, 0),
     ],
 )
 def test_grid_dropout_params(ratio, holes_number_x, holes_number_y, unit_size_min, unit_size_max, shift_x, shift_y):
@@ -700,13 +694,6 @@ def test_grid_dropout_params(ratio, holes_number_x, holes_number_y, unit_size_mi
     elif holes_number_x and holes_number_y:
         assert (holes[0][2] - holes[0][0]) == max(1, int(ratio * 320 // holes_number_x))
         assert (holes[0][3] - holes[0][1]) == max(1, int(ratio * 256 // holes_number_y))
-
-
-def test_gauss_noise_incorrect_var_limit_type():
-    with pytest.raises(TypeError) as exc_info:
-        A.GaussNoise(var_limit={"low": 70, "high": 90})
-    message = "Expected var_limit type to be one of (int, float, tuple, list), got <class 'dict'>"
-    assert str(exc_info.value) == message
 
 
 @pytest.mark.parametrize(
@@ -858,19 +845,6 @@ def test_hue_saturation_value_float_uint8_equal(hue, sat, val):
             assert _max <= 10, f"Max value: {_max}"
 
 
-def test_shift_scale_separate_shift_x_shift_y(image, mask):
-    aug = A.ShiftScaleRotate(shift_limit=(0.3, 0.3), shift_limit_y=(0.4, 0.4), scale_limit=0, rotate_limit=0, p=1)
-    data = aug(image=image, mask=mask)
-    expected_image = FGeometric.shift_scale_rotate(
-        image, angle=0, scale=1, dx=0.3, dy=0.4, interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_REFLECT_101
-    )
-    expected_mask = FGeometric.shift_scale_rotate(
-        mask, angle=0, scale=1, dx=0.3, dy=0.4, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_REFLECT_101
-    )
-    assert np.array_equal(data["image"], expected_image)
-    assert np.array_equal(data["mask"], expected_mask)
-
-
 @pytest.mark.parametrize(["val_uint8"], [[0], [1], [128], [255]])
 def test_glass_blur_float_uint8_diff_less_than_two(val_uint8):
     x_uint8 = np.zeros((5, 5)).astype(np.uint8)
@@ -950,8 +924,8 @@ def test_smallest_max_size_list():
 @pytest.mark.parametrize(
     ["img_weight", "template_weight", "template_transform", "image_size", "template_size"],
     [
-        (0.5, 0.5, A.RandomSizedCrop((50, 200), 513, 450, always_apply=True), (513, 450), (224, 224)),
-        (0.3, 0.5, A.RandomResizedCrop(513, 450, always_apply=True), (513, 450), (224, 224)),
+        (0.5, 0.5, A.RandomSizedCrop((50, 200), size=(513, 450), always_apply=True), (513, 450), (224, 224)),
+        (0.3, 0.5, A.RandomResizedCrop(size=(513, 450), always_apply=True), (513, 450), (224, 224)),
         (1.0, 0.5, A.CenterCrop(500, 450, always_apply=True), (500, 450, 3), (512, 512, 3)),
         (0.5, 0.8, A.Resize(513, 450, always_apply=True), (513, 450), (512, 512)),
         (0.5, 0.2, A.NoOp(), (224, 224), (224, 224)),
@@ -961,13 +935,13 @@ def test_smallest_max_size_list():
         (
             0.5,
             0.5,
-            A.Compose([A.Blur(), A.RandomSizedCrop((50, 200), 512, 512, always_apply=True), A.HorizontalFlip()]),
+            A.Compose([A.Blur(always_apply=True), A.RandomSizedCrop((50, 200), size=(512, 512), always_apply=True), A.HorizontalFlip(always_apply=True)]),
             (512, 512),
             (512, 512),
         ),
     ],
 )
-def test_template_transform(image, img_weight, template_weight, template_transform, image_size, template_size):
+def test_template_transform(img_weight, template_weight, template_transform, image_size, template_size):
     img = np.random.randint(0, 256, image_size, np.uint8)
     template = np.random.randint(0, 256, template_size, np.uint8)
 
@@ -1310,52 +1284,6 @@ def test_non_rgb_transform_warning(augmentation, img_channels):
     message = "This transformation expects 3-channel images"
     assert str(exc_info.value).startswith(message)
 
-
-def test_spatter_incorrect_mode(image):
-    unsupported_mode = "unsupported"
-    with pytest.raises(ValueError) as exc_info:
-        A.Spatter(mode=unsupported_mode)
-
-    message = f"Unsupported color mode: {unsupported_mode}. Transform supports only `rain` and `mud` mods."
-    assert str(exc_info.value).startswith(message)
-
-
-def test_chromatic_aberration_incorrect_mode(image):
-    unsupported_mode = "unsupported"
-    with pytest.raises(ValueError) as exc_info:
-        A.ChromaticAberration(mode=unsupported_mode)
-
-    message = f"Unsupported mode: {unsupported_mode}. Supported modes are 'green_purple', 'red_blue', 'random'."
-    assert str(exc_info.value).startswith(message)
-
-
-@pytest.mark.parametrize(
-    "unsupported_color,mode,message",
-    [
-        ([255, 255], "rain", "Unsupported color: [255, 255]. Color should be presented in RGB format."),
-        (
-            {"rain": [255, 255, 255]},
-            "mud",
-            "Wrong color definition: {'rain': [255, 255, 255]}. Color for mode: mud not specified.",
-        ),
-        (
-            {"rain": [255, 255]},
-            "rain",
-            "Unsupported color: [255, 255] for mode rain. Color should be presented in RGB format.",
-        ),
-        (
-            [255, 255, 255],
-            ["rain", "mud"],
-            "Unsupported color: [255, 255, 255]. Please specify color for each mode (use dict for it).",
-        ),
-    ],
-)
-def test_spatter_incorrect_color(unsupported_color, mode, message):
-    with pytest.raises(ValueError) as exc_info:
-        A.Spatter(mode=mode, color=unsupported_color)
-
-    assert str(exc_info.value).startswith(message)
-
 @pytest.mark.parametrize("height, width", [(100, 200), (200, 100)])
 @pytest.mark.parametrize("scale", [(0.08, 1.0), (0.5, 1.0)])
 @pytest.mark.parametrize("ratio", [(0.75, 1.33), (1.0, 1.0)])
@@ -1398,13 +1326,13 @@ def test_random_crop_interfaces_vs_torchvision(height, width, scale, ratio):
 @pytest.mark.parametrize("size, width, height, expected_warning", [
     ((100, 200), None, None, None),
     (None, 200, 100, DeprecationWarning),
-    (100, None, None, ValueError),
+    (100, None, None, TypeError),
 ])
 def test_deprecation_warnings(size, width, height, expected_warning):
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        if expected_warning == ValueError:
-            with pytest.raises(ValueError):
+        if expected_warning == TypeError:
+            with pytest.raises(TypeError):
                 A.RandomResizedCrop(size=size, width=width, height=height)
         else:
             A.RandomResizedCrop(size=size, width=width, height=height)
@@ -1414,3 +1342,58 @@ def test_deprecation_warnings(size, width, height, expected_warning):
         else:
             assert not w
     warnings.resetwarnings()
+
+
+@pytest.mark.parametrize("num_shadows_limit, num_shadows_lower, num_shadows_upper, expected_warning", [
+    ((1, 2), None, None, None),
+    ((2, 3), None, None, None),
+    ((1, 2), 1, None, DeprecationWarning),
+    ((1, 2), None, 2, DeprecationWarning),
+    ((1, 2), 1, 2, DeprecationWarning),
+    ((2, 1), None, None, ValueError),
+])
+def test_deprecation_warnings_random_shadow(
+    num_shadows_limit: Tuple[int, int],
+    num_shadows_lower: Optional[int],
+    num_shadows_upper: Optional[int],
+    expected_warning: Optional[Type[Warning]],
+) -> None:
+    """
+    Test deprecation warnings for RandomShadow
+    """
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        if expected_warning == ValueError:
+            with pytest.raises(ValueError):
+                A.RandomShadow(num_shadows_limit=num_shadows_limit, num_shadows_lower=num_shadows_lower,
+                               num_shadows_upper=num_shadows_upper, p=1)
+        else:
+            A.RandomShadow(num_shadows_limit=num_shadows_limit, num_shadows_lower=num_shadows_lower,
+                           num_shadows_upper=num_shadows_upper, p=1)
+        if expected_warning is DeprecationWarning:
+            assert len(w) == 1
+            assert issubclass(w[-1].category, expected_warning)
+        else:
+            assert not w
+    warnings.resetwarnings()
+
+
+@pytest.mark.parametrize("grid", [
+    (2, 2), (3, 3), (4, 4), (5, 7)
+])
+def test_grid_shuffle(image, mask, grid):
+    set_seed(4)
+    aug = A.Compose([A.RandomGridShuffle(grid=grid, p=1)])
+
+    res = aug(image=image, mask=mask)
+    assert res["image"].shape == image.shape
+    assert res["mask"].shape == mask.shape
+
+    assert not np.array_equal(res["image"], image)
+    assert not np.array_equal(res["mask"], mask)
+
+    assert np.array_equal(res["image"].mean(axis=(0, 1)), image.mean(axis=(0, 1)))
+    assert np.array_equal(res["image"].sum(axis=(0, 1)), image.sum(axis=(0, 1)))
+
+    assert np.array_equal(res["mask"].mean(axis=(0, 1)), mask.mean(axis=(0, 1)))
+    assert np.array_equal(res["mask"].sum(axis=(0, 1)), mask.sum(axis=(0, 1)))

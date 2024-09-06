@@ -154,7 +154,7 @@ def test_compose_with_keypoint_noop_label_outside(keypoints, keypoint_format, la
 def test_random_sized_crop_size():
     image = np.ones((100, 100, 3))
     keypoints = [(0.2, 0.3, 0.6, 0.8), (0.3, 0.4, 0.7, 0.9, 99)]
-    aug = A.RandomSizedCrop(min_max_height=(70, 90), height=50, width=50, p=1.0)
+    aug = A.RandomSizedCrop(min_max_height=(70, 90), size=(50, 50), p=1.0)
     transformed = aug(image=image, keypoints=keypoints)
     assert transformed["image"].shape == (50, 50, 3)
     assert len(keypoints) == len(transformed["keypoints"])
@@ -163,7 +163,7 @@ def test_random_sized_crop_size():
 def test_random_resized_crop_size():
     image = np.ones((100, 100, 3))
     keypoints = [(0.2, 0.3, 0.6, 0.8), (0.3, 0.4, 0.7, 0.9, 99)]
-    aug = A.RandomResizedCrop(height=50, width=50, p=1.0)
+    aug = A.RandomResizedCrop(size=(50, 50), p=1.0)
     transformed = aug(image=image, keypoints=keypoints)
     assert transformed["image"].shape == (50, 50, 3)
     assert len(keypoints) == len(transformed["keypoints"])
@@ -259,24 +259,21 @@ def test_keypoint_scale(keypoint, expected, scale):
     np.testing.assert_allclose(actual, expected, atol=1e-7)
 
 
-@pytest.mark.parametrize(
-    ["keypoint", "expected", "angle", "scale", "dx", "dy"],
-    [[[50, 50, 0, 5], [120, 158, math.pi / 2, 10], 90, 2, 0.1, 0.1]],
-)
-def test_keypoint_shift_scale_rotate(keypoint, expected, angle, scale, dx, dy):
-    actual = FGeometric.keypoint_shift_scale_rotate(keypoint, angle, scale, dx, dy, rows=100, cols=200)
-    np.testing.assert_allclose(actual, expected, rtol=1e-4)
-
-
 def test_compose_with_additional_targets():
     image = np.ones((100, 100, 3))
     keypoints = [(10, 10), (50, 50)]
     kp1 = [(15, 15), (55, 55)]
+
     aug = A.Compose([A.CenterCrop(50, 50)], keypoint_params={"format": "xy"}, additional_targets={"kp1": "keypoints"})
     transformed = aug(image=image, keypoints=keypoints, kp1=kp1)
     assert transformed["keypoints"] == [(25, 25)]
     assert transformed["kp1"] == [(30, 30)]
 
+    aug = A.Compose([A.CenterCrop(50, 50)], keypoint_params={"format": "xy"})
+    aug.add_targets( additional_targets={"kp1": "keypoints"})
+    transformed = aug(image=image, keypoints=keypoints, kp1=kp1)
+    assert transformed["keypoints"] == [(25, 25)]
+    assert transformed["kp1"] == [(30, 30)]
 
 @pytest.mark.parametrize(
     ["angle", "expected"],

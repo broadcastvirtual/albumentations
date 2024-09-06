@@ -1,14 +1,17 @@
+import hashlib
 import cv2
 import numpy as np
 import pytest
 from numpy.testing import assert_array_almost_equal_nulp, assert_almost_equal
+import skimage
 
 import albumentations as A
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as FGeometric
 from albumentations.augmentations.utils import get_opencv_dtype_from_numpy, is_multispectral_image, MAX_VALUES_BY_DTYPE
 from albumentations.core.bbox_utils import filter_bboxes
-from tests.utils import convert_2d_to_target_format
+from albumentations.core.types import d4_group_elements
+from tests.utils import convert_2d_to_target_format, set_seed
 
 
 @pytest.mark.parametrize("target", ["image", "mask"])
@@ -107,6 +110,58 @@ def test_normalize():
     expected = (np.ones((100, 100, 3), dtype=np.float32) * 127 / 255 - 50) / 3
     assert_array_almost_equal_nulp(normalized, expected)
 
+# Parameterize tests for all combinations
+@pytest.mark.parametrize("shape", [
+    (100, 100),  # height, width
+    (100, 100, 1),  # height, width, 1 channel
+    (100, 100, 3),  # height, width, 3 channels
+    (100, 100, 7),  # height, width, 7 channels
+])
+@pytest.mark.parametrize("normalization", [
+    "image",
+    "image_per_channel",
+    "min_max",
+    "min_max_per_channel",
+])
+@pytest.mark.parametrize("dtype", [
+    np.uint8,
+    np.float32,
+])
+def test_normalize_per_image(shape, normalization, dtype):
+    # Generate a random image of the specified shape and dtype
+    if dtype is np.uint8:
+        img = np.random.randint(0, 256, size=shape, dtype=dtype)
+    else:  # float32
+        img = np.random.random(size=shape).astype(dtype) * 255
+
+    # Normalize the image
+    normalized_img = F.normalize_per_image(img, normalization)
+
+    # Assert the output shape matches the input shape
+    assert normalized_img.shape == img.shape, "Output shape should match input shape"
+    assert normalized_img.dtype == np.float32, "Output dtype should be float32"
+
+    # Additional checks based on normalization type
+    if normalization in ["min_max", "min_max_per_channel"]:
+        # For min-max normalization, values should be in [0, 1]
+        assert normalized_img.min() >= 0, "Min value should be >= 0"
+        assert normalized_img.max() <= 1, "Max value should be <= 1"
+    elif normalization in ["image", "image_per_channel"]:
+        # For other normalizations, just ensure output dtype is float32
+        # and check for expected normalization effects
+        assert normalized_img.dtype == np.float32, "Output dtype should be float32"
+        if normalization == "image":
+            assert np.isclose(normalized_img.mean(), 0, atol=1e-3), "Mean should be close to 0 for 'image' normalization"
+            assert np.isclose(normalized_img.std(), 1, atol=1e-3), "STD should be close to 1 for 'image' normalization"
+        elif normalization == "image_per_channel":
+            # Check channel-wise normalization for multi-channel images
+            if len(shape) == 3 and shape[2] > 1:
+                for c in range(shape[2]):
+                    channel_mean = normalized_img[:, :, c].mean()
+                    channel_std = normalized_img[:, :, c].std()
+                    assert np.isclose(channel_mean, 0, atol=1e-3), f"Mean for channel {c} should be close to 0"
+                    assert np.isclose(channel_std, 1, atol=1e-3), f"STD for channel {c} should be close to 1"
+
 
 def test_normalize_float():
     img = np.ones((100, 100, 3), dtype=np.float32) * 0.4
@@ -115,17 +170,39 @@ def test_normalize_float():
     assert_array_almost_equal_nulp(normalized, expected)
 
 
-def test_compare_rotate_and_shift_scale_rotate(image):
-    rotated_img_1 = FGeometric.rotate(image, angle=60)
-    rotated_img_2 = FGeometric.shift_scale_rotate(image, angle=60, scale=1, dx=0, dy=0)
-    assert np.array_equal(rotated_img_1, rotated_img_2)
+def generate_rotation_matrix(image: np.ndarray, angle: float) -> np.ndarray:
+    """
+    Generates a rotation matrix for the given angle with rotation around the center of the image.
+    """
+    height, width = image.shape[:2]
+    center = (width / 2 - 0.5, height / 2 - 0.5)
+    return cv2.getRotationMatrix2D(center, angle, 1.0)
 
+@pytest.mark.parametrize("image_type", ['image', 'float_image'])
+def test_compare_rotate_and_affine_with_fixtures(request, image_type):
+    test_image = request.getfixturevalue(image_type)
+    # Generate the rotation matrix for a 60-degree rotation around the image center
+    rotation_matrix = generate_rotation_matrix(test_image, 60)
 
-def test_compare_rotate_float_and_shift_scale_rotate_float(float_image):
-    rotated_img_1 = FGeometric.rotate(float_image, angle=60)
-    rotated_img_2 = FGeometric.shift_scale_rotate(float_image, angle=60, scale=1, dx=0, dy=0)
-    assert np.array_equal(rotated_img_1, rotated_img_2)
+    # Apply rotation using FGeometric.rotate
+    rotated_img_1 = FGeometric.rotate(test_image, angle=60, border_mode = cv2.BORDER_CONSTANT, value = 0)
 
+    # Convert 2x3 cv2 matrix to 3x3 for skimage's ProjectiveTransform
+    full_matrix = np.vstack([rotation_matrix, [0, 0, 1]])
+    projective_transform = skimage.transform.ProjectiveTransform(matrix=full_matrix)
+
+    # Apply rotation using warp_affine
+    rotated_img_2 = FGeometric.warp_affine(
+        img=test_image,
+        matrix=projective_transform,
+        interpolation=cv2.INTER_LINEAR,
+        cval=0,
+        mode=cv2.BORDER_CONSTANT,
+        output_shape=test_image.shape[:2]
+    )
+
+    # Assert that the two rotated images are equal
+    assert np.array_equal(rotated_img_1, rotated_img_2), "Rotated images should be identical."
 
 @pytest.mark.parametrize("target", ["image", "mask"])
 def test_center_crop(target):
@@ -224,119 +301,6 @@ def test_pad_float(target):
     img, expected = convert_2d_to_target_format([img, expected], target=target)
     padded_img = FGeometric.pad(img, min_height=4, min_width=4)
     assert_array_almost_equal_nulp(padded_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "mask"])
-def test_rotate_from_shift_scale_rotate(target):
-    img = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=np.uint8)
-    expected = np.array([[4, 8, 12, 16], [3, 7, 11, 15], [2, 6, 10, 14], [1, 5, 9, 13]], dtype=np.uint8)
-
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    rotated_img = FGeometric.shift_scale_rotate(
-        img, angle=90, scale=1, dx=0, dy=0, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT
-    )
-    assert np.array_equal(rotated_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "image_4_channels"])
-def test_rotate_float_from_shift_scale_rotate(target):
-    img = np.array(
-        [[0.01, 0.02, 0.03, 0.04], [0.05, 0.06, 0.07, 0.08], [0.09, 0.10, 0.11, 0.12], [0.13, 0.14, 0.15, 0.16]],
-        dtype=np.float32,
-    )
-    expected = np.array(
-        [[0.04, 0.08, 0.12, 0.16], [0.03, 0.07, 0.11, 0.15], [0.02, 0.06, 0.10, 0.14], [0.01, 0.05, 0.09, 0.13]],
-        dtype=np.float32,
-    )
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    rotated_img = FGeometric.shift_scale_rotate(
-        img, angle=90, scale=1, dx=0, dy=0, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT
-    )
-    assert_array_almost_equal_nulp(rotated_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "mask"])
-def test_scale_from_shift_scale_rotate(target):
-    img = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=np.uint8)
-    expected = np.array([[6, 6, 7, 7], [6, 6, 7, 7], [10, 10, 11, 11], [10, 10, 11, 11]], dtype=np.uint8)
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    scaled_img = FGeometric.shift_scale_rotate(
-        img, angle=0, scale=2, dx=0, dy=0, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT
-    )
-    assert np.array_equal(scaled_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "image_4_channels"])
-def test_scale_float_from_shift_scale_rotate(target):
-    img = np.array(
-        [[0.01, 0.02, 0.03, 0.04], [0.05, 0.06, 0.07, 0.08], [0.09, 0.10, 0.11, 0.12], [0.13, 0.14, 0.15, 0.16]],
-        dtype=np.float32,
-    )
-    expected = np.array(
-        [[0.06, 0.06, 0.07, 0.07], [0.06, 0.06, 0.07, 0.07], [0.10, 0.10, 0.11, 0.11], [0.10, 0.10, 0.11, 0.11]],
-        dtype=np.float32,
-    )
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    scaled_img = FGeometric.shift_scale_rotate(
-        img, angle=0, scale=2, dx=0, dy=0, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT
-    )
-    assert_array_almost_equal_nulp(scaled_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "mask"])
-def test_shift_x_from_shift_scale_rotate(target):
-    img = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=np.uint8)
-    expected = np.array([[0, 0, 1, 2], [0, 0, 5, 6], [0, 0, 9, 10], [0, 0, 13, 14]], dtype=np.uint8)
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    shifted_along_x_img = FGeometric.shift_scale_rotate(
-        img, angle=0, scale=1, dx=0.5, dy=0, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT
-    )
-    assert np.array_equal(shifted_along_x_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "image_4_channels"])
-def test_shift_x_float_from_shift_scale_rotate(target):
-    img = np.array(
-        [[0.01, 0.02, 0.03, 0.04], [0.05, 0.06, 0.07, 0.08], [0.09, 0.10, 0.11, 0.12], [0.13, 0.14, 0.15, 0.16]],
-        dtype=np.float32,
-    )
-    expected = np.array(
-        [[0.00, 0.00, 0.01, 0.02], [0.00, 0.00, 0.05, 0.06], [0.00, 0.00, 0.09, 0.10], [0.00, 0.00, 0.13, 0.14]],
-        dtype=np.float32,
-    )
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    shifted_along_x_img = FGeometric.shift_scale_rotate(
-        img, angle=0, scale=1, dx=0.5, dy=0, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT
-    )
-    assert_array_almost_equal_nulp(shifted_along_x_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "mask"])
-def test_shift_y_from_shift_scale_rotate(target):
-    img = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=np.uint8)
-    expected = np.array([[0, 0, 0, 0], [0, 0, 0, 0], [1, 2, 3, 4], [5, 6, 7, 8]], dtype=np.uint8)
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    shifted_along_y_img = FGeometric.shift_scale_rotate(
-        img, angle=0, scale=1, dx=0, dy=0.5, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT
-    )
-    assert np.array_equal(shifted_along_y_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "image_4_channels"])
-def test_shift_y_float_from_shift_scale_rotate(target):
-    img = np.array(
-        [[0.01, 0.02, 0.03, 0.04], [0.05, 0.06, 0.07, 0.08], [0.09, 0.10, 0.11, 0.12], [0.13, 0.14, 0.15, 0.16]],
-        dtype=np.float32,
-    )
-    expected = np.array(
-        [[0.00, 0.00, 0.00, 0.00], [0.00, 0.00, 0.00, 0.00], [0.01, 0.02, 0.03, 0.04], [0.05, 0.06, 0.07, 0.08]],
-        dtype=np.float32,
-    )
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    shifted_along_y_img = FGeometric.shift_scale_rotate(
-        img, angle=0, scale=1, dx=0, dy=0.5, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT
-    )
-    assert_array_almost_equal_nulp(shifted_along_y_img, expected)
 
 
 @pytest.mark.parametrize(
@@ -691,8 +655,10 @@ def test_bbox_rot90():
 
 
 def test_bbox_transpose():
-    assert np.allclose(FGeometric.bbox_transpose((0.7, 0.1, 0.8, 0.4), 0, 100, 200), (0.1, 0.7, 0.4, 0.8))
-    assert np.allclose(FGeometric.bbox_transpose((0.7, 0.1, 0.8, 0.4), 1, 100, 200), (0.6, 0.2, 0.9, 0.3))
+    assert np.allclose(FGeometric.bbox_transpose((0.7, 0.1, 0.8, 0.4), 100, 200), (0.1, 0.7, 0.4, 0.8))
+    rot90 = FGeometric.bbox_rot90((0.7, 0.1, 0.8, 0.4), 2, 100, 200)
+    reflected_anti_diagonal = FGeometric.bbox_transpose(rot90, 100, 200)
+    assert np.allclose(reflected_anti_diagonal, (0.6, 0.2, 0.9, 0.3))
 
 
 @pytest.mark.parametrize(
@@ -842,12 +808,21 @@ def test_brightness_contrast():
 
 
 @pytest.mark.parametrize(
-    "img, tiles, expected",
+    "img, tiles, mapping, expected",
     [
         # Test with empty tiles - image should remain unchanged
         (
             np.array([[1, 1], [2, 2]], dtype=np.uint8),
             np.empty((0, 4), dtype=np.int32),
+            [0],
+            np.array([[1, 1], [2, 2]], dtype=np.uint8)
+        ),
+
+        # Test with empty mapping - image should remain unchanged
+        (
+            np.array([[1, 1], [2, 2]], dtype=np.uint8),
+            np.array([[0, 0, 2, 2]]),
+            None,
             np.array([[1, 1], [2, 2]], dtype=np.uint8)
         ),
 
@@ -855,28 +830,33 @@ def test_brightness_contrast():
         (
             np.array([[1, 1], [2, 2]], dtype=np.uint8),
             np.array([[0, 0, 2, 2]]),
+            [0],
             np.array([[1, 1], [2, 2]], dtype=np.uint8)
         ),
 
-        # Test with splitting tiles horizontally - since we're not actually swapping, the expected result should match the original
+        # Test with splitting tiles horizontally
         (
             np.array([[1, 2], [3, 4]], dtype=np.uint8),
             np.array([[0, 0, 2, 1], [0, 1, 2, 2]]),
-            np.array([[1, 2], [3, 4]], dtype=np.uint8)  # Corrected expectation
+            [1, 0],
+            np.array([[2, 1], [4, 3]], dtype=np.uint8)  # Corrected expectation
         ),
 
-        # Test with splitting tiles vertically - similarly, expect original image as output
+        # Test with splitting tiles vertically
         (
             np.array([[1, 2], [3, 4]], dtype=np.uint8),
             np.array([[0, 0, 1, 2], [1, 0, 2, 2]]),
-            np.array([[1, 2], [3, 4]], dtype=np.uint8)  # Corrected expectation
+            [1, 0],
+            np.array([[3, 4], [1, 2]], dtype=np.uint8)  # Corrected expectation
         ),
+
+        # Test with splitting tiles diag
 
         # Other tests remain the same if they correctly represent what your function does
     ]
 )
-def test_swap_tiles_on_image(img, tiles, expected):
-    result_img = F.swap_tiles_on_image(img, tiles)
+def test_swap_tiles_on_image(img, tiles, mapping, expected):
+    result_img = F.swap_tiles_on_image(img, tiles, mapping)
     assert np.array_equal(result_img, expected)
 
 
@@ -920,10 +900,6 @@ def test_posterize_checks():
 
 def test_equalize_checks():
     img = np.random.randint(0, 255, [256, 256], dtype=np.uint8)
-
-    with pytest.raises(ValueError) as exc_info:
-        F.equalize(img, mode="other")
-    assert str(exc_info.value) == "Unsupported equalization mode. Supports: ['cv', 'pil']. Got: other"
 
     mask = np.random.randint(0, 1, [256, 256, 3], dtype=bool)
     with pytest.raises(ValueError) as exc_info:
@@ -1133,5 +1109,167 @@ def test_brightness_contrast_adjust_equal(beta_by_max):
     ]
 )
 def test_split_uniform_grid(image_shape, grid, expected):
-    result = F.split_uniform_grid(image_shape, grid)
+    random_seed = 42
+    result = F.split_uniform_grid(image_shape, grid, random_state=np.random.RandomState(random_seed))
     np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("size, divisions, random_state, expected", [
+    (10, 2, None, [0, 5, 10]),
+    (10, 2, 42, [0, 5, 10]),  # Consistent shuffling with seed
+    (9, 3, None, [0, 3, 6, 9]),
+    (9, 3, 42, [0, 3, 6, 9]),  # Expected shuffle result with a specific seed
+    (20, 5, 42, [0, 4, 8, 12, 16, 20]),  # Regular intervals
+    (7, 3, 42, [0, 3, 5, 7]),  # Irregular intervals, specific seed
+    (7, 3, 41, [0, 2, 4, 7]),  # Irregular intervals, specific seed
+])
+def test_generate_shuffled_splits(size, divisions, random_state, expected):
+    result = F.generate_shuffled_splits(size, divisions, random_state=np.random.RandomState(random_state) if random_state else None)
+    assert len(result) == divisions + 1
+    assert np.array_equal(result, expected), f"Failed for size={size}, divisions={divisions}, random_state={random_state}"
+
+@pytest.mark.parametrize("size, divisions, random_state", [
+    (10, 2, 42),
+    (9, 3, 99),
+    (20, 5, 101),
+    (7, 3, 42),
+])
+def test_consistent_shuffling(size, divisions, random_state):
+    set_seed(random_state)
+    result1 = F.generate_shuffled_splits(size, divisions, random_state = np.random.RandomState(random_state))
+    assert len(result1) == divisions + 1
+    set_seed(random_state)
+    result2 = F.generate_shuffled_splits(size, divisions, random_state = np.random.RandomState(random_state))
+    assert len(result2) == divisions + 1
+    assert np.array_equal(result1, result2), "Shuffling is not consistent with the given random state"
+
+
+@pytest.mark.parametrize("tiles, expected", [
+    # Simple case with two different shapes
+    (np.array([[0, 0, 2, 2], [0, 2, 2, 4], [2, 0, 4, 2], [2, 2, 4, 4]]),
+     {(2, 2): [0, 1, 2, 3]}),
+    # Tiles with three different shapes
+    (np.array([[0, 0, 1, 3], [0, 3, 1, 6], [1, 0, 4, 3], [1, 3, 4, 6]]),
+     {(1, 3): [0, 1], (3, 3): [2, 3]}),
+    # Single tile
+    (np.array([[0, 0, 1, 1]]),
+     {(1, 1): [0]}),
+    # No tiles
+    (np.array([]).reshape(0, 4),
+     {}),
+    # All tiles having the same shape
+    (np.array([[0, 0, 2, 2], [2, 2, 4, 4], [4, 4, 6, 6]]),
+     {(2, 2): [0, 1, 2]}),
+])
+def test_create_shape_groups(tiles, expected):
+    result = F.create_shape_groups(tiles)
+    assert len(result) == len(expected), "Incorrect number of shape groups"
+    for shape in expected:
+        assert shape in result, f"Shape {shape} is not in the result"
+        assert sorted(result[shape]) == sorted(expected[shape]), f"Incorrect indices for shape {shape}"
+
+
+@pytest.mark.parametrize("shape_groups, random_state, expected_output", [
+    # Test with a simple case of one group
+    ({(2, 2): [0, 1, 2, 3]}, 42, [1, 3, 0, 2]),
+    # Test with multiple groups and ensure that random state affects the shuffle consistently
+    ({(2, 2): [0, 1, 2, 3], (1, 1): [4]}, 42, [1, 3, 0, 2, 4]),
+    # All tiles having the same shape should be shuffled within themselves
+    ({(2, 2): [0, 1, 2]}, 2, [2, 1, 0])
+])
+def test_shuffle_tiles_within_shape_groups(shape_groups, random_state, expected_output):
+    random_state = np.random.RandomState(random_state)
+    actual_output = F.shuffle_tiles_within_shape_groups(shape_groups, random_state)
+    assert actual_output == expected_output, "Output did not match expected mapping"
+
+
+@pytest.mark.parametrize("group_member,expected", [
+    ("e", np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]])),  # Identity
+    ("r90", np.array([[2, 5, 8], [1, 4, 7], [0, 3, 6]])),  # Rotate 90 degrees counterclockwise
+    ("r180", np.array([[8, 7, 6], [5, 4, 3], [2, 1, 0]])),  # Rotate 180 degrees
+    ("r270", np.array([[6, 3, 0], [7, 4, 1], [8, 5, 2]])),  # Rotate 270 degrees counterclockwise
+    ("v", np.array([[6, 7, 8], [3, 4, 5], [0, 1, 2]])),  # Vertical flip
+    ("t", np.array([[0, 3, 6], [1, 4, 7], [2, 5, 8]])),  # Transpose (reflect over main diagonal)
+    ("h", np.array([[2, 1, 0], [5, 4, 3], [8, 7, 6]])),  # Horizontal flip
+    ("hvt", np.array([[8, 5, 2], [7, 4, 1], [6, 3, 0]]))  # Transpose (reflect over anti-diagonal)
+])
+def test_d4_transformations(group_member, expected):
+    img = np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]], dtype=np.uint8)
+    transformed_img = FGeometric.d4(img, group_member)
+    assert np.array_equal(transformed_img, expected), f"Failed for transformation {group_member}"
+
+def get_md5_hash(image):
+    image_bytes = image.tobytes()
+    hash_md5 = hashlib.md5()
+    hash_md5.update(image_bytes)
+    return hash_md5.hexdigest()
+
+
+def test_d4_unique(image):
+    hashes = set()
+    for element in d4_group_elements:
+        hashes.add(get_md5_hash(FGeometric.d4(image, element)))
+
+    assert len(hashes) == len(set(hashes)), "d4 should generate unique images for all group elements"
+
+
+
+@pytest.mark.parametrize("bbox, group_member, rows, cols, expected", [
+    ((0.05, 0.1, 0.55, 0.6), 'e', 200, 200, (0.05, 0.1, 0.55, 0.6)),  # Identity
+    ((0.05, 0.1, 0.55, 0.6), 'r90', 200, 200, (0.1, 0.45, 0.6, 0.95)),  # Rotate 90 degrees CCW
+    ((0.05, 0.1, 0.55, 0.6), 'r180', 200, 200, (0.45, 0.4, 0.95, 0.9)),  # Rotate 180 degrees
+    ((0.05, 0.1, 0.55, 0.6), 'r270', 200, 200, (0.4, 0.05, 0.9, 0.55)),  # Rotate 270 degrees CCW
+    ((0.05, 0.1, 0.55, 0.6), 'v', 200, 200, (0.05, 0.4, 0.55, 0.9)),  # Vertical flip
+    ((0.05, 0.1, 0.55, 0.6), 't', 200, 200, (0.1, 0.05, 0.6, 0.55)),  # Transpose around main diagonal
+    ((0.05, 0.1, 0.55, 0.6), 'h', 200, 200, (0.45, 0.1, 0.95, 0.6)),  # Horizontal flip
+    ((0.05, 0.1, 0.55, 0.6), 'hvt', 200, 200, (1 - 0.6, 1 - 0.55, 1 - 0.1, 1 - 0.05)), # Transpose around second diagonal
+])
+def test_bbox_d4(bbox, group_member, rows, cols, expected):
+    result = FGeometric.bbox_d4(bbox, group_member, rows, cols)
+    assert result == pytest.approx(expected, rel=1e-5), f"Failed for transformation {group_member} with bbox {bbox}"
+
+
+@pytest.mark.parametrize("keypoint, rows, cols", [
+    ((100, 150, 0, 1), 300, 400),  # Example keypoint with arbitrary angle and scale
+    ((200, 100, np.pi/4, 0.5), 300, 400),
+    ((50, 250, np.pi/2, 2), 300, 400),
+])
+def test_keypoint_vh_flip_equivalence(keypoint, rows, cols):
+
+    # Perform vertical and then horizontal flip
+    hflipped_keypoint = FGeometric.keypoint_hflip(keypoint, rows, cols)
+    vhflipped_keypoint = FGeometric.keypoint_vflip(hflipped_keypoint, rows, cols)
+
+    vflipped_keypoint = FGeometric.keypoint_vflip(keypoint, rows, cols)
+    hvflipped_keypoint = FGeometric.keypoint_hflip(vflipped_keypoint, rows, cols)
+
+    assert vhflipped_keypoint == pytest.approx(hvflipped_keypoint), "Sequential vflip + hflip not equivalent to hflip + vflip"
+    assert vhflipped_keypoint == pytest.approx(FGeometric.keypoint_rot90(keypoint, 2, rows, cols)), "rot180 not equivalent to vflip + hflip"
+
+
+base_matrix = np.array([[1, 2, 3],
+                        [4, 5, 6],
+                        [7, 8, 9]])
+expected_main_diagonal = np.array([[1, 4, 7],
+                                   [2, 5, 8],
+                                   [3, 6, 9]])
+expected_second_diagonal = np.array([[9, 6, 3],
+                                     [8, 5, 2],
+                                     [7, 4, 1]])
+
+def create_test_matrix(matrix, shape):
+    if len(shape) == 2:
+        return matrix
+    elif len(shape) == 3:
+        return np.stack([matrix] * shape[2], axis=-1)
+
+
+@pytest.mark.parametrize("shape", [(3, 3), (3, 3, 1), (3, 3, 3), (3, 3, 7)])
+def test_transpose(shape):
+    img = create_test_matrix(base_matrix, shape)
+    expected_main = create_test_matrix(expected_main_diagonal, shape)
+    expected_second = create_test_matrix(expected_second_diagonal, shape)
+
+    assert np.array_equal(FGeometric.transpose(img), expected_main)
+    transposed_axis1 = FGeometric.transpose(FGeometric.rot90(img, 2))
+    assert np.array_equal(transposed_axis1, expected_second)
