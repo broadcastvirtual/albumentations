@@ -127,7 +127,7 @@ def test_torch_to_tensor_v2_on_gray_scale_images():
     assert data["image"].dtype == torch.uint8
 
 
-def test_with_replaycompose():
+def test_with_replaycompose() -> None:
     aug = A.ReplayCompose([ToTensorV2()])
     kwargs = {
         "image": np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8),
@@ -135,6 +135,22 @@ def test_with_replaycompose():
     }
     res = aug(**kwargs)
     res2 = A.ReplayCompose.replay(res["replay"], **kwargs)
+    assert np.array_equal(res["image"], res2["image"])
+    assert np.array_equal(res["mask"], res2["mask"])
+    assert res["image"].dtype == torch.uint8
+    assert res["mask"].dtype == torch.uint8
+    assert res2["image"].dtype == torch.uint8
+    assert res2["mask"].dtype == torch.uint8
+
+
+def test_with_return_params() -> None:
+    aug = A.Compose([ToTensorV2()], return_params=True)
+    kwargs = {
+        "image": np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8),
+        "mask": np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8),
+    }
+    res = aug(**kwargs)
+    res2 = aug.run_with_params(params=res["applied_params"], **kwargs)
     assert np.array_equal(res["image"], res2["image"])
     assert np.array_equal(res["mask"], res2["mask"])
     assert res["image"].dtype == torch.uint8
@@ -182,8 +198,7 @@ def test_color_jitter(brightness, contrast, saturation, hue):
     res1 = transform(image=img)["image"]
     res2 = np.array(pil_transform(pil_image))
 
-    _max = np.abs(res1.astype(np.int16) - res2.astype(np.int16)).max()
-    assert _max <= 2, f"Max: {_max}"
+    assert np.abs(res1.astype(np.int16) - res2.astype(np.int16)).max() <= 2, f"Max: {_max}"
 
 
 def test_post_data_check():

@@ -1,13 +1,14 @@
+import random
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from warnings import warn
 
 import numpy as np
-from pydantic import Field, model_validator
-from typing_extensions import Literal, Self
+from pydantic import AfterValidator, Field, model_validator
+from typing_extensions import Annotated, Literal, Self
 
-from albumentations import random_utils
-from albumentations.core.pydantic import OnePlusIntNonDecreasingRangeType
+from albumentations.core.pydantic import check_1plus, nondecreasing
 from albumentations.core.transforms_interface import BaseTransformInitSchema, DualTransform
-from albumentations.core.types import ColorType, KeypointType, ScalarType, Targets
+from albumentations.core.types import ColorType, KeypointType, NumericType, ScalarType, Targets
 
 from .functional import cutout, keypoint_in_hole
 
@@ -56,27 +57,23 @@ class CoarseDropout(DualTransform):
             default=None,
             ge=0,
             description="Minimum number of regions to zero out.",
-            deprecated="Use num_holes_range instead.",
         )
         max_holes: Optional[int] = Field(
             default=8,
             ge=0,
             description="Maximum number of regions to zero out.",
-            deprecated="Use num_holes_range instead.",
         )
-        num_holes_range: OnePlusIntNonDecreasingRangeType = (1, 1)
+        num_holes_range: Annotated[Tuple[int, int], AfterValidator(check_1plus), AfterValidator(nondecreasing)] = (1, 1)
 
         min_height: Optional[ScalarType] = Field(
             default=None,
             ge=0,
             description="Minimum height of the hole.",
-            deprecated="Use hole_height_range instead.",
         )
         max_height: Optional[ScalarType] = Field(
             default=8,
             ge=0,
             description="Maximum height of the hole.",
-            deprecated="Use hole_height_range instead.",
         )
         hole_height_range: Tuple[ScalarType, ScalarType] = (8, 8)
 
@@ -84,13 +81,11 @@ class CoarseDropout(DualTransform):
             default=None,
             ge=0,
             description="Minimum width of the hole.",
-            deprecated="Use hole_width_range instead.",
         )
         max_width: Optional[ScalarType] = Field(
             default=8,
             ge=0,
             description="Maximum width of the hole.",
-            deprecated="Use hole_width_range instead.",
         )
         hole_width_range: Tuple[ScalarType, ScalarType] = (8, 8)
 
@@ -99,10 +94,10 @@ class CoarseDropout(DualTransform):
 
         @staticmethod
         def update_range(
-            min_value: Optional[ScalarType],
-            max_value: Optional[ScalarType],
-            default_range: Tuple[ScalarType, ScalarType],
-        ) -> Tuple[ScalarType, ScalarType]:
+            min_value: Optional[NumericType],
+            max_value: Optional[NumericType],
+            default_range: Tuple[NumericType, NumericType],
+        ) -> Tuple[NumericType, NumericType]:
             if max_value is not None:
                 return (min_value or max_value, max_value)
 
@@ -121,9 +116,28 @@ class CoarseDropout(DualTransform):
 
         @model_validator(mode="after")
         def check_num_holes_and_dimensions(self) -> Self:
+            if self.min_holes is not None:
+                warn("`min_holes` is deprecated. Use num_holes_range instead.", DeprecationWarning, stacklevel=2)
+
+            if self.max_holes is not None:
+                warn("`max_holes` is deprecated. Use num_holes_range instead.", DeprecationWarning, stacklevel=2)
+
+            if self.min_height is not None:
+                warn("`min_height` is deprecated. Use hole_height_range instead.", DeprecationWarning, stacklevel=2)
+
+            if self.max_height is not None:
+                warn("`max_height` is deprecated. Use hole_height_range instead.", DeprecationWarning, stacklevel=2)
+
+            if self.min_width is not None:
+                warn("`min_width` is deprecated. Use hole_width_range instead.", DeprecationWarning, stacklevel=2)
+
+            if self.max_width is not None:
+                warn("`max_width` is deprecated. Use hole_width_range instead.", DeprecationWarning, stacklevel=2)
+
             if self.max_holes is not None:
                 # Update ranges for holes, heights, and widths
                 self.num_holes_range = self.update_range(self.min_holes, self.max_holes, self.num_holes_range)
+
             self.validate_range(self.num_holes_range, "num_holes_range", minimum=1)
 
             if self.max_height is not None:
@@ -149,7 +163,7 @@ class CoarseDropout(DualTransform):
         num_holes_range: Tuple[int, int] = (1, 1),
         hole_height_range: Tuple[ScalarType, ScalarType] = (8, 8),
         hole_width_range: Tuple[ScalarType, ScalarType] = (8, 8),
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 0.5,
     ):
         super().__init__(always_apply, p)
@@ -196,12 +210,12 @@ class CoarseDropout(DualTransform):
             max_width = width_range[1]
             max_height = min(max_height, height)
             max_width = min(max_width, width)
-            hole_height = random_utils.randint(min_height, max_height + 1)
-            hole_width = random_utils.randint(min_width, max_width + 1)
+            hole_height = random.randint(int(min_height), int(max_height))
+            hole_width = random.randint(int(min_width), int(max_width))
 
         else:  # Assume float
-            hole_height = int(height * random_utils.uniform(height_range[0], height_range[1]))
-            hole_width = int(width * random_utils.uniform(width_range[0], width_range[1]))
+            hole_height = int(height * random.uniform(height_range[0], height_range[1]))
+            hole_width = int(width * random.uniform(width_range[0], width_range[1]))
         return hole_height, hole_width
 
     def get_params_dependent_on_targets(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -209,7 +223,7 @@ class CoarseDropout(DualTransform):
         height, width = img.shape[:2]
 
         holes = []
-        num_holes = random_utils.randint(self.num_holes_range[0], self.num_holes_range[1] + 1)
+        num_holes = random.randint(self.num_holes_range[0], self.num_holes_range[1])
 
         for _ in range(num_holes):
             hole_height, hole_width = self.calculate_hole_dimensions(
@@ -219,8 +233,8 @@ class CoarseDropout(DualTransform):
                 self.hole_width_range,
             )
 
-            y1 = random_utils.randint(0, height - hole_height + 1)
-            x1 = random_utils.randint(0, width - hole_width + 1)
+            y1 = random.randint(0, height - hole_height)
+            x1 = random.randint(0, width - hole_width)
             y2 = y1 + hole_height
             x2 = x1 + hole_width
             holes.append((x1, y1, x2, y2))

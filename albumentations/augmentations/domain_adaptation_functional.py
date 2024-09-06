@@ -4,7 +4,8 @@ from typing import Optional, Tuple
 
 import cv2
 import numpy as np
-from albucore.utils import clipped, get_num_channels, get_opencv_dtype_from_numpy, preserve_channel_dim
+from albucore.functions import add_weighted
+from albucore.utils import clip, clipped, get_num_channels, preserve_channel_dim
 from skimage.exposure import match_histograms
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
@@ -51,7 +52,7 @@ class DomainAdapter:
     def from_colorspace(self, img: np.ndarray) -> np.ndarray:
         if self.color_out is None:
             return img
-        return cv2.cvtColor(img.astype("uint8"), self.color_out)
+        return cv2.cvtColor(clip(img, np.uint8), self.color_out)
 
     def flatten(self, img: np.ndarray) -> np.ndarray:
         img = self.to_colorspace(img)
@@ -170,4 +171,5 @@ def apply_histogram(img: np.ndarray, reference_image: np.ndarray, blend_ratio: f
     matched = match_histograms(img, reference_image, channel_axis=2 if is_multichannel else None)
 
     # Blend the original image and the matched image
-    return cv2.addWeighted(matched, blend_ratio, img, 1 - blend_ratio, 0, dtype=get_opencv_dtype_from_numpy(img.dtype))
+
+    return add_weighted(matched, blend_ratio, img, 1 - blend_ratio)

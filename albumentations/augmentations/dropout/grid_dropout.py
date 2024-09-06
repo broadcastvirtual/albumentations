@@ -5,13 +5,11 @@ import numpy as np
 from pydantic import Field
 
 from albumentations.core.transforms_interface import BaseTransformInitSchema, DualTransform
-from albumentations.core.types import ColorType, ScalarType, Targets
+from albumentations.core.types import TWO, ColorType, ScalarType, Targets
 
 from . import functional as fdropout
 
 __all__ = ["GridDropout"]
-
-TWO = 2
 
 
 class GridDropout(DualTransform):
@@ -75,7 +73,7 @@ class GridDropout(DualTransform):
         random_offset: bool = False,
         fill_value: float = 0,
         mask_fill_value: Optional[ScalarType] = None,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 0.5,
     ):
         super().__init__(always_apply, p)

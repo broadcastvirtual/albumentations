@@ -6,10 +6,10 @@ from pkg_resources import DistributionNotFound, get_distribution
 from setuptools import find_packages, setup
 
 INSTALL_REQUIRES = [
-    "numpy>=1.24.4", "scipy>=1.10.0", "scikit-image>=0.21.0",
+    "numpy>=1.24.4,<2", "scipy>=1.10.0", "scikit-image>=0.21.0",
     "PyYAML", "typing-extensions>=4.9.0", "scikit-learn>=1.3.2",
     "pydantic>=2.7.0",
-    "albucore>=0.0.4"
+    "albucore>=0.0.11"
 ]
 
 MIN_OPENCV_VERSION = "4.9.0.80"
@@ -64,6 +64,9 @@ setup(
     packages=find_packages(exclude=["tests", "tools", "benchmark", ".github"]),
     python_requires=">=3.8",
     install_requires=get_install_requirements(INSTALL_REQUIRES, CHOOSE_INSTALL_REQUIRES),
+    extras_require={
+        "hub": ["huggingface_hub"],
+    },
     classifiers=[
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",

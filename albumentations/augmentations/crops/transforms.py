@@ -8,7 +8,6 @@ import numpy as np
 from pydantic import AfterValidator, Field, field_validator, model_validator
 from typing_extensions import Annotated, Self
 
-from albumentations import random_utils
 from albumentations.augmentations.geometric import functional as fgeometric
 from albumentations.core.bbox_utils import union_of_bboxes
 from albumentations.core.pydantic import (
@@ -20,9 +19,10 @@ from albumentations.core.pydantic import (
     check_0plus,
     check_01,
 )
-from albumentations.core.transforms_interface import PAIR, BaseTransformInitSchema, DualTransform
+from albumentations.core.transforms_interface import BaseTransformInitSchema, DualTransform
 from albumentations.core.types import (
     NUM_MULTI_CHANNEL_DIMENSIONS,
+    PAIR,
     BoxInternalType,
     KeypointInternalType,
     PercentType,
@@ -77,7 +77,7 @@ class RandomCrop(DualTransform):
     class InitSchema(CropInitSchema):
         pass
 
-    def __init__(self, height: int, width: int, always_apply: bool = False, p: float = 1.0):
+    def __init__(self, height: int, width: int, always_apply: Optional[bool] = None, p: float = 1.0):
         super().__init__(always_apply, p)
         self.height = height
         self.width = width
@@ -119,7 +119,7 @@ class CenterCrop(DualTransform):
     class InitSchema(CropInitSchema):
         pass
 
-    def __init__(self, height: int, width: int, always_apply: bool = False, p: float = 1.0):
+    def __init__(self, height: int, width: int, always_apply: Optional[bool] = None, p: float = 1.0):
         super().__init__(always_apply, p)
         self.height = height
         self.width = width
@@ -179,7 +179,7 @@ class Crop(DualTransform):
         y_min: int = 0,
         x_max: int = 1024,
         y_max: int = 1024,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(always_apply, p)
@@ -236,7 +236,7 @@ class CropNonEmptyMaskIfExists(DualTransform):
         width: int,
         ignore_values: Optional[List[int]] = None,
         ignore_channels: Optional[List[int]] = None,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(always_apply, p)
@@ -364,7 +364,7 @@ class _BaseRandomSizedCrop(DualTransform):
         self,
         size: Tuple[int, int],
         interpolation: int = cv2.INTER_LINEAR,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(always_apply, p)
@@ -483,7 +483,7 @@ class RandomSizedCrop(_BaseRandomSizedCrop):
         *,
         w2h_ratio: float = 1.0,
         interpolation: int = cv2.INTER_LINEAR,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(size=cast(Tuple[int, int], size), interpolation=interpolation, always_apply=always_apply, p=p)
@@ -491,7 +491,7 @@ class RandomSizedCrop(_BaseRandomSizedCrop):
         self.w2h_ratio = w2h_ratio
 
     def get_params(self) -> Dict[str, Union[int, float]]:
-        crop_height = random_utils.randint(self.min_max_height[0], self.min_max_height[1])
+        crop_height = random.randint(self.min_max_height[0], self.min_max_height[1])
         return {
             "h_start": random.random(),
             "w_start": random.random(),
@@ -567,7 +567,7 @@ class RandomResizedCrop(_BaseRandomSizedCrop):
         scale: Tuple[float, float] = (0.08, 1.0),
         ratio: Tuple[float, float] = (0.75, 1.3333333333333333),
         interpolation: int = cv2.INTER_LINEAR,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(size=cast(Tuple[int, int], size), interpolation=interpolation, always_apply=always_apply, p=p)
@@ -580,9 +580,9 @@ class RandomResizedCrop(_BaseRandomSizedCrop):
         area = img_height * img_width
 
         for _ in range(10):
-            target_area = random_utils.uniform(*self.scale) * area
+            target_area = random.uniform(*self.scale) * area
             log_ratio = (math.log(self.ratio[0]), math.log(self.ratio[1]))
-            aspect_ratio = math.exp(random_utils.uniform(*log_ratio))
+            aspect_ratio = math.exp(random.uniform(*log_ratio))
 
             width = int(round(math.sqrt(target_area * aspect_ratio)))
             height = int(round(math.sqrt(target_area / aspect_ratio)))
@@ -665,7 +665,7 @@ class RandomCropNearBBox(DualTransform):
         max_part_shift: ScaleFloatType = (0, 0.3),
         cropping_bbox_key: str = "cropping_bbox",
         cropping_box_key: Optional[str] = None,  # Deprecated
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(always_apply, p)
@@ -756,7 +756,7 @@ class BBoxSafeRandomCrop(DualTransform):
         )
         p: ProbabilityType = 1
 
-    def __init__(self, erosion_rate: float = 0.0, always_apply: bool = False, p: float = 1.0):
+    def __init__(self, erosion_rate: float = 0.0, always_apply: Optional[bool] = None, p: float = 1.0):
         super().__init__(always_apply, p)
         self.erosion_rate = erosion_rate
 
@@ -864,7 +864,7 @@ class RandomSizedBBoxSafeCrop(BBoxSafeRandomCrop):
         width: int,
         erosion_rate: float = 0.0,
         interpolation: int = cv2.INTER_LINEAR,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(erosion_rate, always_apply, p)
@@ -1034,7 +1034,7 @@ class CropAndPad(DualTransform):
         keep_size: bool = True,
         sample_independently: bool = True,
         interpolation: int = cv2.INTER_LINEAR,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(always_apply, p)
@@ -1351,7 +1351,7 @@ class RandomCropFromBorders(DualTransform):
         crop_right: float = 0.1,
         crop_top: float = 0.1,
         crop_bottom: float = 0.1,
-        always_apply: bool = False,
+        always_apply: Optional[bool] = None,
         p: float = 1.0,
     ):
         super().__init__(always_apply, p)
@@ -1363,11 +1363,11 @@ class RandomCropFromBorders(DualTransform):
     def get_params_dependent_on_targets(self, params: Dict[str, Any]) -> Dict[str, int]:
         height, width = params["image"].shape[:2]
 
-        x_min = random_utils.randint(0, int(self.crop_left * width) + 1)
-        x_max = random_utils.randint(max(x_min + 1, int((1 - self.crop_right) * width)), width + 1)
+        x_min = random.randint(0, int(self.crop_left * width))
+        x_max = random.randint(max(x_min + 1, int((1 - self.crop_right) * width)), width)
 
-        y_min = random_utils.randint(0, int(self.crop_top * height) + 1)
-        y_max = random_utils.randint(max(y_min + 1, int((1 - self.crop_bottom) * height)), height + 1)
+        y_min = random.randint(0, int(self.crop_top * height))
+        y_max = random.randint(max(y_min + 1, int((1 - self.crop_bottom) * height)), height)
 
         return {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max}
 

@@ -105,97 +105,6 @@ def test_rot90_float(target):
     assert_array_almost_equal_nulp(rotated, expected)
 
 
-@pytest.mark.parametrize("dtype", [
-    np.uint8,
-    np.float32,
-])
-def test_normalize(dtype: np.dtype) -> None:
-    img = np.ones((100, 100, 3), dtype=dtype) * 127
-    mean = np.array(50, dtype=np.float32) * 255
-    denominator = np.reciprocal(np.array(3, dtype=np.float32) * 255)
-    normalized = F.normalize(img, mean=mean, denominator=denominator)
-    expected = (np.ones((100, 100, 3), dtype=np.float32) * 127 / 255 - 50) / 3
-    assert_array_almost_equal_nulp(normalized, expected)
-
-
-# Parameterize tests for all combinations
-@pytest.mark.parametrize("shape", [
-    (100, 100),  # height, width
-    (100, 100, 1),  # height, width, 1 channel
-    (100, 100, 3),  # height, width, 3 channels
-    (100, 100, 7),  # height, width, 7 channels
-])
-@pytest.mark.parametrize("normalization", [
-    "image",
-    "image_per_channel",
-    "min_max",
-    "min_max_per_channel",
-])
-@pytest.mark.parametrize("dtype", [
-    np.uint8,
-    np.float32,
-])
-def test_normalize_per_image(shape, normalization, dtype):
-    # Generate a random image of the specified shape and dtype
-    if dtype is np.uint8:
-        img = np.random.randint(0, 256, size=shape, dtype=dtype)
-    else:  # float32
-        img = np.random.random(size=shape).astype(dtype) * 255
-
-    # Normalize the image
-    normalized_img = F.normalize_per_image(img, normalization)
-
-    # Assert the output shape matches the input shape
-    assert normalized_img.shape == img.shape, "Output shape should match input shape"
-    assert normalized_img.dtype == np.float32, "Output dtype should be float32"
-
-    # Additional checks based on normalization type
-    if normalization in ["min_max", "min_max_per_channel"]:
-        # For min-max normalization, values should be in [0, 1]
-        assert normalized_img.min() >= 0, "Min value should be >= 0"
-        assert normalized_img.max() <= 1, "Max value should be <= 1"
-    elif normalization in ["image", "image_per_channel"]:
-        # For other normalizations, just ensure output dtype is float32
-        # and check for expected normalization effects
-        assert normalized_img.dtype == np.float32, "Output dtype should be float32"
-        if normalization == "image":
-            assert np.isclose(normalized_img.mean(), 0, atol=1e-3), "Mean should be close to 0 for 'image' normalization"
-            assert np.isclose(normalized_img.std(), 1, atol=1e-3), "STD should be close to 1 for 'image' normalization"
-        elif normalization == "image_per_channel":
-            # Check channel-wise normalization for multi-channel images
-            if len(shape) == 3 and shape[2] > 1:
-                for c in range(shape[2]):
-                    channel_mean = normalized_img[:, :, c].mean()
-                    channel_std = normalized_img[:, :, c].std()
-                    assert np.isclose(channel_mean, 0, atol=1e-3), f"Mean for channel {c} should be close to 0"
-                    assert np.isclose(channel_std, 1, atol=1e-3), f"STD for channel {c} should be close to 1"
-
-
-
-@pytest.mark.parametrize("normalization", ("min_max", "min_max_per_channel"))
-@pytest.mark.parametrize("dtype", [
-    np.uint8,
-    np.float32,
-])
-def test_zero_image(normalization: str, dtype: np.dtype) -> None:
-    img = np.zeros((100, 100, 3), dtype=dtype)
-    normalized = F.normalize_per_image(img, normalization)
-    assert np.all(normalized == 0), "All values should be zero after normalization"
-
-
-@pytest.mark.parametrize("dtype", [
-    np.uint8,
-    np.float32,
-])
-def test_normalize_float(dtype: np.dtype) -> None:
-    img = np.ones((100, 100, 3), dtype=dtype) * 0.4
-    mean = np.array(50, dtype=np.float32)
-    denominator = np.array(1 / 3, dtype=np.float32)
-    normalized = F.normalize(img, mean=mean, denominator=denominator)
-    expected = (np.ones((100, 100, 3), dtype=np.float32) * 0.4 - 50) / 3
-    assert_array_almost_equal_nulp(normalized, expected)
-
-
 def generate_rotation_matrix(image: np.ndarray, angle: float) -> np.ndarray:
     """
     Generates a rotation matrix for the given angle with rotation around the center of the image.
@@ -313,36 +222,6 @@ def test_pad_float(target):
     img, expected = convert_2d_to_target_format([img, expected], target=target)
     padded_img = FGeometric.pad(img, min_height=4, min_width=4, value=None, border_mode=cv2.BORDER_REFLECT_101)
     assert_array_almost_equal_nulp(padded_img, expected)
-
-
-@pytest.mark.parametrize(
-    ["shift_params", "expected"], [[(-10, 0, 10), (117, 127, 137)], [(-200, 0, 200), (0, 127, 255)]]
-)
-def test_shift_rgb(shift_params, expected):
-    img = np.ones((100, 100, 3), dtype=np.uint8) * 127
-    r_shift, g_shift, b_shift = shift_params
-    img = F.shift_rgb(img, r_shift=r_shift, g_shift=g_shift, b_shift=b_shift)
-    expected_r, expected_g, expected_b = expected
-    assert img.dtype == np.dtype("uint8")
-    assert (img[:, :, 0] == expected_r).all()
-    assert (img[:, :, 1] == expected_g).all()
-    assert (img[:, :, 2] == expected_b).all()
-
-
-@pytest.mark.parametrize(
-    ["shift_params", "expected"], [[(-0.1, 0, 0.1), (0.3, 0.4, 0.5)], [(-0.6, 0, 0.6), (0, 0.4, 1.0)]]
-)
-def test_shift_rgb_float(shift_params, expected):
-    img = np.ones((100, 100, 3), dtype=np.float32) * 0.4
-    r_shift, g_shift, b_shift = shift_params
-    img = F.shift_rgb(img, r_shift=r_shift, g_shift=g_shift, b_shift=b_shift)
-    expected_r, expected_g, expected_b = [
-        np.ones((100, 100), dtype=np.float32) * channel_value for channel_value in expected
-    ]
-    assert img.dtype == np.dtype("float32")
-    assert_array_almost_equal_nulp(img[:, :, 0], expected_r)
-    assert_array_almost_equal_nulp(img[:, :, 1], expected_g)
-    assert_array_almost_equal_nulp(img[:, :, 2], expected_b)
 
 
 @pytest.mark.parametrize(["alpha", "expected"], [(1.5, 190), (3, 255)])
@@ -747,26 +626,6 @@ def test_is_multispectral_image():
     assert not is_multispectral_image(gray_image)
 
 
-def test_brightness_contrast():
-    dtype = np.uint8
-    min_value = np.iinfo(dtype).min
-    max_value = np.iinfo(dtype).max
-
-    image_uint8 = np.random.randint(min_value, max_value, size=(5, 5, 3), dtype=dtype)
-
-    assert np.array_equal(F.brightness_contrast_adjust(image_uint8), F._brightness_contrast_adjust_uint(image_uint8))
-
-    assert np.array_equal(
-        F._brightness_contrast_adjust_non_uint(image_uint8), F._brightness_contrast_adjust_uint(image_uint8)
-    )
-
-    image_float = np.random.random((5, 5, 3)).astype(np.float32)
-
-    assert np.array_equal(
-        F.brightness_contrast_adjust(image_float), F._brightness_contrast_adjust_non_uint(image_float)
-    )
-
-
 @pytest.mark.parametrize(
     "img, tiles, mapping, expected",
     [
@@ -966,23 +825,6 @@ def test_maybe_process_in_chunks():
 )
 def test_shift_hsv_gray(img):
     F.shift_hsv(img, 0.5, 0.5, 0.5)
-
-
-@pytest.mark.parametrize(
-    ["image", "mean", "std"],
-    [
-        [np.random.randint(0, 256, [101, 99, 3], dtype=np.uint8), [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]],
-        [np.random.randint(0, 256, [101, 99, 3], dtype=np.uint8), 0.5, 0.5],
-        [np.random.randint(0, 256, [101, 99], dtype=np.uint8), 0.5, 0.5],
-    ],
-)
-def test_normalize_np_cv_equal(image, mean, std):
-    mean = np.array(mean, dtype=np.float32)
-    std = np.array(std, dtype=np.float32)
-
-    res1 = F.normalize_cv2(image, mean, std)
-    res2 = F.normalize_numpy(image, mean, std)
-    assert np.array_equal(res1, res2)
 
 
 @pytest.mark.parametrize("beta_by_max", [True, False])
@@ -1219,3 +1061,41 @@ def test_transpose(shape):
     assert np.array_equal(FGeometric.transpose(img), expected_main)
     transposed_axis1 = FGeometric.transpose(FGeometric.rot90(img, 2))
     assert np.array_equal(transposed_axis1, expected_second)
+
+
+def test_planckian_jitter_blackbody():
+    img = np.array([[
+        [0.4963, 0.6977, 0.1759], [0.7682, 0.8   , 0.2698], [0.0885, 0.161 , 0.1507], [0.132 , 0.2823, 0.0317]],
+        [[0.3074, 0.6816, 0.2081], [0.6341, 0.9152, 0.9298], [0.4901, 0.3971, 0.7231],[0.8964, 0.8742, 0.7423]],
+        [[0.4556, 0.4194, 0.5263], [0.6323, 0.5529, 0.2437], [0.3489, 0.9527, 0.5846], [0.4017, 0.0362, 0.0332]],
+        [[0.0223, 0.1852, 0.1387], [0.1689, 0.3734, 0.2422], [0.2939, 0.3051, 0.8155], [0.5185, 0.932 , 0.7932]]]
+    )
+
+    expected_blackbody_plankian_jitter = np.array([
+        [[0.735 , 0.6977, 0.0691], [1.    , 0.8   , 0.1059], [0.1311, 0.161 , 0.0592], [0.1955, 0.2823, 0.0124]],
+        [[0.4553, 0.6816, 0.0817], [0.9391, 0.9152, 0.365 ], [0.7258, 0.3971, 0.2839], [1.    , 0.8742, 0.2914]],
+        [[0.6748, 0.4194, 0.2066], [0.9364, 0.5529, 0.0957], [0.5167, 0.9527, 0.2295], [0.5949, 0.0362, 0.013 ]],
+        [[0.033 , 0.1852, 0.0545], [0.2501, 0.3734, 0.0951], [0.4353, 0.3051, 0.3202], [0.7679, 0.932 , 0.3114]]]
+    )
+
+    blackbody_plankian_jitter = F.planckian_jitter(img, temperature=3500, mode="blackbody")
+    assert np.allclose(blackbody_plankian_jitter, expected_blackbody_plankian_jitter, atol=1e-4)
+
+
+def test_planckian_jitter_cied():
+    img = np.array([
+        [[0.4963, 0.6977, 0.1759], [0.7682, 0.8   , 0.2698], [0.0885, 0.161 , 0.1507], [0.132 , 0.2823, 0.0317]],
+        [[0.3074, 0.6816, 0.2081], [0.6341, 0.9152, 0.9298], [0.4901, 0.3971, 0.7231], [0.8964, 0.8742, 0.7423]],
+        [[0.4556, 0.4194, 0.5263], [0.6323, 0.5529, 0.2437], [0.3489, 0.9527, 0.5846], [0.4017, 0.0362, 0.0332]],
+        [[0.0223, 0.1852, 0.1387], [0.1689, 0.3734, 0.2422], [0.2939, 0.3051, 0.8155], [0.5185, 0.932 , 0.7932]]]
+    )
+
+    expected_cied_plankian_jitter = np.array([
+        [[0.6058, 0.6977, 0.1149], [0.9377, 0.8000, 0.1762], [0.1080, 0.1610, 0.0984], [0.1611, 0.2823, 0.0207]],
+        [[0.3752, 0.6816, 0.1359], [0.7740, 0.9152, 0.6072], [0.5982, 0.3971, 0.4722], [1.0000, 0.8742, 0.4848]],
+        [[0.5561, 0.4194, 0.3437], [0.7718, 0.5529, 0.1592], [0.4259, 0.9527, 0.3818], [0.4903, 0.0362, 0.0217]],
+        [[0.0272, 0.1852, 0.0906], [0.2062, 0.3734, 0.1582], [0.3587, 0.3051, 0.5326], [0.6329, 0.9320, 0.5180]]]
+    )
+
+    cied_plankian_jitter = F.planckian_jitter(img, temperature=4500, mode="cied")
+    assert np.allclose(cied_plankian_jitter, expected_cied_plankian_jitter, atol=1e-4)

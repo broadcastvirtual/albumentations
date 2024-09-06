@@ -1,6 +1,6 @@
 import random
 from functools import partial
-from typing import Optional, Tuple, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 import cv2
 import numpy as np
@@ -16,6 +16,7 @@ import albumentations as A
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as FGeometric
 from albumentations.augmentations.transforms import ImageCompression, RandomRain
+from albumentations.core.transforms_interface import BasicTransform
 from albumentations.core.types import ImageCompressionType
 from albumentations.random_utils import get_random_seed
 from albumentations.augmentations.transforms import RandomSnow
@@ -316,7 +317,7 @@ def test_force_apply():
     ),
 )
 def test_additional_targets_for_image_only(augmentation_cls, params):
-    aug = A.Compose([augmentation_cls(always_apply=True, **params)], additional_targets={"image2": "image"})
+    aug = A.Compose([augmentation_cls(p=1, **params)], additional_targets={"image2": "image"})
     for _i in range(10):
         image1 = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
         image2 = image1.copy()
@@ -325,7 +326,7 @@ def test_additional_targets_for_image_only(augmentation_cls, params):
         aug2 = res["image2"]
         assert np.array_equal(aug1, aug2)
 
-    aug = A.Compose([augmentation_cls(always_apply=True, **params)])
+    aug = A.Compose([augmentation_cls(p=1, **params)])
     aug.add_targets(additional_targets={"image2": "image"})
     for _ in range(10):
         image1 = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
@@ -379,13 +380,13 @@ def test_lambda_transform():
 def test_channel_droput():
     img = np.ones((10, 10, 3), dtype=np.float32)
 
-    aug = A.ChannelDropout(channel_drop_range=(1, 1), always_apply=True)  # Drop one channel
+    aug = A.ChannelDropout(channel_drop_range=(1, 1), p=1)  # Drop one channel
 
     transformed = aug(image=img)["image"]
 
     assert sum(transformed[:, :, c].max() for c in range(img.shape[2])) == 2
 
-    aug = A.ChannelDropout(channel_drop_range=(2, 2), always_apply=True)  # Drop two channels
+    aug = A.ChannelDropout(channel_drop_range=(2, 2), p=1)  # Drop two channels
     transformed = aug(image=img)["image"]
 
     assert sum(transformed[:, :, c].max() for c in range(img.shape[2])) == 1
@@ -473,7 +474,7 @@ def test_downscale(interpolation):
     img_float = np.random.rand(100, 100, 3)
     img_uint = (img_float * 255).astype("uint8")
 
-    aug = A.Downscale(scale_min=0.5, scale_max=0.5, interpolation=interpolation, always_apply=True)
+    aug = A.Downscale(scale_min=0.5, scale_max=0.5, interpolation=interpolation, p=1)
 
     for img in (img_float, img_uint):
         transformed = aug(image=img)["image"]
@@ -556,13 +557,18 @@ def test_multiplicative_noise_grayscale(image):
     params = aug.get_params_dependent_on_targets({"image": image})
     assert m == params["multiplier"]
     result_e = aug(image=image)["image"]
-    assert np.allclose(clip(image * m, image.dtype), result_e)
+
+    expected = image.astype(np.float32) * params["multiplier"]
+
+    assert np.allclose(clip(expected, image.dtype), result_e)
 
     aug = A.MultiplicativeNoise((m, m), elementwise=True, p=1)
     params = aug.get_params_dependent_on_targets({"image": image})
     result_ne = aug.apply(image, params["multiplier"])
 
-    assert np.allclose(clip(image * params["multiplier"], image.dtype), result_ne)
+    expected = image.astype(np.float32) * params["multiplier"]
+
+    assert np.allclose(clip(expected, image.dtype), result_ne)
 
 @pytest.mark.parametrize(
     "image", [
@@ -586,7 +592,10 @@ def test_multiplicative_noise_rgb(image, elementwise):
         assert mul.shape == (image.shape[-1],)
 
     result = aug.apply(image, mul)
-    assert np.allclose(clip(image.astype(np.float32) * mul.astype(np.float32), dtype), result)
+
+    expected = image.astype(np.float32) * mul
+
+    assert np.allclose(clip(expected, dtype), result, atol=1e-5)
 
 
 def test_mask_dropout():
@@ -717,7 +726,7 @@ def test_unsharp_mask_float_uint8_diff_less_than_two(val_uint8):
     x_float32 = np.zeros((5, 5)).astype(np.float32)
     x_float32[2, 2] = val_uint8 / 255.0
 
-    unsharpmask = A.UnsharpMask(blur_limit=3, always_apply=True, p=1)
+    unsharpmask = A.UnsharpMask(blur_limit=3, p=1)
 
     set_seed(0)
     usm_uint8 = unsharpmask(image=x_uint8)["image"]
@@ -876,10 +885,10 @@ def test_smallest_max_size_list():
 @pytest.mark.parametrize(
     ["img_weight", "template_weight", "template_transform", "image_size", "template_size"],
     [
-        (0.5, 0.5, A.RandomSizedCrop((50, 200), size=(513, 450), always_apply=True), (513, 450), (224, 224)),
-        (0.3, 0.5, A.RandomResizedCrop(size=(513, 450), always_apply=True), (513, 450), (224, 224)),
-        (1.0, 0.5, A.CenterCrop(500, 450, always_apply=True), (500, 450, 3), (512, 512, 3)),
-        (0.5, 0.8, A.Resize(513, 450, always_apply=True), (513, 450), (512, 512)),
+        (0.5, 0.5, A.RandomSizedCrop((50, 200), size=(513, 450), p=1.), (513, 450), (224, 224)),
+        (0.3, 0.5, A.RandomResizedCrop(size=(513, 450), p=1.), (513, 450), (224, 224)),
+        (1.0, 0.5, A.CenterCrop(500, 450,  p=1.), (500, 450, 3), (512, 512, 3)),
+        (0.5, 0.8, A.Resize(513, 450, p=1.), (513, 450), (512, 512)),
         (0.5, 0.2, A.NoOp(), (224, 224), (224, 224)),
         (0.5, 0.9, A.NoOp(), (512, 512, 3), (512, 512, 3)),
         (0.5, 0.5, None, (512, 512), (512, 512)),
@@ -887,7 +896,7 @@ def test_smallest_max_size_list():
         (
             0.5,
             0.5,
-            A.Compose([A.Blur(always_apply=True), A.RandomSizedCrop((50, 200), size=(512, 512), always_apply=True), A.HorizontalFlip(always_apply=True)]),
+            A.Compose([A.Blur(p=1.), A.RandomSizedCrop((50, 200), size=(512, 512), p=1.), A.HorizontalFlip(p=1.)]),
             (512, 512),
             (512, 512),
         ),
@@ -911,7 +920,7 @@ def test_template_transform(img_weight, template_weight, template_transform, ima
 def test_template_transform_incorrect_size(template):
     image = np.random.randint(0, 256, (512, 512, 3), np.uint8)
     with pytest.raises(ValueError) as exc_info:
-        transform = A.TemplateTransform(template, always_apply=True)
+        transform = A.TemplateTransform(template, p=1.)
         transform(image=image)
 
     message = f"Image and template must be the same size, got {image.shape[:2]} and {template.shape[:2]}"
@@ -924,7 +933,7 @@ def test_template_transform_incorrect_channels(img_channels, template_channels):
     template = np.random.randint(0, 256, [512, 512, template_channels], np.uint8)
 
     with pytest.raises(ValueError) as exc_info:
-        transform = A.TemplateTransform(template, always_apply=True)
+        transform = A.TemplateTransform(template, p=1.)
         transform(image=img)
 
     message = (
@@ -1353,6 +1362,7 @@ def test_coarse_dropout_invalid_input(params):
                              "n_segments": (10, 10),
                              "max_size": 10
                             },
+            A.ZoomBlur: {"max_factor": (1.05, 3)},
         },
         except_augmentations={
             A.RandomCropNearBBox,
@@ -1378,6 +1388,7 @@ def test_change_image(augmentation_cls, params):
     image = SQUARE_UINT8_IMAGE
     assert not np.array_equal(aug(image=image)["image"], image)
 
+
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
     get_transforms(
@@ -1390,11 +1401,12 @@ def test_change_image(augmentation_cls, params):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
-            A.Superpixels: {"p_replace": (1, 1),
-                             "n_segments": (10, 10),
-                             "max_size": 10
-                            },
-            A.FancyPCA: {"alpha":1}
+            A.Superpixels: {
+                "p_replace": (1, 1),
+                "n_segments": (10, 10),
+                "max_size": 10
+            },
+            A.FancyPCA: {"alpha": 1}
         },
         except_augmentations={
             A.Crop,
@@ -1427,18 +1439,19 @@ def test_change_image(augmentation_cls, params):
             A.ChannelShuffle,
             A.ChromaticAberration,
             A.RandomRotate90,
-            A.FancyPCA
+            A.FancyPCA,
+            A.PlanckianJitter
         },
     ),
 )
-def test_selective_channel(augmentation_cls, params):
-    set_seed(0)
+def test_selective_channel(augmentation_cls: BasicTransform, params: Dict[str, Any]) -> None:
+    set_seed(3)
 
     image = SQUARE_MULTI_UINT8_IMAGE
     channels = [3, 2, 4]
 
     aug = A.Compose(
-        [A.SelectiveChannelTransform(transforms=[augmentation_cls(**params, always_apply=True, p=1)], channels=channels, always_apply=True, p=1)],
+        [A.SelectiveChannelTransform(transforms=[augmentation_cls(**params, p=1)], channels=channels, p=1)],
     )
 
     transformed_image = aug(image=image)["image"]
@@ -1713,3 +1726,26 @@ def test_crop_and_pad_px_pixel_values(px, expected_shape):
             crop_top, crop_right, crop_bottom, crop_left = [-p for p in px]
             cropped_region = image[crop_top:image.shape[0] - crop_bottom, crop_left:image.shape[1] - crop_right, :]
             assert np.all(transformed_image == cropped_region)
+
+
+@pytest.mark.parametrize("params, expected", [
+    # Test default initialization values
+    ({}, {"fog_coef_range": (0.3, 1)}),
+    # Test fog coefficient range
+    ({"fog_coef_range": (0.4, 0.7)}, {"fog_coef_range": (0.4, 0.7)}),
+    # Deprecated fog coefficient values handling
+    ({"fog_coef_lower": 0.2}, {"fog_coef_range": (0.2, 1)}),
+    ({"fog_coef_upper": 0.6}, {"fog_coef_range": (0.3, 0.6)}),
+])
+def test_random_fog_initialization(params, expected):
+    img_fog = A.RandomFog(**params)
+    for key, value in expected.items():
+        assert getattr(img_fog, key) == value, f"Failed on {key} with value {value}"
+
+@pytest.mark.parametrize("params", [
+    ({"fog_coef_range": (1.2, 1.5)}),  # Invalid fog coefficient range -> upper bound
+    ({"fog_coef_range": (0.9, 0.7)}),  # Invalid range  -> decreasing
+])
+def test_random_fog_invalid_input(params):
+    with pytest.raises(Exception):
+        img_fog = A.RandomFog(**params)

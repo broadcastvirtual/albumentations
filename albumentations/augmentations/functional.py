@@ -5,8 +5,17 @@ from warnings import warn
 import cv2
 import numpy as np
 import skimage
-from albucore.functions import clip, clipped, multiply, preserve_channel_dim
-from albucore.utils import MAX_VALUES_BY_DTYPE, contiguous, is_grayscale_image, is_rgb_image, maybe_process_in_chunks
+from albucore.functions import add, add_weighted, multiply, multiply_add
+from albucore.utils import (
+    MAX_VALUES_BY_DTYPE,
+    clip,
+    clipped,
+    contiguous,
+    is_grayscale_image,
+    is_rgb_image,
+    maybe_process_in_chunks,
+    preserve_channel_dim,
+)
 from typing_extensions import Literal
 
 from albumentations import random_utils
@@ -15,12 +24,13 @@ from albumentations.augmentations.utils import (
 )
 from albumentations.core.types import (
     EIGHT,
-    FOUR,
     MONO_CHANNEL_DIMENSIONS,
+    NUM_MULTI_CHANNEL_DIMENSIONS,
     ColorType,
     ImageMode,
     NumericType,
-    ScalarType,
+    PlanckianJitterMode,
+    SizeType,
     SpatterMode,
 )
 
@@ -31,7 +41,6 @@ __all__ = [
     "add_gravel",
     "add_snow",
     "add_sun_flare",
-    "add_weighted",
     "adjust_brightness_torchvision",
     "adjust_contrast_torchvision",
     "adjust_hue_torchvision",
@@ -45,17 +54,14 @@ __all__ = [
     "fancy_pca",
     "from_float",
     "gamma_transform",
-    "gauss_noise",
     "image_compression",
     "invert",
     "iso_noise",
     "linear_transformation_rgb",
     "move_tone_curve",
     "noop",
-    "normalize",
     "posterize",
     "shift_hsv",
-    "shift_rgb",
     "solarize",
     "superpixels",
     "swap_tiles_on_image",
@@ -63,97 +69,12 @@ __all__ = [
     "to_gray",
     "gray_to_rgb",
     "unsharp_mask",
-    "MAX_VALUES_BY_DTYPE",
     "split_uniform_grid",
     "chromatic_aberration",
     "erode",
     "dilate",
+    "generate_approx_gaussian_noise",
 ]
-
-
-def normalize_cv2(img: np.ndarray, mean: np.ndarray, denominator: np.ndarray) -> np.ndarray:
-    if mean.shape and len(mean) != FOUR and mean.shape != img.shape:
-        mean = np.array(mean.tolist() + [0] * (4 - len(mean)), dtype=np.float64)
-    if not denominator.shape:
-        denominator = np.array([denominator.tolist()] * 4, dtype=np.float64)
-    elif len(denominator) != FOUR and denominator.shape != img.shape:
-        denominator = np.array(denominator.tolist() + [1] * (4 - len(denominator)), dtype=np.float64)
-
-    img = np.ascontiguousarray(img.astype("float32"))
-    cv2.subtract(img, mean.astype(np.float64), img)
-    cv2.multiply(img, denominator.astype(np.float64), img)
-    return img
-
-
-def normalize_numpy(img: np.ndarray, mean: np.ndarray, denominator: np.ndarray) -> np.ndarray:
-    img = img.astype(np.float32)
-    img -= mean
-    img *= denominator
-    return img
-
-
-@preserve_channel_dim
-def normalize(img: np.ndarray, mean: np.ndarray, denominator: np.ndarray) -> np.ndarray:
-    if is_rgb_image(img):
-        return normalize_cv2(img, mean, denominator)
-
-    return normalize_numpy(img, mean, denominator)
-
-
-@preserve_channel_dim
-def normalize_per_image(
-    img: np.ndarray,
-    normalization: Literal["image", "image_per_channel", "min_max", "min_max_per_channel"],
-) -> np.ndarray:
-    """Apply per-image normalization based on the specified strategy.
-
-    Args:
-        img (np.ndarray): The image to be normalized, expected to be in HWC format.
-        normalization (str): The normalization strategy to apply. Options include:
-                             "image", "image_per_channel", "min_max", "min_max_per_channel".
-
-    Returns:
-        np.ndarray: The normalized image.
-
-    Reference:
-        https://github.com/ChristofHenkel/kaggle-landmark-2021-1st-place/blob/main/data/ch_ds_1.py
-    """
-    img = img.astype(np.float32)
-    eps = 1e-4
-
-    if img.ndim == MONO_CHANNEL_DIMENSIONS:
-        img = np.expand_dims(img, axis=-1)  # Ensure the image is at least 3D
-
-    if normalization == "image":
-        # Normalize the whole image based on its global mean and std
-        mean = img.mean()
-        std = img.std() + eps  # Adding a small epsilon to avoid division by zero
-        normalized_img = (img - mean) / std
-        normalized_img = normalized_img.clip(-20, 20)  # Clipping outliers
-
-    elif normalization == "image_per_channel":
-        # Normalize the image per channel based on each channel's mean and std
-        pixel_mean = img.mean(axis=(0, 1))
-        pixel_std = img.std(axis=(0, 1)) + eps
-        normalized_img = (img - pixel_mean[None, None, :]) / pixel_std[None, None, :]
-        normalized_img = normalized_img.clip(-20, 20)
-
-    elif normalization == "min_max":
-        # Apply min-max normalization to the whole image
-        img_min = img.min()
-        img_max = img.max()
-        normalized_img = (img - img_min) / (img_max - img_min + eps)
-
-    elif normalization == "min_max_per_channel":
-        # Apply min-max normalization per channel
-        img_min = img.min(axis=(0, 1), keepdims=True)
-        img_max = img.max(axis=(0, 1), keepdims=True)
-        normalized_img = (img - img_min) / (img_max - img_min + eps)
-
-    else:
-        raise ValueError(f"Unknown normalization method: {normalization}")
-
-    return normalized_img
 
 
 def _shift_hsv_uint8(
@@ -171,15 +92,8 @@ def _shift_hsv_uint8(
         lut_hue = np.mod(lut_hue + hue_shift, 180).astype(dtype)
         hue = cv2.LUT(hue, lut_hue)
 
-    if sat_shift != 0:
-        lut_sat = np.arange(0, 256, dtype=np.int16)
-        lut_sat = clip(lut_sat + sat_shift, img.dtype)
-        sat = cv2.LUT(sat, lut_sat)
-
-    if val_shift != 0:
-        lut_val = np.arange(0, 256, dtype=np.int16)
-        lut_val = clip(lut_val + val_shift, img.dtype)
-        val = cv2.LUT(val, lut_val)
+    sat = add(sat, sat_shift)
+    val = add(val, val_shift)
 
     img = cv2.merge((hue, sat, val)).astype(dtype)
     return cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
@@ -191,7 +105,6 @@ def _shift_hsv_non_uint8(
     sat_shift: np.ndarray,
     val_shift: np.ndarray,
 ) -> np.ndarray:
-    dtype = img.dtype
     img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     hue, sat, val = cv2.split(img)
 
@@ -199,11 +112,8 @@ def _shift_hsv_non_uint8(
         hue = cv2.add(hue, hue_shift)
         hue = np.mod(hue, 360)  # OpenCV fails with negative values
 
-    if sat_shift != 0:
-        sat = clip(cv2.add(sat, sat_shift), dtype)
-
-    if val_shift != 0:
-        val = clip(cv2.add(val, val_shift), dtype)
+    sat = add(sat, sat_shift)
+    val = add(val, val_shift)
 
     img = cv2.merge((hue, sat, val))
     return cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
@@ -461,52 +371,6 @@ def move_tone_curve(img: np.ndarray, low_y: float, high_y: float) -> np.ndarray:
 
 
 @clipped
-def _shift_rgb_non_uint8(img: np.ndarray, r_shift: float, g_shift: float, b_shift: float) -> np.ndarray:
-    if r_shift == g_shift == b_shift:
-        return img + r_shift
-
-    result_img = np.empty_like(img)
-    shifts = [r_shift, g_shift, b_shift]
-    for i, shift in enumerate(shifts):
-        result_img[..., i] = img[..., i] + shift
-
-    return result_img
-
-
-def _shift_image_uint8(img: np.ndarray, value: np.ndarray) -> np.ndarray:
-    max_value = MAX_VALUES_BY_DTYPE[img.dtype]
-
-    lut = np.arange(0, max_value + 1).astype("float32")
-    lut += value
-
-    lut = clip(lut, img.dtype)
-    return cv2.LUT(img, lut)
-
-
-@preserve_channel_dim
-def _shift_rgb_uint8(img: np.ndarray, r_shift: ScalarType, g_shift: ScalarType, b_shift: ScalarType) -> np.ndarray:
-    if r_shift == g_shift == b_shift:
-        height, width, channels = img.shape
-        img = img.reshape([height, width * channels])
-
-        return _shift_image_uint8(img, r_shift)
-
-    result_img = np.empty_like(img)
-    shifts = [r_shift, g_shift, b_shift]
-    for i, shift in enumerate(shifts):
-        result_img[..., i] = _shift_image_uint8(img[..., i], shift)
-
-    return result_img
-
-
-def shift_rgb(img: np.ndarray, r_shift: ScalarType, g_shift: ScalarType, b_shift: ScalarType) -> np.ndarray:
-    if img.dtype == np.uint8:
-        return _shift_rgb_uint8(img, r_shift, g_shift, b_shift)
-
-    return _shift_rgb_non_uint8(img, r_shift, g_shift, b_shift)
-
-
-@clipped
 def linear_transformation_rgb(img: np.ndarray, transformation_matrix: np.ndarray) -> np.ndarray:
     return cv2.transform(img, transformation_matrix)
 
@@ -721,7 +585,7 @@ def add_fog(img: np.ndarray, fog_coef: float, alpha_coef: float, haze_list: List
         rad = hw // 2
         point = (x + hw // 2, y + hw // 2)
         cv2.circle(overlay, point, int(rad), (255, 255, 255), -1)
-        cv2.addWeighted(overlay, alpha, output, 1 - alpha, 0, output)
+        output = add_weighted(overlay, alpha, output, 1 - alpha)
 
         img = output.copy()
 
@@ -773,8 +637,7 @@ def add_sun_flare(
 
     for alpha, (x, y), rad3, (r_color, g_color, b_color) in circles:
         cv2.circle(overlay, (x, y), rad3, (r_color, g_color, b_color), -1)
-
-        cv2.addWeighted(overlay, alpha, output, 1 - alpha, 0, output)
+        output = add_weighted(overlay, alpha, output, 1 - alpha)
 
     point = (int(flare_center_x), int(flare_center_y))
 
@@ -785,14 +648,12 @@ def add_sun_flare(
     for i in range(num_times):
         cv2.circle(overlay, point, int(rad[i]), src_color, -1)
         alp = alpha[num_times - i - 1] * alpha[num_times - i - 1] * alpha[num_times - i - 1]
-        cv2.addWeighted(overlay, alp, output, 1 - alp, 0, output)
-
-    image_rgb = output
+        output = add_weighted(overlay, alp, output, 1 - alp)
 
     if needs_float:
-        image_rgb = to_float(image_rgb, max_value=255)
+        return to_float(output, max_value=255)
 
-    return image_rgb
+    return output
 
 
 @contiguous
@@ -828,7 +689,7 @@ def add_shadow(img: np.ndarray, vertices_list: List[np.ndarray]) -> np.ndarray:
     shadow_intensity = 0.5  # Adjust this value to control the shadow intensity
     img_shadowed = img.copy()
     shadowed_indices = mask[:, :, 0] == max_value
-    img_shadowed[shadowed_indices] = (img_shadowed[shadowed_indices] * shadow_intensity).astype(np.uint8)
+    img_shadowed[shadowed_indices] = clip(img_shadowed[shadowed_indices] * shadow_intensity, np.uint8)
 
     if needs_float:
         return to_float(img_shadowed, max_value=max_value)
@@ -894,68 +755,19 @@ def gamma_transform(img: np.ndarray, gamma: float) -> np.ndarray:
     return np.power(img, gamma)
 
 
-@clipped
-def gauss_noise(image: np.ndarray, gauss: np.ndarray) -> np.ndarray:
-    image = image.astype("float32")
-    return image + gauss
-
-
-@clipped
-def _brightness_contrast_adjust_non_uint(
-    img: np.ndarray,
-    alpha: float = 1,
-    beta: float = 0,
-    beta_by_max: bool = False,
-) -> np.ndarray:
-    dtype = img.dtype
-    img = img.astype("float32")
-
-    if alpha != 1:
-        img *= alpha
-    if beta != 0:
-        if beta_by_max:
-            max_value = MAX_VALUES_BY_DTYPE[dtype]
-            img += beta * max_value
-        else:
-            img += beta * np.mean(img)
-    return img
-
-
-@preserve_channel_dim
-def _brightness_contrast_adjust_uint(
-    img: np.ndarray,
-    alpha: float = 1,
-    beta: float = 0,
-    beta_by_max: bool = False,
-) -> np.ndarray:
-    dtype = np.dtype("uint8")
-
-    max_value = MAX_VALUES_BY_DTYPE[dtype]
-
-    lut = np.arange(0, max_value + 1).astype("float32")
-
-    if alpha != 1:
-        lut *= alpha
-    if beta != 0:
-        if beta_by_max:
-            lut += beta * max_value
-        else:
-            lut += (alpha * beta) * np.mean(img)
-
-    lut = clip(lut, img.dtype)
-    return cv2.LUT(img, lut)
-
-
 def brightness_contrast_adjust(
     img: np.ndarray,
     alpha: float = 1,
     beta: float = 0,
     beta_by_max: bool = False,
 ) -> np.ndarray:
-    if img.dtype == np.uint8:
-        return _brightness_contrast_adjust_uint(img, alpha, beta, beta_by_max)
+    if beta_by_max:
+        max_value = MAX_VALUES_BY_DTYPE[img.dtype]
+        value = beta * max_value
+    else:
+        value = beta * np.mean(img)
 
-    return _brightness_contrast_adjust_non_uint(img, alpha, beta, beta_by_max)
+    return multiply_add(img, alpha, value)
 
 
 @clipped
@@ -991,7 +803,7 @@ def iso_noise(
         raise TypeError(msg)
 
     one_over_255 = float(1.0 / 255.0)
-    image = np.multiply(image, one_over_255, dtype=np.float32)
+    image = multiply(image, one_over_255).astype(np.float32)
     hls = cv2.cvtColor(image, cv2.COLOR_RGB2HLS)
     _, stddev = cv2.meanStdDev(hls)
 
@@ -1127,17 +939,19 @@ def mask_from_bbox(img: np.ndarray, bbox: Tuple[int, int, int, int]) -> np.ndarr
 
 
 def fancy_pca(img: np.ndarray, alpha: float = 0.1) -> np.ndarray:
-    """Perform 'Fancy PCA' augmentation from:
-    http://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks.pdf
+    """Perform 'Fancy PCA' augmentation
+
 
     Args:
         img: numpy array with (h, w, rgb) shape, as ints between 0-255
-        alpha: how much to perturb/scale the eigen vecs and vals
+        alpha: how much to perturb/scale the eigen vectors and values
                 the paper used std=0.1
 
     Returns:
         numpy image-like array as uint8 range(0, 255)
 
+    Reference:
+        http://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks.pdf
     """
     if not is_rgb_image(img) or img.dtype != np.uint8:
         msg = "Image must be RGB image in uint8 format."
@@ -1199,14 +1013,6 @@ def adjust_brightness_torchvision(img: np.ndarray, factor: np.ndarray) -> np:
     return multiply(img, factor)
 
 
-def _adjust_contrast_torchvision_uint8(img: np.ndarray, factor: float, mean: np.ndarray) -> np.ndarray:
-    lut = np.arange(0, 256) * factor
-    lut = lut + mean * (1 - factor)
-    lut = clip(lut, img.dtype)
-
-    return cv2.LUT(img, lut)
-
-
 @preserve_channel_dim
 def adjust_contrast_torchvision(img: np.ndarray, factor: float) -> np.ndarray:
     if factor == 1:
@@ -1219,10 +1025,7 @@ def adjust_contrast_torchvision(img: np.ndarray, factor: float) -> np.ndarray:
             mean = int(mean + 0.5)
         return np.full_like(img, mean, dtype=img.dtype)
 
-    if img.dtype == np.uint8:
-        return _adjust_contrast_torchvision_uint8(img, factor, mean)
-
-    return clip(img.astype(np.float32) * factor + mean * (1 - factor), img.dtype)
+    return multiply_add(img, factor, mean * (1 - factor))
 
 
 @preserve_channel_dim
@@ -1243,7 +1046,6 @@ def adjust_saturation_torchvision(img: np.ndarray, factor: float, gamma: float =
     if img.dtype == np.uint8:
         return result
 
-    # OpenCV does not clip values for float dtype
     return clip(result, img.dtype)
 
 
@@ -1341,13 +1143,6 @@ def superpixels(
 
 @clipped
 @preserve_channel_dim
-def add_weighted(img1: np.ndarray, alpha: float, img2: np.ndarray, beta: float) -> np.ndarray:
-    img2 = img2.reshape(img1.shape).astype(img1.dtype)
-    return cv2.addWeighted(img1, alpha, img2, beta, 0)
-
-
-@clipped
-@preserve_channel_dim
 def unsharp_mask(
     image: np.ndarray,
     ksize: int,
@@ -1375,7 +1170,8 @@ def unsharp_mask(
     sharp = np.clip(sharp, 0, 1)
 
     soft_mask = blur_fn(mask)
-    output = soft_mask * sharp + (1 - soft_mask) * image
+    output = add(multiply(sharp, soft_mask), multiply(image, 1 - soft_mask))
+
     return from_float(output, dtype=input_dtype)
 
 
@@ -1639,3 +1435,104 @@ def center(width: NumericType, height: NumericType) -> Tuple[float, float]:
         Tuple[float, float]: The center coordinates of the rectangle.
     """
     return width / 2 - 0.5, height / 2 - 0.5
+
+
+PLANCKIAN_COEFFS = {
+    "blackbody": {
+        3_000: [0.6743, 0.4029, 0.0013],
+        3_500: [0.6281, 0.4241, 0.1665],
+        4_000: [0.5919, 0.4372, 0.2513],
+        4_500: [0.5623, 0.4457, 0.3154],
+        5_000: [0.5376, 0.4515, 0.3672],
+        5_500: [0.5163, 0.4555, 0.4103],
+        6_000: [0.4979, 0.4584, 0.4468],
+        6_500: [0.4816, 0.4604, 0.4782],
+        7_000: [0.4672, 0.4619, 0.5053],
+        7_500: [0.4542, 0.4630, 0.5289],
+        8_000: [0.4426, 0.4638, 0.5497],
+        8_500: [0.4320, 0.4644, 0.5681],
+        9_000: [0.4223, 0.4648, 0.5844],
+        9_500: [0.4135, 0.4651, 0.5990],
+        10_000: [0.4054, 0.4653, 0.6121],
+        10_500: [0.3980, 0.4654, 0.6239],
+        11_000: [0.3911, 0.4655, 0.6346],
+        11_500: [0.3847, 0.4656, 0.6444],
+        12_000: [0.3787, 0.4656, 0.6532],
+        12_500: [0.3732, 0.4656, 0.6613],
+        13_000: [0.3680, 0.4655, 0.6688],
+        13_500: [0.3632, 0.4655, 0.6756],
+        14_000: [0.3586, 0.4655, 0.6820],
+        14_500: [0.3544, 0.4654, 0.6878],
+        15_000: [0.3503, 0.4653, 0.6933],
+    },
+    "cied": {
+        4_000: [0.5829, 0.4421, 0.2288],
+        4_500: [0.5510, 0.4514, 0.2948],
+        5_000: [0.5246, 0.4576, 0.3488],
+        5_500: [0.5021, 0.4618, 0.3941],
+        6_000: [0.4826, 0.4646, 0.4325],
+        6_500: [0.4654, 0.4667, 0.4654],
+        7_000: [0.4502, 0.4681, 0.4938],
+        7_500: [0.4364, 0.4692, 0.5186],
+        8_000: [0.4240, 0.4700, 0.5403],
+        8_500: [0.4127, 0.4705, 0.5594],
+        9_000: [0.4023, 0.4709, 0.5763],
+        9_500: [0.3928, 0.4713, 0.5914],
+        10_000: [0.3839, 0.4715, 0.6049],
+        10_500: [0.3757, 0.4716, 0.6171],
+        11_000: [0.3681, 0.4717, 0.6281],
+        11_500: [0.3609, 0.4718, 0.6380],
+        12_000: [0.3543, 0.4719, 0.6472],
+        12_500: [0.3480, 0.4719, 0.6555],
+        13_000: [0.3421, 0.4719, 0.6631],
+        13_500: [0.3365, 0.4719, 0.6702],
+        14_000: [0.3313, 0.4719, 0.6766],
+        14_500: [0.3263, 0.4719, 0.6826],
+        15_000: [0.3217, 0.4719, 0.6882],
+    },
+}
+
+
+@clipped
+def planckian_jitter(img: np.ndarray, temperature: int, mode: PlanckianJitterMode = "blackbody") -> np.ndarray:
+    img = img.copy()
+    # Linearly interpolate between 2 closest temperatures
+    step = 500
+    t_left = (temperature // step) * step
+    t_right = (temperature // step + 1) * step
+
+    w_left = (t_right - temperature) / step
+    w_right = (temperature - t_left) / step
+
+    coeffs = w_left * np.array(PLANCKIAN_COEFFS[mode][t_left]) + w_right * np.array(PLANCKIAN_COEFFS[mode][t_right])
+
+    image = img / 255.0 if img.dtype == np.uint8 else img
+
+    image[:, :, 0] = image[:, :, 0] * (coeffs[0] / coeffs[1])
+    image[:, :, 2] = image[:, :, 2] * (coeffs[2] / coeffs[1])
+    image[image > 1] = 1
+
+    if img.dtype == np.uint8:
+        return image * 255.0
+
+    return image
+
+
+def generate_approx_gaussian_noise(
+    shape: SizeType,
+    mean: float = 0,
+    sigma: float = 1,
+    scale: float = 0.25,
+) -> np.ndarray:
+    # Determine the low-resolution shape
+    downscaled_height = int(shape[0] * scale)
+    downsaled_width = int(shape[1] * scale)
+
+    if len(shape) == NUM_MULTI_CHANNEL_DIMENSIONS:
+        low_res_noise = random_utils.normal(mean, sigma, (downscaled_height, downsaled_width, shape[-1]))
+    else:
+        low_res_noise = random_utils.normal(mean, sigma, (downscaled_height, downsaled_width))
+
+    # Upsample the noise to the original shape using OpenCV
+    result = cv2.resize(low_res_noise, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+    return result.reshape(shape)
