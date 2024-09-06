@@ -1,4 +1,5 @@
 from typing import Optional
+import warnings
 import pytest
 import cv2
 
@@ -100,7 +101,8 @@ def test_create_symmetric_range(value, expected):
     assert create_symmetric_range(value) == expected
 
 @pytest.mark.parametrize("value", [
-    (0.9),  # Invalid input
+    (0, 0.9),  # Invalid input
+    (0, 1.1),  # Invalid input
 ])
 def test_check_1plus_range_with_invalid_input(value):
     with pytest.raises(ValueError):
@@ -108,14 +110,13 @@ def test_check_1plus_range_with_invalid_input(value):
 
 @pytest.mark.parametrize("value,expected", [
     ((1, 2), (1.0, 2.0)),
-    (2, (1.0, 2.0)),
 ])
 def test_check_1plus_range_with_valid_input(value, expected):
     assert check_1plus_range(value) == expected
 
 @pytest.mark.parametrize("value", [
-    (-0.1),
-    (1.2),
+    (0, -0.1),
+    (2, 1.2),
 ])
 def test_check_01_range_with_invalid_input(value):
     with pytest.raises(ValueError):
@@ -123,7 +124,7 @@ def test_check_01_range_with_invalid_input(value):
 
 @pytest.mark.parametrize("value,expected", [
     ((0, 1), (0.0, 1.0)),
-    ((0.3), (0.0, 0.3)),
+    ((0, 0.3), (0.0, 0.3)),
 ])
 def test_check_01_range_with_valid_input(value, expected):
     assert check_01_range(value) == expected
@@ -304,3 +305,15 @@ def test_custom_image_transform_signature():
     assert expected_params['always_apply'].default is False
     assert expected_params['p'].default == 0.5
     assert expected_params['custom_param'].annotation is int
+
+
+def test_wrong_argument() -> None:
+    """Test that pas Transform will get warning"""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        transform = A.Crop(wrong_param=10)
+        assert not hasattr(transform, "wrong_param")
+        assert len(w) == 1
+        assert issubclass(w[0].category, UserWarning)
+        assert str(w[0].message) == "Argument 'wrong_param' is not valid and will be ignored."
+    warnings.resetwarnings()

@@ -191,10 +191,10 @@ class RandomGridShuffle(DualTransform):
         return keypoint
 
     def get_params_dependent_on_targets(self, params: Dict[str, Any]) -> Dict[str, np.ndarray]:
-        height, weight = params["image"].shape[:2]
+        height, width = params["image"].shape[:2]
         random_state = random_utils.get_random_state()
         original_tiles = F.split_uniform_grid(
-            (height, weight),
+            (height, width),
             self.grid,
             random_state=random_state,
         )
@@ -239,8 +239,6 @@ class Normalize(ImageOnlyTransform):
                 minimum and maximum pixel values.
             - "min_max_per_channel": Scales each channel of the image pixel values to a [0, 1]
                 range based on the per-channel minimum and maximum pixel values.
-            - "inception": Applies normalization suitable for Inception models
-                with mean and std values of (0.5, 0.5, 0.5) respectively.
 
         p (float): Probability of applying the transform. Defaults to 1.0.
 
@@ -252,7 +250,6 @@ class Normalize(ImageOnlyTransform):
 
     Note:
         For "standard" normalization, `mean`, `std`, and `max_pixel_value` must be provided.
-        For "inception" normalization, the specific mean and std values should be used.
         For other normalization types, these parameters are ignored.
     """
 
@@ -272,7 +269,6 @@ class Normalize(ImageOnlyTransform):
             "image_per_channel",
             "min_max",
             "min_max_per_channel",
-            "inception",
         ] = "standard"
         p: ProbabilityType = 1
 
@@ -1379,9 +1375,9 @@ class RGBShift(ImageOnlyTransform):
 
     def get_params(self) -> Dict[str, Any]:
         return {
-            "r_shift": random.uniform(self.r_shift_limit[0], self.r_shift_limit[1]),
-            "g_shift": random.uniform(self.g_shift_limit[0], self.g_shift_limit[1]),
-            "b_shift": random.uniform(self.b_shift_limit[0], self.b_shift_limit[1]),
+            "r_shift": random_utils.uniform(self.r_shift_limit[0], self.r_shift_limit[1]),
+            "g_shift": random_utils.uniform(self.g_shift_limit[0], self.g_shift_limit[1]),
+            "b_shift": random_utils.uniform(self.b_shift_limit[0], self.b_shift_limit[1]),
         }
 
     def get_transform_init_args_names(self) -> Tuple[str, str, str]:
@@ -1610,7 +1606,7 @@ class CLAHE(ImageOnlyTransform):
 
 
 class ChannelShuffle(ImageOnlyTransform):
-    """Randomly rearrange channels of the input RGB image.
+    """Randomly rearrange channels of the image.
 
     Args:
         p: probability of applying the transform. Default: 0.5.
@@ -1627,7 +1623,7 @@ class ChannelShuffle(ImageOnlyTransform):
     def targets_as_params(self) -> List[str]:
         return ["image"]
 
-    def apply(self, img: np.ndarray, channels_shuffled: Tuple[int, int, int] = (0, 1, 2), **params: Any) -> np.ndarray:
+    def apply(self, img: np.ndarray, channels_shuffled: Tuple[int, ...] = (0, 1, 2), **params: Any) -> np.ndarray:
         return F.channel_shuffle(img, channels_shuffled)
 
     def get_params_dependent_on_targets(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1711,11 +1707,12 @@ class RandomGamma(ImageOnlyTransform):
 
 
 class ToGray(ImageOnlyTransform):
-    """Convert the input RGB image to grayscale. If the mean pixel value for the resulting image is greater
-    than 127, invert the resulting grayscale image.
+    """Convert the input RGB image to grayscale. If the input image is already grayscale, a warning is issued but
+    the original image is returned unchanged. This transformation checks if the image is RGB; if not, it raises
+    a TypeError.
 
     Args:
-        p: probability of applying the transform. Default: 0.5.
+        p (float): Probability of applying the transform. Default is 0.5.
 
     Targets:
         image
@@ -1723,6 +1720,11 @@ class ToGray(ImageOnlyTransform):
     Image types:
         uint8, float32
 
+    Note:
+        This transform assumes the input image is in RGB format.
+
+    Raises:
+        TypeError: If the input image is not a 3-channel RGB image.
     """
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
@@ -2139,7 +2141,7 @@ class FancyPCA(ImageOnlyTransform):
     "ImageNet Classification with Deep Convolutional Neural Networks"
 
     Args:
-        alpha:  how much to perturb/scale the eigen vecs and vals.
+        alpha:  how much to perturb/scale the eigen vectors and eigenvalues.
             scale is samples from gaussian distribution (mu=0, sigma=alpha)
 
     Targets:
@@ -2413,9 +2415,9 @@ class Superpixels(ImageOnlyTransform):
                 * A probability of ``0.5`` would mean, that around half of all
                   segments are replaced by their average color.
                 * A probability of ``1.0`` would mean, that all segments are
-                  replaced by their average color (resulting in a voronoi
+                  replaced by their average color (resulting in a Voronoi
                   image).
-            Behaviour based on chosen data types for this parameter:
+            Behavior based on chosen data types for this parameter:
                 * If a ``float``, then that ``flat`` will always be used.
                 * If ``tuple`` ``(a, b)``, then a random probability will be
                   sampled from the interval ``[a, b]`` per image.

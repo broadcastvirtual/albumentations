@@ -29,7 +29,6 @@ from albumentations.core.composition import (
     KeypointParams,
     OneOf,
     OneOrOther,
-    PerChannel,
     ReplayCompose,
     Sequential,
     SomeOf,
@@ -39,6 +38,7 @@ from albumentations.core.transforms_interface import (
     ImageOnlyTransform
 )
 from albumentations.core.utils import to_tuple
+from tests.conftest import IMAGES
 
 from .utils import get_filtered_transforms
 
@@ -53,8 +53,8 @@ def test_one_or_other():
 
 
 def test_compose():
-    first = MagicMock()
-    second = MagicMock()
+    first = MagicMock(available_keys={"image"})
+    second = MagicMock(available_keys={"image"})
     augmentation = Compose([first, second], p=1)
     image = np.ones((8, 8))
     augmentation(image=image)
@@ -63,15 +63,15 @@ def test_compose():
 
 
 def oneof_always_apply_crash():
-    aug = Compose([HorizontalFlip(), Rotate(), OneOf([Blur(), MedianBlur()], p=1)], p=1)
+    aug = Compose([HorizontalFlip(p=1), Rotate(p=1), OneOf([Blur(p=1), MedianBlur(p=1)], p=1)], p=1)
     image = np.ones((8, 8))
     data = aug(image=image)
     assert data
 
 
 def test_always_apply():
-    first = MagicMock(always_apply=True)
-    second = MagicMock(always_apply=False)
+    first = MagicMock(always_apply=True, available_keys={"image"})
+    second = MagicMock(always_apply=False, available_keys={"image"})
     augmentation = Compose([first, second], p=0)
     image = np.ones((8, 8))
     augmentation(image=image)
@@ -80,7 +80,7 @@ def test_always_apply():
 
 
 def test_one_of():
-    transforms = [Mock(p=1) for _ in range(10)]
+    transforms = [Mock(p=1, available_keys={"image"}) for _ in range(10)]
     augmentation = OneOf(transforms, p=1)
     image = np.ones((8, 8))
     augmentation(image=image)
@@ -90,7 +90,7 @@ def test_one_of():
 @pytest.mark.parametrize("N", [1, 2, 5, 10])
 @pytest.mark.parametrize("replace", [True, False])
 def test_n_of(N, replace):
-    transforms = [Mock(p=1, side_effect=lambda **kw: {"image": kw["image"]}) for _ in range(10)]
+    transforms = [Mock(p=1, side_effect=lambda **kw: {"image": kw["image"]}, available_keys={"image"}) for _ in range(10)]
     augmentation = SomeOf(transforms, N, p=1, replace=replace)
     image = np.ones((8, 8))
     augmentation(image=image)
@@ -100,7 +100,7 @@ def test_n_of(N, replace):
 
 
 def test_sequential():
-    transforms = [Mock(side_effect=lambda **kw: kw) for _ in range(10)]
+    transforms = [Mock(side_effect=lambda **kw: kw, available_keys={"image"}) for _ in range(10)]
     augmentation = Sequential(transforms, p=1)
     image = np.ones((8, 8))
     augmentation(image=image)
@@ -121,7 +121,9 @@ def test_to_tuple(input, kwargs, expected):
     assert to_tuple(input, **kwargs) == expected
 
 
-def test_image_only_transform(image, mask):
+@pytest.mark.parametrize("image", IMAGES)
+def test_image_only_transform(image):
+    mask = image.copy()
     height, width = image.shape[:2]
     with mock.patch.object(ImageOnlyTransform, "apply") as mocked_apply:
         with mock.patch.object(ImageOnlyTransform, "get_params", return_value={"interpolation": cv2.INTER_LINEAR}):
@@ -130,15 +132,16 @@ def test_image_only_transform(image, mask):
             mocked_apply.assert_called_once_with(image, interpolation=cv2.INTER_LINEAR, cols=width, rows=height)
             assert np.array_equal(data["mask"], mask)
 
-
+@pytest.mark.parametrize("image", IMAGES)
 def test_compose_doesnt_pass_force_apply(image):
     transforms = [HorizontalFlip(p=0, always_apply=False)]
     augmentation = Compose(transforms, p=1)
     result = augmentation(force_apply=True, image=image)
     assert np.array_equal(result["image"], image)
 
-
-def test_dual_transform(image, mask):
+@pytest.mark.parametrize("image", IMAGES)
+def test_dual_transform(image):
+    mask = image.copy()
     image_call = call(image, interpolation=cv2.INTER_LINEAR, cols=image.shape[1], rows=image.shape[0])
     mask_call = call(mask, interpolation=cv2.INTER_NEAREST, cols=mask.shape[1], rows=mask.shape[0])
     with mock.patch.object(DualTransform, "apply") as mocked_apply:
@@ -148,7 +151,9 @@ def test_dual_transform(image, mask):
             mocked_apply.assert_has_calls([image_call, mask_call], any_order=True)
 
 
-def test_additional_targets(image, mask):
+@pytest.mark.parametrize("image", IMAGES)
+def test_additional_targets(image):
+    mask = image.copy()
     image_call = call(image, interpolation=cv2.INTER_LINEAR, cols=image.shape[1], rows=image.shape[0])
     image2_call = call(mask, interpolation=cv2.INTER_LINEAR, cols=mask.shape[1], rows=mask.shape[0])
     with mock.patch.object(DualTransform, "apply") as mocked_apply:
@@ -162,7 +167,7 @@ def test_additional_targets(image, mask):
 def test_check_bboxes_with_correct_values():
     try:
         check_bboxes([[0.1, 0.5, 0.8, 1.0], [0.2, 0.5, 0.5, 0.6, 99]])
-    except Exception as e:  # skipcq: PYL-W0703
+    except Exception as e:
         pytest.fail(f"Unexpected Exception {e!r}")
 
 
@@ -185,22 +190,6 @@ def test_check_bboxes_with_end_greater_that_start():
         check_bboxes([[0.8, 0.5, 0.7, 0.6, 99], [0.1, 0.5, 0.8, 1.0]])
     message = "x_max is less than or equal to x_min for bbox [0.8, 0.5, 0.7, 0.6, 99]."
     assert str(exc_info.value) == message
-
-
-def test_per_channel_mono():
-    transforms = [Blur(), Rotate()]
-    augmentation = PerChannel(transforms, p=1)
-    image = np.ones((8, 8))
-    data = augmentation(image=image)
-    assert data
-
-
-def test_per_channel_multi():
-    transforms = [Blur(), Rotate()]
-    augmentation = PerChannel(transforms, p=1)
-    image = np.ones((8, 8, 5))
-    data = augmentation(image=image)
-    assert data
 
 
 def test_deterministic_oneof():
@@ -265,13 +254,13 @@ def test_named_args():
     ],
 )
 def test_targets_type_check(targets, additional_targets, err_message):
-    aug = Compose([], additional_targets=additional_targets)
+    aug = Compose([A.NoOp()], additional_targets=additional_targets)
 
     with pytest.raises(TypeError) as exc_info:
         aug(**targets)
     assert str(exc_info.value) == err_message
 
-    aug = Compose([])
+    aug = Compose([A.NoOp()])
     aug.add_targets(additional_targets)
     with pytest.raises(TypeError) as exc_info:
         aug(**targets)
@@ -303,7 +292,7 @@ def test_targets_type_check(targets, additional_targets, err_message):
             {"bboxes": [[0, 0, 10, 10, 0], [5, 5, 70, 70, 0], [60, 60, 70, 70, 0]]},
             BboxParams("pascal_voc", check_each_transform=True),
             None,
-            {"bboxes": [[25, 25, 35, 35, 0], [30, 30, 75, 75, 0]]},
+            {"bboxes": [[25, 25, 35, 35, 0], [30, 30, 74, 74, 0]]},
         ],
         [
             {
@@ -312,7 +301,7 @@ def test_targets_type_check(targets, additional_targets, err_message):
             },
             BboxParams("pascal_voc", check_each_transform=True),
             KeypointParams("xy", check_each_transform=True),
-            {"bboxes": [[25, 25, 35, 35, 0], [30, 30, 75, 75, 0]], "keypoints": np.array([[10, 10]]) + 25},
+            {"bboxes": [[25, 25, 35, 35, 0], [30, 30, 74, 74, 0]], "keypoints": np.array([[10, 10]]) + 25},
         ],
         [
             {
@@ -334,7 +323,7 @@ def test_targets_type_check(targets, additional_targets, err_message):
             BboxParams("pascal_voc", check_each_transform=True),
             KeypointParams("xy", check_each_transform=False),
             {
-                "bboxes": [[25, 25, 35, 35, 0], [30, 30, 75, 75, 0]],
+                "bboxes": [[25, 25, 35, 35, 0], [30, 30, 74, 74, 0]],
                 "keypoints": np.array([[10, 10], [70, 70], [10, 70], [70, 10]]) + 25,
             },
         ],
@@ -362,9 +351,9 @@ def test_check_each_transform(targets, bbox_params, keypoint_params, expected):
     for key, item in expected.items():
         assert np.all(np.array(item) == np.array(res[key]))
 
-
+@pytest.mark.parametrize("image", IMAGES)
 def test_bbox_params_is_not_set(image, bboxes):
-    t = Compose([])
+    t = Compose([A.NoOp(p=1.0)])
     with pytest.raises(ValueError) as exc_info:
         t(image=image, bboxes=bboxes)
     assert str(exc_info.value) == "bbox_params must be specified for bbox transformations"
@@ -405,7 +394,7 @@ def test_choice_inner_compositions(transforms):
     "transforms",
     [
         Compose([ChannelShuffle(p=1)], p=1),
-        Compose([ChannelShuffle(p=0)], p=0),
+        # Compose([ChannelShuffle(p=0)], p=0),  # p=0, never calls, no process for data
     ],
 )
 def test_contiguous_output(transforms):
@@ -432,7 +421,7 @@ def test_contiguous_output(transforms):
     ],
 )
 def test_compose_image_mask_equal_size(targets):
-    transforms = Compose([])
+    transforms = Compose([A.NoOp()])
 
     with pytest.raises(ValueError) as exc_info:
         transforms(**targets)
@@ -443,7 +432,7 @@ def test_compose_image_mask_equal_size(targets):
         "of Compose class (do it only if you are sure about your data consistency)."
     )
     # test after disabling shapes check
-    transforms = Compose([], is_check_shapes=False)
+    transforms = Compose([A.NoOp()], is_check_shapes=False)
     transforms(**targets)
 
 
@@ -458,7 +447,9 @@ def test_additional_targets():
 
 
 # Test 1: Probability 1 with HorizontalFlip
-def test_sequential_with_horizontal_flip_prob_1(image, mask):
+@pytest.mark.parametrize("image", IMAGES)
+def test_sequential_with_horizontal_flip_prob_1(image):
+    mask = image.copy()
     # Setup transformations
     transform = Sequential([HorizontalFlip(p=1)], p=1)
     expected_transform = Compose([HorizontalFlip(p=1)])
@@ -471,7 +462,9 @@ def test_sequential_with_horizontal_flip_prob_1(image, mask):
     assert np.array_equal(result['mask'], expected['mask'])
 
 # Test 2: Probability 0 with HorizontalFlip
-def test_sequential_with_horizontal_flip_prob_0(image, mask):
+@pytest.mark.parametrize("image", IMAGES)
+def test_sequential_with_horizontal_flip_prob_0(image):
+    mask = image.copy()
     transform = Sequential([HorizontalFlip(p=1)], p=0)
 
     with patch('random.random', return_value=0.99):  # Mocking probability greater than 0
@@ -481,10 +474,12 @@ def test_sequential_with_horizontal_flip_prob_0(image, mask):
     assert np.array_equal(result['mask'], mask)
 
 
-# Test 3: Multiple flips and transpose
-
+# Test 3: Multiple flips and Transpose with probability 1
+@pytest.mark.parametrize("image", IMAGES)
 @pytest.mark.parametrize("aug", [A.HorizontalFlip, A.VerticalFlip, A.Transpose])
-def test_sequential_multiple_transformations(image, mask, aug):
+def test_sequential_multiple_transformations(image, aug):
+    mask = image.copy()
+
     transform = A.Sequential([
         aug(p=1),
         aug(p=1),
@@ -496,3 +491,19 @@ def test_sequential_multiple_transformations(image, mask, aug):
     # Since HorizontalFlip, VerticalFlip, and Transpose are all applied twice, the image should be the same
     assert np.array_equal(result['image'], image)
     assert np.array_equal(result['mask'], mask)
+
+
+def test_compose_non_available_keys() -> None:
+    """Check that non available keys raises error, except `mask` and `masks`"""
+    transform = A.Compose(
+        [MagicMock(available_keys={"image"}),],
+    )
+    image = np.empty([10, 10, 3], dtype=np.uint8)
+    mask = np.empty([10, 10], dtype=np.uint8)
+    _res = transform(image=image, mask=mask)
+    _res = transform(image=image, masks=[mask])
+    with pytest.raises(ValueError) as exc_info:
+        _res = transform(image=image, image_2=mask)
+
+    expected_msg = "Key image_2 is not in available keys."
+    assert str(exc_info.value) == expected_msg

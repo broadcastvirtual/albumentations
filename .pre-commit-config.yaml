@@ -44,7 +44,7 @@ repos:
       types: [python]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.3.7
+    rev: v0.4.2
     hooks:
       # Run the linter.
       - id: ruff
@@ -70,14 +70,14 @@ repos:
     hooks:
       - id: markdownlint
   - repo: https://github.com/tox-dev/pyproject-fmt
-    rev: "1.7.0"
+    rev: "1.8.0"
     hooks:
       - id: pyproject-fmt
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.9.0
+    rev: v1.10.0
     hooks:
       - id: mypy
         files: ^albumentations/
-        additional_dependencies: [ types-PyYAML, types-setuptools, pydantic>=2.6]
+        additional_dependencies: [ types-PyYAML, types-setuptools, pydantic>=2.7]
         args:
           [ --config-file=pyproject.toml ]

@@ -1,8 +1,9 @@
 import random
 import warnings
 from collections import defaultdict
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Union, cast
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Union, cast
 
+import cv2
 import numpy as np
 
 from albumentations import random_utils
@@ -30,12 +31,12 @@ __all__ = [
     "Sequential",
     "TransformType",
     "TransformsSeqType",
+    "SelectiveChannelTransform",
 ]
 
-TWO = 2
-
-
+NUM_ONEOF_TRANSFORMS = 2
 REPR_INDENT_STEP = 2
+
 TransformType = Union[BasicTransform, "BaseCompose"]
 TransformsSeqType = List[TransformType]
 
@@ -64,7 +65,9 @@ class BaseCompose(Serializable):
         self.replay_mode = False
         self.applied_in_replay = False
         self._additional_targets: Dict[str, str] = {}
+        self._available_keys: Set[str] = set()
         self.processors: Dict[str, Union[BboxProcessor, KeypointsProcessor]] = {}
+        self._set_keys()
 
     def __iter__(self) -> Iterator[TransformType]:
         return iter(self.transforms)
@@ -84,6 +87,10 @@ class BaseCompose(Serializable):
     @property
     def additional_targets(self) -> Dict[str, str]:
         return self._additional_targets
+
+    @property
+    def available_keys(self) -> Set[str]:
+        return self._available_keys
 
     def indented_repr(self, indent: int = REPR_INDENT_STEP) -> str:
         args = {k: v for k, v in self.to_dict_private().items() if not (k.startswith("__") or k == "transforms")}
@@ -126,11 +133,22 @@ class BaseCompose(Serializable):
                         f"Trying to overwrite existed additional targets. "
                         f"Key={k} Exists={self._additional_targets[k]} New value: {v}",
                     )
-                self._additional_targets.update(additional_targets)
+            self._additional_targets.update(additional_targets)
             for t in self.transforms:
                 t.add_targets(additional_targets)
             for proc in self.processors.values():
                 proc.add_targets(additional_targets)
+        self._set_keys()
+
+    def _set_keys(self) -> None:
+        """Set _available_keys"""
+        for t in self.transforms:
+            self._available_keys.update(t.available_keys)
+        if self.processors:
+            self._available_keys.update(["labels"])
+            for proc in self.processors.values():
+                if proc.params.label_fields:
+                    self._available_keys.update(proc.params.label_fields)
 
     def set_deterministic(self, flag: bool, save_key: str = "replay") -> None:
         for t in self.transforms:
@@ -191,6 +209,10 @@ class Compose(BaseCompose):
         self._disable_check_args_for_transforms(self.transforms)
 
         self.is_check_shapes = is_check_shapes
+        self._always_apply = get_always_apply(self.transforms)  # transforms list that always apply
+        self._check_each_transform = tuple(  # processors that checks after each transform
+            proc for proc in self.processors.values() if getattr(proc.params, "check_each_transform", False)
+        )
 
     @staticmethod
     def _disable_check_args_for_transforms(transforms: TransformsSeqType) -> None:
@@ -207,22 +229,22 @@ class Compose(BaseCompose):
         if args:
             msg = "You have to pass data to augmentations as named arguments, for example: aug(image=image)"
             raise KeyError(msg)
-        if self.is_check_args:
-            self._check_args(**data)
 
         if not isinstance(force_apply, (bool, int)):
             msg = "force_apply must have bool or int type"
             raise TypeError(msg)
 
         need_to_run = force_apply or random.random() < self.p
+        if not need_to_run and not self._always_apply:
+            return data
+
+        transforms = self.transforms if need_to_run else self._always_apply
+
+        if self.is_check_args:
+            self._check_args(**data)
 
         for p in self.processors.values():
             p.ensure_data_valid(data)
-        transforms = self.transforms if need_to_run else get_always_apply(self.transforms)
-
-        check_each_transform = any(
-            getattr(item.params, "check_each_transform", False) for item in self.processors.values()
-        )
 
         for p in self.processors.values():
             p.preprocess(data)
@@ -230,7 +252,7 @@ class Compose(BaseCompose):
         for t in transforms:
             data = t(**data)
 
-            if check_each_transform:
+            if self._check_each_transform:
                 data = self._check_data_post_transform(data)
         data = Compose._make_targets_contiguous(data)  # ensure output targets are contiguous
 
@@ -242,12 +264,12 @@ class Compose(BaseCompose):
     def _check_data_post_transform(self, data: Any) -> Dict[str, Any]:
         rows, cols = get_shape(data["image"])
 
-        for p in self.processors.values():
-            if not getattr(p.params, "check_each_transform", False):
-                continue
-
-            for data_name in p.data_fields:
-                data[data_name] = p.filter(data[data_name], rows, cols)
+        for p in self._check_each_transform:
+            for data_name in data:
+                if data_name in p.data_fields or (
+                    data_name in self._additional_targets and self._additional_targets[data_name] in p.data_fields
+                ):
+                    data[data_name] = p.filter(data[data_name], rows, cols)
         return data
 
     def to_dict_private(self) -> Dict[str, Any]:
@@ -283,8 +305,12 @@ class Compose(BaseCompose):
         checked_single = ["image", "mask"]
         checked_multi = ["masks"]
         check_bbox_param = ["bboxes"]
+        check_keypoints_param = ["keypoints"]
         shapes = []
         for data_name, data in kwargs.items():
+            if data_name not in self._available_keys and data_name not in ["mask", "masks"]:
+                msg = f"Key {data_name} is not in available keys."
+                raise ValueError(msg)
             internal_data_name = self._additional_targets.get(data_name, data_name)
             if internal_data_name in checked_single:
                 if not isinstance(data, np.ndarray):
@@ -296,6 +322,10 @@ class Compose(BaseCompose):
                 shapes.append(data[0].shape[:2])
             if internal_data_name in check_bbox_param and self.processors.get("bboxes") is None:
                 msg = "bbox_params must be specified for bbox transformations"
+                raise ValueError(msg)
+
+            if internal_data_name in check_keypoints_param and self.processors.get("keypoints") is None:
+                msg = "keypoints_params must be specified for keypoint transformations"
                 raise ValueError(msg)
 
         if self.is_check_shapes and shapes and shapes.count(shapes[0]) != len(shapes):
@@ -402,7 +432,7 @@ class OneOrOther(BaseCompose):
                 raise ValueError(msg)
             transforms = [first, second]
         super().__init__(transforms, p)
-        if len(self.transforms) != TWO:
+        if len(self.transforms) != NUM_ONEOF_TRANSFORMS:
             warnings.warn("Length of transforms is not equal to 2.")
 
     def __call__(self, *args: Any, force_apply: bool = False, **data: Any) -> Dict[str, Any]:
@@ -417,18 +447,39 @@ class OneOrOther(BaseCompose):
         return self.transforms[-1](force_apply=True, **data)
 
 
-class PerChannel(BaseCompose):
-    """Apply transformations per-channel
+class SelectiveChannelTransform(BaseCompose):
+    """A transformation class to apply specified transforms to selected channels of an image.
 
-    Args:
-        transforms (list): list of transformations to compose.
-        channels (sequence): channels to apply the transform to. Pass None to apply to all.
-        Default: None (apply to all)
-        p (float): probability of applying the transform. Default: 0.5.
+    This class extends BaseCompose to allow selective application of transformations to
+    specified image channels. It extracts the selected channels, applies the transformations,
+    and then reinserts the transformed channels back into their original positions in the image.
 
+    Parameters:
+        transforms (TransformsSeqType):
+            A sequence of transformations (from Albumentations) to be applied to the specified channels.
+        channels (Sequence[int]):
+            A sequence of integers specifying the indices of the channels to which the transforms should be applied.
+        always_apply (bool):
+            If True, the transform will always be applied, ignoring the probability `p`.
+        p (float):
+            Probability that the transform will be applied; the default is 1.0 (always apply).
+
+    Methods:
+        __call__(*args, **kwargs):
+            Applies the transforms to the image according to the specified channels.
+            The input data should include 'image' key with the image array.
+
+    Returns:
+        Dict[str, Any]: The transformed data dictionary, which includes the transformed 'image' key.
     """
 
-    def __init__(self, transforms: TransformsSeqType, channels: Optional[Sequence[int]] = None, p: float = 0.5):
+    def __init__(
+        self,
+        transforms: TransformsSeqType,
+        channels: Sequence[int] = (0, 1, 2),
+        always_apply: bool = False,
+        p: float = 1.0,
+    ) -> None:
         super().__init__(transforms, p)
         self.channels = channels
 
@@ -436,18 +487,19 @@ class PerChannel(BaseCompose):
         if force_apply or random.random() < self.p:
             image = data["image"]
 
-            # Expand mono images to have a single channel
-            if len(image.shape) == TWO:
-                image = np.expand_dims(image, -1)
+            selected_channels = image[:, :, self.channels]
+            sub_image = np.ascontiguousarray(selected_channels)
 
-            if self.channels is None:
-                self.channels = range(image.shape[2])
+            for t in self.transforms:
+                sub_image = t(image=sub_image)["image"]
 
-            for c in self.channels:
-                for t in self.transforms:
-                    image[:, :, c] = t(image=image[:, :, c])["image"]
+            transformed_channels = cv2.split(sub_image)
+            output_img = image.copy()
 
-            data["image"] = image
+            for idx, channel in zip(self.channels, transformed_channels):
+                output_img[:, :, idx] = channel
+
+            data["image"] = np.ascontiguousarray(output_img)
 
         return data
 
@@ -466,6 +518,7 @@ class ReplayCompose(Compose):
         super().__init__(transforms, bbox_params, keypoint_params, additional_targets, p, is_check_shapes)
         self.set_deterministic(True, save_key=save_key)
         self.save_key = save_key
+        self._available_keys.add(save_key)
 
     def __call__(self, *args: Any, force_apply: bool = False, **kwargs: Any) -> Dict[str, Any]:
         kwargs[self.save_key] = defaultdict(dict)
