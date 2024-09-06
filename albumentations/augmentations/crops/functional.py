@@ -3,14 +3,13 @@ from typing import Optional, Sequence, Tuple, cast
 import cv2
 import numpy as np
 
+from albumentations.augmentations.geometric import functional as FGeometric
 from albumentations.augmentations.utils import (
     _maybe_process_in_chunks,
     preserve_channel_dim,
 )
-
-from ...core.bbox_utils import denormalize_bbox, normalize_bbox
-from ...core.types import BoxInternalType, KeypointInternalType
-from ..geometric import functional as FGeometric
+from albumentations.core.bbox_utils import denormalize_bbox, normalize_bbox
+from albumentations.core.types import BoxInternalType, KeypointInternalType
 
 __all__ = [
     "get_random_crop_coords",
@@ -49,10 +48,7 @@ def random_crop(img: np.ndarray, crop_height: int, crop_width: int, h_start: flo
     height, width = img.shape[:2]
     if height < crop_height or width < crop_width:
         raise ValueError(
-            "Requested crop size ({crop_height}, {crop_width}) is "
-            "larger than the image size ({height}, {width})".format(
-                crop_height=crop_height, crop_width=crop_width, height=height, width=width
-            )
+            f"Requested crop size ({crop_height}, {crop_width}) is " f"larger than the image size ({height}, {width})"
         )
     x1, y1, x2, y2 = get_random_crop_coords(height, width, crop_height, crop_width, h_start, w_start)
     return img[y1:y2, x1:x2]
@@ -110,7 +106,7 @@ def crop_keypoint_by_coords(
 
     """
     x, y, angle, scale = keypoint[:4]
-    x1, y1, _, _ = crop_coords
+    x1, y1 = crop_coords[:2]
     return x - x1, y - y1, angle, scale
 
 
@@ -154,10 +150,7 @@ def center_crop(img: np.ndarray, crop_height: int, crop_width: int) -> np.ndarra
     height, width = img.shape[:2]
     if height < crop_height or width < crop_width:
         raise ValueError(
-            "Requested crop size ({crop_height}, {crop_width}) is "
-            "larger than the image size ({height}, {width})".format(
-                crop_height=crop_height, crop_width=crop_width, height=height, width=width
-            )
+            f"Requested crop size ({crop_height}, {crop_width}) is " f"larger than the image size ({height}, {width})"
         )
     x1, y1, x2, y2 = get_center_crop_coords(height, width, crop_height, crop_width)
     return img[y1:y2, x1:x2]
@@ -193,18 +186,14 @@ def crop(img: np.ndarray, x_min: int, y_min: int, x_max: int, y_max: int) -> np.
     if x_max <= x_min or y_max <= y_min:
         raise ValueError(
             "We should have x_min < x_max and y_min < y_max. But we got"
-            " (x_min = {x_min}, y_min = {y_min}, x_max = {x_max}, y_max = {y_max})".format(
-                x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max
-            )
+            f" (x_min = {x_min}, y_min = {y_min}, x_max = {x_max}, y_max = {y_max})"
         )
 
     if x_min < 0 or x_max > width or y_min < 0 or y_max > height:
         raise ValueError(
             "Values for crop should be non negative and equal or smaller than image sizes"
-            "(x_min = {x_min}, y_min = {y_min}, x_max = {x_max}, y_max = {y_max}, "
-            "height = {height}, width = {width})".format(
-                x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max, height=height, width=width
-            )
+            f"(x_min = {x_min}, y_min = {y_min}, x_max = {x_max}, y_max = {y_max}, "
+            f"height = {height}, width = {width})"
         )
 
     return img[y_min:y_max, x_min:x_max]

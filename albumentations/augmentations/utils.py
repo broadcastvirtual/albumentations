@@ -1,4 +1,5 @@
 from functools import wraps
+from pathlib import Path
 from typing import Any, Callable, Union
 
 import cv2
@@ -11,6 +12,7 @@ from albumentations.core.types import KeypointInternalType
 __all__ = [
     "read_bgr_image",
     "read_rgb_image",
+    "read_grayscale",
     "MAX_VALUES_BY_DTYPE",
     "NPDTYPE_TO_OPENCV_DTYPE",
     "clipped",
@@ -35,6 +37,10 @@ MAX_VALUES_BY_DTYPE = {
     np.dtype("uint16"): 65535,
     np.dtype("uint32"): 4294967295,
     np.dtype("float32"): 1.0,
+    np.uint8: 255,
+    np.uint16: 65535,
+    np.uint32: 4294967295,
+    np.float32: 1.0,
 }
 
 NPDTYPE_TO_OPENCV_DTYPE = {
@@ -50,14 +56,23 @@ NPDTYPE_TO_OPENCV_DTYPE = {
     np.dtype("float64"): cv2.CV_64F,
 }
 
+TWO = 2
+THREE = 3
+RGB_NUM_CHANNELS = 3
+FOUR = 4
 
-def read_bgr_image(path: str) -> np.ndarray:
-    return cv2.imread(path, cv2.IMREAD_COLOR)
+
+def read_bgr_image(path: Union[str, Path]) -> np.ndarray:
+    return cv2.imread(str(path), cv2.IMREAD_COLOR)
 
 
-def read_rgb_image(path: str) -> np.ndarray:
-    image = cv2.imread(path, cv2.IMREAD_COLOR)
+def read_rgb_image(path: Union[str, Path]) -> np.ndarray:
+    image = read_bgr_image(path)
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def read_grayscale(path: Union[str, Path]) -> np.ndarray:
+    return cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
 
 
 def clipped(func: Callable[Concatenate[np.ndarray, P], np.ndarray]) -> Callable[Concatenate[np.ndarray, P], np.ndarray]:
@@ -75,8 +90,7 @@ def clip(img: np.ndarray, dtype: np.dtype, maxval: float) -> np.ndarray:
 
 
 def get_opencv_dtype_from_numpy(value: Union[np.ndarray, int, np.dtype, object]) -> int:
-    """
-    Return a corresponding OpenCV dtype for a numpy's dtype
+    """Return a corresponding OpenCV dtype for a numpy's dtype
     :param value: Input dtype of numpy array
     :return: Corresponding dtype for OpenCV
     """
@@ -86,7 +100,7 @@ def get_opencv_dtype_from_numpy(value: Union[np.ndarray, int, np.dtype, object])
 
 
 def angle_2pi_range(
-    func: Callable[Concatenate[KeypointInternalType, P], KeypointInternalType]
+    func: Callable[Concatenate[KeypointInternalType, P], KeypointInternalType],
 ) -> Callable[Concatenate[KeypointInternalType, P], KeypointInternalType]:
     @wraps(func)
     def wrapped_function(keypoint: KeypointInternalType, *args: P.args, **kwargs: P.kwargs) -> KeypointInternalType:
@@ -97,7 +111,7 @@ def angle_2pi_range(
 
 
 def preserve_shape(
-    func: Callable[Concatenate[np.ndarray, P], np.ndarray]
+    func: Callable[Concatenate[np.ndarray, P], np.ndarray],
 ) -> Callable[Concatenate[np.ndarray, P], np.ndarray]:
     """Preserve shape of the image"""
 
@@ -105,14 +119,13 @@ def preserve_shape(
     def wrapped_function(img: np.ndarray, *args: P.args, **kwargs: P.kwargs) -> np.ndarray:
         shape = img.shape
         result = func(img, *args, **kwargs)
-        result = result.reshape(shape)
-        return result
+        return result.reshape(shape)
 
     return wrapped_function
 
 
 def preserve_channel_dim(
-    func: Callable[Concatenate[np.ndarray, P], np.ndarray]
+    func: Callable[Concatenate[np.ndarray, P], np.ndarray],
 ) -> Callable[Concatenate[np.ndarray, P], np.ndarray]:
     """Preserve dummy channel dim."""
 
@@ -120,7 +133,7 @@ def preserve_channel_dim(
     def wrapped_function(img: np.ndarray, *args: P.args, **kwargs: P.kwargs) -> np.ndarray:
         shape = img.shape
         result = func(img, *args, **kwargs)
-        if len(shape) == 3 and shape[-1] == 1 and len(result.shape) == 2:
+        if len(shape) == THREE and shape[-1] == 1 and len(result.shape) == TWO:
             result = np.expand_dims(result, axis=-1)
         return result
 
@@ -128,33 +141,32 @@ def preserve_channel_dim(
 
 
 def ensure_contiguous(
-    func: Callable[Concatenate[np.ndarray, P], np.ndarray]
+    func: Callable[Concatenate[np.ndarray, P], np.ndarray],
 ) -> Callable[Concatenate[np.ndarray, P], np.ndarray]:
     """Ensure that input img is contiguous."""
 
     @wraps(func)
     def wrapped_function(img: np.ndarray, *args: P.args, **kwargs: P.kwargs) -> np.ndarray:
         img = np.require(img, requirements=["C_CONTIGUOUS"])
-        result = func(img, *args, **kwargs)
-        return result
+        return func(img, *args, **kwargs)
 
     return wrapped_function
 
 
 def is_rgb_image(image: np.ndarray) -> bool:
-    return len(image.shape) == 3 and image.shape[-1] == 3
+    return len(image.shape) == THREE and image.shape[-1] == RGB_NUM_CHANNELS
 
 
 def is_grayscale_image(image: np.ndarray) -> bool:
-    return (len(image.shape) == 2) or (len(image.shape) == 3 and image.shape[-1] == 1)
+    return (len(image.shape) == TWO) or (len(image.shape) == THREE and image.shape[-1] == 1)
 
 
 def is_multispectral_image(image: np.ndarray) -> bool:
-    return len(image.shape) == 3 and image.shape[-1] not in [1, 3]
+    return len(image.shape) == THREE and image.shape[-1] not in [1, 3]
 
 
 def get_num_channels(image: np.ndarray) -> int:
-    return image.shape[2] if len(image.shape) == 3 else 1
+    return image.shape[2] if len(image.shape) == THREE else 1
 
 
 def non_rgb_warning(image: np.ndarray) -> None:
@@ -171,8 +183,7 @@ def non_rgb_warning(image: np.ndarray) -> None:
 def _maybe_process_in_chunks(
     process_fn: Callable[Concatenate[np.ndarray, P], np.ndarray], **kwargs: Any
 ) -> Callable[[np.ndarray], np.ndarray]:
-    """
-    Wrap OpenCV function to enable processing images with more than 4 channels.
+    """Wrap OpenCV function to enable processing images with more than 4 channels.
 
     Limitations:
         This wrapper requires image to be the first argument and rest must be sent via named arguments.
@@ -189,10 +200,10 @@ def _maybe_process_in_chunks(
     @wraps(process_fn)
     def __process_fn(img: np.ndarray) -> np.ndarray:
         num_channels = get_num_channels(img)
-        if num_channels > 4:
+        if num_channels > FOUR:
             chunks = []
             for index in range(0, num_channels, 4):
-                if num_channels - index == 2:
+                if num_channels - index == TWO:
                     # Many OpenCV functions cannot work with 2-channel images
                     for i in range(2):
                         chunk = img[:, :, index + i : index + i + 1]
@@ -203,9 +214,8 @@ def _maybe_process_in_chunks(
                     chunk = img[:, :, index : index + 4]
                     chunk = process_fn(chunk, **kwargs)
                     chunks.append(chunk)
-            img = np.dstack(chunks)
-        else:
-            img = process_fn(img, **kwargs)
-        return img
+            return np.dstack(chunks)
+
+        return process_fn(img, **kwargs)
 
     return __process_fn

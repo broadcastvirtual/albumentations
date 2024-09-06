@@ -1,16 +1,19 @@
 import math
 import random
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import cv2
 import numpy as np
 
-from ...core.transforms_interface import DualTransform, FillValueType, to_tuple
-from ...core.types import BoxInternalType, KeypointInternalType, ScaleIntType
-from ..crops import functional as FCrops
+from albumentations.augmentations.crops import functional as FCrops
+from albumentations.core.transforms_interface import DualTransform, to_tuple
+from albumentations.core.types import BoxInternalType, ColorType, KeypointInternalType, ScaleIntType, Targets
+
 from . import functional as F
 
 __all__ = ["Rotate", "RandomRotate90", "SafeRotate"]
+
+SMALL_NUMBER = 1e-10
 
 
 class RandomRotate90(DualTransform):
@@ -24,12 +27,15 @@ class RandomRotate90(DualTransform):
 
     Image types:
         uint8, float32
+
     """
 
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+
     def apply(self, img: np.ndarray, factor: float = 0, **params: Any) -> np.ndarray:
-        """
-        Args:
-            factor (int): number of times the input will be rotated by 90 degrees.
+        """Args:
+        factor (int): number of times the input will be rotated by 90 degrees.
+
         """
         return np.ascontiguousarray(np.rot90(img, factor))
 
@@ -73,7 +79,10 @@ class Rotate(DualTransform):
 
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(
         self,
@@ -166,14 +175,12 @@ class Rotate(DualTransform):
 
     @staticmethod
     def _rotated_rect_with_max_area(h: int, w: int, angle: float) -> Dict[str, int]:
-        """
-        Given a rectangle of size wxh that has been rotated by 'angle' (in
+        """Given a rectangle of size wxh that has been rotated by 'angle' (in
         degrees), computes the width and height of the largest possible
         axis-aligned rectangle (maximal area) within the rotated rectangle.
 
         Code from: https://stackoverflow.com/questions/16702966/rotate-image-and-crop-out-black-borders
         """
-
         angle = math.radians(angle)
         width_is_longer = w >= h
         side_long, side_short = (w, h) if width_is_longer else (h, w)
@@ -181,7 +188,7 @@ class Rotate(DualTransform):
         # since the solutions for angle, -angle and 180-angle are all the same,
         # it is sufficient to look at the first quadrant and the absolute values of sin,cos:
         sin_a, cos_a = abs(math.sin(angle)), abs(math.cos(angle))
-        if side_short <= 2.0 * sin_a * cos_a * side_long or abs(sin_a - cos_a) < 1e-10:
+        if side_short <= 2.0 * sin_a * cos_a * side_long or abs(sin_a - cos_a) < SMALL_NUMBER:
             # half constrained case: two crop corners touch the longer side,
             # the other two corners are on the mid-line parallel to the longer line
             x = 0.5 * side_short
@@ -191,12 +198,12 @@ class Rotate(DualTransform):
             cos_2a = cos_a * cos_a - sin_a * sin_a
             wr, hr = (w * cos_a - h * sin_a) / cos_2a, (h * cos_a - w * sin_a) / cos_2a
 
-        return dict(
-            x_min=max(0, int(w / 2 - wr / 2)),
-            x_max=min(w, int(w / 2 + wr / 2)),
-            y_min=max(0, int(h / 2 - hr / 2)),
-            y_max=min(h, int(h / 2 + hr / 2)),
-        )
+        return {
+            "x_min": max(0, int(w / 2 - wr / 2)),
+            "x_max": min(w, int(w / 2 + wr / 2)),
+            "y_min": max(0, int(h / 2 - hr / 2)),
+            "y_max": min(h, int(h / 2 + hr / 2)),
+        }
 
     @property
     def targets_as_params(self) -> List[str]:
@@ -240,15 +247,18 @@ class SafeRotate(DualTransform):
 
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(
         self,
         limit: Union[float, Tuple[float, float]] = 90,
         interpolation: int = cv2.INTER_LINEAR,
         border_mode: int = cv2.BORDER_REFLECT_101,
-        value: FillValueType = None,
-        mask_value: Optional[Union[int, float, Sequence[int], Sequence[float]]] = None,
+        value: Optional[ColorType] = None,
+        mask_value: Optional[ColorType] = None,
         always_apply: bool = False,
         p: float = 0.5,
     ):
@@ -259,10 +269,10 @@ class SafeRotate(DualTransform):
         self.value = value
         self.mask_value = mask_value
 
-    def apply(self, img: np.ndarray, matrix: np.ndarray = np.array(None), **params: Any) -> np.ndarray:
+    def apply(self, img: np.ndarray, matrix: Optional[np.ndarray] = None, **params: Any) -> np.ndarray:
         return F.safe_rotate(img, matrix, cast(int, self.interpolation), self.value, self.border_mode)
 
-    def apply_to_mask(self, mask: np.ndarray, matrix: np.ndarray = np.array(None), **params: Any) -> np.ndarray:
+    def apply_to_mask(self, mask: np.ndarray, matrix: Optional[np.ndarray] = None, **params: Any) -> np.ndarray:
         return F.safe_rotate(mask, matrix, cv2.INTER_NEAREST, self.mask_value, self.border_mode)
 
     def apply_to_bbox(self, bbox: BoxInternalType, cols: int = 0, rows: int = 0, **params: Any) -> BoxInternalType:
@@ -288,10 +298,10 @@ class SafeRotate(DualTransform):
         angle = random.uniform(self.limit[0], self.limit[1])
 
         image = params["image"]
-        h, w = image.shape[:2]
+        height, width = image.shape[:2]
 
         # https://stackoverflow.com/questions/43892506/opencv-python-rotate-image-without-cropping-sides
-        image_center = (w / 2, h / 2)
+        image_center = (width / 2, height / 2)
 
         # Rotation Matrix
         rotation_mat = cv2.getRotationMatrix2D(image_center, angle, 1.0)
@@ -301,11 +311,11 @@ class SafeRotate(DualTransform):
         abs_sin = abs(rotation_mat[0, 1])
 
         # find the new width and height bounds
-        new_w = math.ceil(h * abs_sin + w * abs_cos)
-        new_h = math.ceil(h * abs_cos + w * abs_sin)
+        new_w = math.ceil(height * abs_sin + width * abs_cos)
+        new_h = math.ceil(height * abs_cos + width * abs_sin)
 
-        scale_x = w / new_w
-        scale_y = h / new_h
+        scale_x = width / new_w
+        scale_y = height / new_h
 
         # Shift the image to create padding
         rotation_mat[0, 2] += new_w / 2 - image_center[0]

@@ -5,16 +5,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import cv2
 import numpy as np
 
+from albumentations.augmentations.geometric import functional as FGeometric
 from albumentations.core.bbox_utils import union_of_bboxes
+from albumentations.core.transforms_interface import DualTransform, to_tuple
+from albumentations.core.types import BoxInternalType, KeypointInternalType, ScaleFloatType, Targets
 
-from ...core.transforms_interface import DualTransform, to_tuple
-from ...core.types import (
-    BoxInternalType,
-    KeypointInternalType,
-    ScaleFloatType,
-    ScaleIntType,
-)
-from ..geometric import functional as FGeometric
 from . import functional as F
 
 __all__ = [
@@ -31,6 +26,9 @@ __all__ = [
     "BBoxSafeRandomCrop",
 ]
 
+TWO = 2
+THREE = 3
+
 
 class RandomCrop(DualTransform):
     """Crop a random part of the input.
@@ -45,7 +43,10 @@ class RandomCrop(DualTransform):
 
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(self, height: int, width: int, always_apply: bool = False, p: float = 1.0):
         super().__init__(always_apply, p)
@@ -86,7 +87,10 @@ class CenterCrop(DualTransform):
         It is recommended to use uint8 images as input.
         Otherwise the operation will require internal conversion
         float32 -> uint8 -> float32 that causes worse performance.
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(self, height: int, width: int, always_apply: bool = False, p: float = 1.0):
         super().__init__(always_apply, p)
@@ -120,7 +124,10 @@ class Crop(DualTransform):
 
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(
         self,
@@ -167,7 +174,10 @@ class CropNonEmptyMaskIfExists(DualTransform):
 
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(
         self,
@@ -220,15 +230,13 @@ class CropNonEmptyMaskIfExists(DualTransform):
             ignore_values_np = np.array(self.ignore_values)
             mask = np.where(np.isin(mask, ignore_values_np), 0, mask)
 
-        if mask.ndim == 3 and self.ignore_channels is not None:
+        if mask.ndim == THREE and self.ignore_channels is not None:
             target_channels = np.array([ch for ch in range(mask.shape[-1]) if ch not in self.ignore_channels])
             mask = np.take(mask, target_channels, axis=-1)
 
         if self.height > mask_height or self.width > mask_width:
             raise ValueError(
-                "Crop size ({},{}) is larger than image ({},{})".format(
-                    self.height, self.width, mask_height, mask_width
-                )
+                f"Crop size ({self.height},{self.width}) is larger than image ({mask_height},{mask_width})"
             )
 
         return mask
@@ -243,12 +251,13 @@ class CropNonEmptyMaskIfExists(DualTransform):
             for m in masks[1:]:
                 mask |= self._preprocess_mask(m)
         else:
-            raise RuntimeError("Can not find mask for CropNonEmptyMaskIfExists")
+            msg = "Can not find mask for CropNonEmptyMaskIfExists"
+            raise RuntimeError(msg)
 
         mask_height, mask_width = mask.shape[:2]
 
         if mask.any():
-            mask = mask.sum(axis=-1) if mask.ndim == 3 else mask
+            mask = mask.sum(axis=-1) if mask.ndim == THREE else mask
             non_zero_yx = np.argwhere(mask)
             y, x = random.choice(non_zero_yx)
             x_min = x - random.randint(0, self.width - 1)
@@ -341,7 +350,10 @@ class RandomSizedCrop(_BaseRandomSizedCrop):
 
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(
         self,
@@ -354,6 +366,7 @@ class RandomSizedCrop(_BaseRandomSizedCrop):
         p: float = 1.0,
     ):
         super().__init__(height=height, width=width, interpolation=interpolation, always_apply=always_apply, p=p)
+
         self.min_max_height = min_max_height
         self.w2h_ratio = w2h_ratio
 
@@ -388,7 +401,10 @@ class RandomResizedCrop(_BaseRandomSizedCrop):
 
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(
         self,
@@ -481,6 +497,8 @@ class RandomCropNearBBox(DualTransform):
 
     """
 
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+
     def __init__(
         self,
         max_part_shift: ScaleFloatType = (0.3, 0.3),
@@ -540,6 +558,7 @@ class RandomCropNearBBox(DualTransform):
 
 class BBoxSafeRandomCrop(DualTransform):
     """Crop a random part of the input without loss of bboxes.
+
     Args:
         erosion_rate: erosion rate applied on input image height before crop.
         p: probability of applying the transform. Default: 1.
@@ -547,7 +566,10 @@ class BBoxSafeRandomCrop(DualTransform):
         image, mask, bboxes
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES)
 
     def __init__(self, erosion_rate: float = 0.0, always_apply: bool = False, p: float = 1.0):
         super().__init__(always_apply, p)
@@ -612,6 +634,7 @@ class BBoxSafeRandomCrop(DualTransform):
 
 class RandomSizedBBoxSafeCrop(BBoxSafeRandomCrop):
     """Crop a random part of the input and rescale it to some size without loss of bboxes.
+
     Args:
         height: height after crop and resize.
         width: width after crop and resize.
@@ -624,7 +647,10 @@ class RandomSizedBBoxSafeCrop(BBoxSafeRandomCrop):
         image, mask, bboxes
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES)
 
     def __init__(
         self,
@@ -654,7 +680,7 @@ class RandomSizedBBoxSafeCrop(BBoxSafeRandomCrop):
         return FGeometric.resize(crop, self.height, self.width, interpolation)
 
     def get_transform_init_args_names(self) -> Tuple[str, ...]:
-        return super().get_transform_init_args_names() + ("height", "width", "interpolation")
+        return (*super().get_transform_init_args_names(), "height", "width", "interpolation")
 
 
 class CropAndPad(DualTransform):
@@ -742,7 +768,10 @@ class CropAndPad(DualTransform):
 
     Image types:
         any
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(
         self,
@@ -760,9 +789,11 @@ class CropAndPad(DualTransform):
         super().__init__(always_apply, p)
 
         if px is None and percent is None:
-            raise ValueError("px and percent are empty!")
+            msg = "px and percent are empty!"
+            raise ValueError(msg)
         if px is not None and percent is not None:
-            raise ValueError("Only px or percent may be set!")
+            msg = "Only px or percent may be set!"
+            raise ValueError(msg)
 
         self.px = px
         self.percent = percent
@@ -781,7 +812,7 @@ class CropAndPad(DualTransform):
         img: np.ndarray,
         crop_params: Sequence[int] = (),
         pad_params: Sequence[int] = (),
-        pad_value: Union[int, float] = 0,
+        pad_value: float = 0,
         rows: int = 0,
         cols: int = 0,
         interpolation: int = cv2.INTER_LINEAR,
@@ -918,41 +949,41 @@ class CropAndPad(DualTransform):
 
     def _get_px_params(self) -> List[int]:
         if self.px is None:
-            raise ValueError("px is not set")
+            msg = "px is not set"
+            raise ValueError(msg)
 
         if isinstance(self.px, int):
             params = [self.px] * 4
-        elif len(self.px) == 2:
+        elif len(self.px) == TWO:
             if self.sample_independently:
                 params = [random.randrange(*self.px) for _ in range(4)]
             else:
                 px = random.randrange(*self.px)
                 params = [px] * 4
+        elif isinstance(self.px[0], int):
+            params = self.px
         else:
-            if isinstance(self.px[0], int):
-                params = self.px
-            else:
-                params = [random.randrange(*i) for i in self.px]
+            params = [random.randrange(*i) for i in self.px]
 
         return params
 
     def _get_percent_params(self) -> List[float]:
         if self.percent is None:
-            raise ValueError("percent is not set")
+            msg = "percent is not set"
+            raise ValueError(msg)
 
         if isinstance(self.percent, float):
             params = [self.percent] * 4
-        elif len(self.percent) == 2:
+        elif len(self.percent) == TWO:
             if self.sample_independently:
                 params = [random.uniform(*self.percent) for _ in range(4)]
             else:
                 px = random.uniform(*self.percent)
                 params = [px] * 4
+        elif isinstance(self.percent[0], (int, float)):
+            params = self.percent
         else:
-            if isinstance(self.percent[0], (int, float)):
-                params = self.percent
-            else:
-                params = [random.uniform(*i) for i in self.percent]
+            params = [random.uniform(*i) for i in self.percent]
 
         return params  # params = [top, right, bottom, left]
 
@@ -961,7 +992,7 @@ class CropAndPad(DualTransform):
         if isinstance(pad_value, (int, float)):
             return pad_value
 
-        if len(pad_value) == 2:
+        if len(pad_value) == TWO:
             a, b = pad_value
             if isinstance(a, int) and isinstance(b, int):
                 return random.randint(a, b)
@@ -1002,7 +1033,10 @@ class RandomCropFromBorders(DualTransform):
 
     Image types:
         uint8, float32
+
     """
+
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def __init__(
         self,
