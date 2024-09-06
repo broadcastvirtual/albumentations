@@ -69,6 +69,8 @@ __all__ = [
     "MAX_VALUES_BY_DTYPE",
     "split_uniform_grid",
     "chromatic_aberration",
+    "erode",
+    "dilate",
 ]
 
 TWO = 2
@@ -1498,3 +1500,22 @@ def _distort_channel(
         interpolation=interpolation,
         borderMode=cv2.BORDER_REPLICATE,
     )
+
+
+@preserve_shape
+def erode(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    return cv2.erode(img, kernel, iterations=1)
+
+
+@preserve_shape
+def dilate(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    return cv2.dilate(img, kernel, iterations=1)
+
+
+def morphology(img: np.ndarray, kernel: np.ndarray, operation: str) -> np.ndarray:
+    if operation == "dilation":
+        return dilate(img, kernel)
+    if operation == "erosion":
+        return erode(img, kernel)
+
+    raise ValueError(f"Unsupported operation: {operation}")
