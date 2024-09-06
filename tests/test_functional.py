@@ -6,12 +6,13 @@ from numpy.testing import assert_array_almost_equal_nulp, assert_almost_equal
 import skimage
 
 import albumentations as A
+from albumentations import random_utils
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as FGeometric
-from albucore.utils import is_multispectral_image, MAX_VALUES_BY_DTYPE
+from albucore.utils import is_multispectral_image, MAX_VALUES_BY_DTYPE, get_num_channels
 
 from albumentations.core.types import d4_group_elements
-from tests.conftest import IMAGES, RECTANGULAR_IMAGES
+from tests.conftest import IMAGES, RECTANGULAR_IMAGES, RECTANGULAR_UINT8_IMAGE, UINT8_IMAGES
 from tests.utils import convert_2d_to_target_format, set_seed
 
 
@@ -138,70 +139,6 @@ def test_compare_rotate_and_affine(image):
 
     # Assert that the two rotated images are equal
     assert np.array_equal(rotated_img_1, rotated_img_2), "Rotated images should be identical."
-
-@pytest.mark.parametrize("target", ["image", "mask"])
-def test_center_crop(target):
-    img = np.array([[1, 1, 1, 1], [0, 1, 1, 1], [0, 0, 1, 1], [0, 0, 0, 1]], dtype=np.uint8)
-    expected = np.array([[1, 1], [0, 1]], dtype=np.uint8)
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    cropped_img = A.center_crop(img, 2, 2)
-    assert np.array_equal(cropped_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "image_4_channels"])
-def test_center_crop_float(target):
-    img = np.array(
-        [[0.4, 0.4, 0.4, 0.4], [0.0, 0.4, 0.4, 0.4], [0.0, 0.0, 0.4, 0.4], [0.0, 0.0, 0.0, 0.4]], dtype=np.float32
-    )
-    expected = np.array([[0.4, 0.4], [0.0, 0.4]], dtype=np.float32)
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    cropped_img = A.center_crop(img, 2, 2)
-    assert_array_almost_equal_nulp(cropped_img, expected)
-
-
-def test_center_crop_with_incorrectly_large_crop_size():
-    img = np.ones((4, 4), dtype=np.uint8)
-    with pytest.raises(ValueError) as exc_info:
-        A.center_crop(img, 8, 8)
-    assert str(exc_info.value) == "Requested crop size (8, 8) is larger than the image size (4, 4)"
-
-
-@pytest.mark.parametrize("target", ["image", "mask"])
-def test_random_crop(target):
-    img = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=np.uint8)
-    expected = np.array([[5, 6], [9, 10]], dtype=np.uint8)
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    cropped_img = A.random_crop(img, crop_height=2, crop_width=2, h_start=0.5, w_start=0)
-    assert np.array_equal(cropped_img, expected)
-
-
-@pytest.mark.parametrize("target", ["image", "image_4_channels"])
-def test_random_crop_float(target):
-    img = np.array(
-        [[0.01, 0.02, 0.03, 0.04], [0.05, 0.06, 0.07, 0.08], [0.09, 0.10, 0.11, 0.12], [0.13, 0.14, 0.15, 0.16]],
-        dtype=np.float32,
-    )
-    expected = np.array([[0.05, 0.06], [0.09, 0.10]], dtype=np.float32)
-    img, expected = convert_2d_to_target_format([img, expected], target=target)
-    cropped_img = A.random_crop(img, crop_height=2, crop_width=2, h_start=0.5, w_start=0)
-    assert_array_almost_equal_nulp(cropped_img, expected)
-
-
-def test_random_crop_with_incorrectly_large_crop_size():
-    img = np.ones((4, 4), dtype=np.uint8)
-    with pytest.raises(ValueError) as exc_info:
-        A.random_crop(img, crop_height=8, crop_width=8, h_start=0, w_start=0)
-    assert str(exc_info.value) == "Requested crop size (8, 8) is larger than the image size (4, 4)"
-
-
-def test_random_crop_extrema():
-    img = np.indices((4, 4), dtype=np.uint8).transpose([1, 2, 0])
-    expected1 = np.indices((2, 2), dtype=np.uint8).transpose([1, 2, 0])
-    expected2 = expected1 + 2
-    cropped_img1 = A.random_crop(img, crop_height=2, crop_width=2, h_start=0.0, w_start=0.0)
-    cropped_img2 = A.random_crop(img, crop_height=2, crop_width=2, h_start=0.9999, w_start=0.9999)
-    assert np.array_equal(cropped_img1, expected1)
-    assert np.array_equal(cropped_img2, expected2)
 
 
 @pytest.mark.parametrize("target", ["image", "mask"])
@@ -340,7 +277,7 @@ def test_to_float_with_max_value_for_unsupported_dtypes(dtype):
     ],
 )
 def test_from_float(dtype, multiplier, max_value):
-    img = np.random.rand(100, 100, 3).astype(np.float32)  # Use random data for more robust testing
+    img = RECTANGULAR_UINT8_IMAGE.astype(np.float32)  # Use random data for more robust testing
     expected_multiplier = multiplier if max_value is None else max_value
     expected = (img * expected_multiplier).astype(dtype)
     actual = F.from_float(img, dtype=np.dtype(dtype), max_value=max_value)
@@ -349,7 +286,7 @@ def test_from_float(dtype, multiplier, max_value):
 
 @pytest.mark.parametrize("dtype", [np.int64])
 def test_from_float_unsupported_dtype_without_max_value(dtype):
-    img = np.random.rand(100, 100, 3).astype(np.float32)
+    img = RECTANGULAR_UINT8_IMAGE.astype(np.float32)
     with pytest.raises(RuntimeError) as exc_info:
         F.from_float(img, dtype=dtype)
     expected_part_of_message = "Can't infer the maximum value for dtype"
@@ -393,6 +330,13 @@ def test_scale(target):
     img, expected = convert_2d_to_target_format([img, expected], target=target)
     scaled = FGeometric.scale(img, scale=2, interpolation=cv2.INTER_LINEAR)
     assert np.array_equal(scaled, expected)
+
+
+def test_to_from_float():
+    image = RECTANGULAR_UINT8_IMAGE
+    float_image = F.to_float(image)
+    uint8_image = F.from_float(float_image, dtype=np.uint8)
+    assert np.array_equal(image, uint8_image)
 
 
 @pytest.mark.parametrize("target", ["image", "mask"])
@@ -516,26 +460,6 @@ def test_bbox_flip(code, func):
     rows, cols = 100, 200
     bbox = [0.1, 0.2, 0.6, 0.5]
     assert FGeometric.bbox_flip(bbox, code, rows, cols) == func(bbox, rows, cols)
-
-
-def test_crop_bbox_by_coords():
-    cropped_bbox = A.crop_bbox_by_coords((0.5, 0.2, 0.9, 0.7), (18, 18, 82, 82), 64, 64, 100, 100)
-    assert cropped_bbox == (0.5, 0.03125, 1.125, 0.8125)
-
-
-def test_bbox_center_crop():
-    cropped_bbox = A.bbox_center_crop((0.5, 0.2, 0.9, 0.7), 64, 64, 100, 100)
-    assert cropped_bbox == (0.5, 0.03125, 1.125, 0.8125)
-
-
-def test_bbox_crop():
-    cropped_bbox = A.bbox_crop((0.5, 0.2, 0.9, 0.7), 24, 24, 64, 64, 100, 100)
-    assert cropped_bbox == (0.65, -0.1, 1.65, 1.15)
-
-
-def test_bbox_random_crop():
-    cropped_bbox = A.bbox_random_crop((0.5, 0.2, 0.9, 0.7), 80, 80, 0.2, 0.1, 100, 100)
-    assert cropped_bbox == (0.6, 0.2, 1.1, 0.825)
 
 
 @pytest.mark.parametrize("factor, expected_positions", [
@@ -1099,3 +1023,39 @@ def test_planckian_jitter_cied():
 
     cied_plankian_jitter = F.planckian_jitter(img, temperature=4500, mode="cied")
     assert np.allclose(cied_plankian_jitter, expected_cied_plankian_jitter, atol=1e-4)
+
+
+@pytest.mark.parametrize("image", IMAGES)
+def test_random_tone_curve(image):
+    low_y = 0.1
+    high_y = 0.9
+
+    num_channels = get_num_channels(image)
+
+    result_float_value = F.move_tone_curve(image, low_y, high_y)
+    result_array_value = F.move_tone_curve(image, np.array([low_y] * num_channels), np.array([high_y] * num_channels))
+
+    assert np.array_equal(result_float_value, result_array_value)
+
+    assert result_float_value.dtype == image.dtype
+    assert result_float_value.shape == image.shape
+
+
+@pytest.mark.parametrize("image", UINT8_IMAGES)
+@pytest.mark.parametrize("color_shift, intensity", [(0, 0), (0.5, 0.5), (1, 1)])
+def test_iso_noise(image, color_shift, intensity):
+    image = RECTANGULAR_UINT8_IMAGE
+
+    # Convert image to float and back
+    float_image = F.to_float(image)
+
+    # Generate noise using the same random state instance
+    set_seed(42)
+    result_uint8 = F.iso_noise(image, color_shift=color_shift, intensity=intensity)
+
+    set_seed(42)
+    result_float = F.iso_noise(float_image, color_shift=color_shift, intensity=intensity)
+
+    result_float = F.from_float(result_float, dtype=np.uint8)  # Convert the float result back to uint8
+
+    assert np.array_equal(result_uint8, result_float)

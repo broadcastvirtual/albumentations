@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 import abc
 from copy import deepcopy
-from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 from albucore.functions import add_weighted
-from albucore.utils import clip, clipped, get_num_channels, preserve_channel_dim
+from albucore.utils import clip, clipped, is_multispectral_image, preserve_channel_dim
 from skimage.exposure import match_histograms
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
@@ -13,6 +14,7 @@ from typing_extensions import Protocol
 
 from albumentations.augmentations.functional import center
 from albumentations.core.types import MONO_CHANNEL_DIMENSIONS
+import albumentations.augmentations.functional as fmain
 
 __all__ = [
     "fourier_domain_adaptation",
@@ -26,10 +28,10 @@ class TransformerInterface(Protocol):
     def inverse_transform(self, x: np.ndarray) -> np.ndarray: ...
 
     @abc.abstractmethod
-    def fit(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> np.ndarray: ...
+    def fit(self, x: np.ndarray, y: np.ndarray | None = None) -> np.ndarray: ...
 
     @abc.abstractmethod
-    def transform(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> np.ndarray: ...
+    def transform(self, x: np.ndarray, y: np.ndarray | None = None) -> np.ndarray: ...
 
 
 class DomainAdapter:
@@ -39,7 +41,7 @@ class DomainAdapter:
         self,
         transformer: TransformerInterface,
         ref_img: np.ndarray,
-        color_conversions: Tuple[None, None] = (None, None),
+        color_conversions: tuple[None, None] = (None, None),
     ):
         self.color_in, self.color_out = color_conversions
         self.source_transformer = deepcopy(transformer)
@@ -56,7 +58,7 @@ class DomainAdapter:
 
     def flatten(self, img: np.ndarray) -> np.ndarray:
         img = self.to_colorspace(img)
-        img = img.astype("float32") / 255.0
+        img = fmain.to_float(img)
         return img.reshape(-1, 3)
 
     def reconstruct(self, pixels: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -85,6 +87,7 @@ class DomainAdapter:
         return self.reconstruct(result, height, width)
 
 
+@clipped
 @preserve_channel_dim
 def adapt_pixel_distribution(
     img: np.ndarray,
@@ -92,11 +95,10 @@ def adapt_pixel_distribution(
     transform_type: str = "pca",
     weight: float = 0.5,
 ) -> np.ndarray:
-    initial_type = img.dtype
     transformer = {"pca": PCA, "standard": StandardScaler, "minmax": MinMaxScaler}[transform_type]()
     adapter = DomainAdapter(transformer=transformer, ref_img=ref)
-    result = adapter(img).astype("float32")
-    return (img.astype("float32") * (1 - weight) + result * weight).astype(initial_type)
+    result = adapter(img).astype(np.float32)
+    return img.astype(np.float32) * (1 - weight) + result * weight
 
 
 def low_freq_mutate(amp_src: np.ndarray, amp_trg: np.ndarray, beta: float) -> np.ndarray:
@@ -156,20 +158,21 @@ def fourier_domain_adaptation(img: np.ndarray, target_img: np.ndarray, beta: flo
     return src_in_trg
 
 
+@clipped
 @preserve_channel_dim
 def apply_histogram(img: np.ndarray, reference_image: np.ndarray, blend_ratio: float) -> np.ndarray:
     # Resize reference image only if necessary
     if img.shape[:2] != reference_image.shape[:2]:
         reference_image = cv2.resize(reference_image, dsize=(img.shape[1], img.shape[0]))
 
-    img, reference_image = np.squeeze(img), np.squeeze(reference_image)
+    img = np.squeeze(img)
+    reference_image = np.squeeze(reference_image)
 
     # Determine if the images are multi-channel based on a predefined condition or shape analysis
-    is_multichannel = get_num_channels(img) > 1
+    is_multichannel = is_multispectral_image(img)
 
     # Match histograms between the images
     matched = match_histograms(img, reference_image, channel_axis=2 if is_multichannel else None)
 
     # Blend the original image and the matched image
-
     return add_weighted(matched, blend_ratio, img, 1 - blend_ratio)

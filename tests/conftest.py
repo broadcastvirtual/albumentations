@@ -24,7 +24,7 @@ def albumentations_bboxes():
 
 @pytest.fixture
 def keypoints():
-    return [[20, 30, 40, 50, 1], [20, 30, 60, 80, 2]]
+    return [[30, 20, 40, 50, 1], [20, 30, 60, 80, 2]]
 
 @pytest.fixture
 def template():
@@ -64,4 +64,4 @@ SQUARE_IMAGES = [SQUARE_UINT8_IMAGE, SQUARE_FLOAT_IMAGE]
 RECTANGULAR_IMAGES = [RECTANGULAR_UINT8_IMAGE, RECTANGULAR_FLOAT_IMAGE]
 
 SQUARE_MULTI_UINT8_IMAGE = np.random.randint(low=0, high=256, size=(100, 100, 5), dtype=np.uint8)
-SQUARE_MULTI_FLOAT_IMAGE = np.random.uniform(low=0.0, high=1.0, size=(100, 100, 5)).astype("float32")
+SQUARE_MULTI_FLOAT_IMAGE = np.random.uniform(low=0.0, high=1.0, size=(100, 100, 5)).astype(np.float32)
