@@ -10,7 +10,7 @@ INSTALL_REQUIRES = ["numpy>=1.24.4", "scipy>=1.10.0", "scikit-image>=0.21.0", "P
 CHOOSE_INSTALL_REQUIRES = [
     (
         ("opencv-python>=4.9.0", "opencv-contrib-python>=4.9.0", "opencv-contrib-python-headless>=4.9.0"),
-        "opencv-python-headless>=4.9.0",
+        "opencv-python>=4.9.0",
     )
 ]
 
