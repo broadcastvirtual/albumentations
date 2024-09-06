@@ -4,15 +4,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, 
 import cv2
 import numpy as np
 import skimage.transform
+from albucore.utils import clipped, maybe_process_in_chunks, preserve_channel_dim
 from scipy.ndimage import gaussian_filter
 
 from albumentations import random_utils
-from albumentations.augmentations.utils import (
-    _maybe_process_in_chunks,
-    angle_2pi_range,
-    clipped,
-    preserve_channel_dim,
-)
+from albumentations.augmentations.functional import center
+from albumentations.augmentations.utils import angle_2pi_range
 from albumentations.core.bbox_utils import denormalize_bbox, normalize_bbox
 from albumentations.core.types import (
     NUM_MULTI_CHANNEL_DIMENSIONS,
@@ -159,20 +156,20 @@ def keypoint_rot90(
     cols: int,
     **params: Any,
 ) -> KeypointInternalType:
-    """Rotates a keypoint by 90 degrees CCW
+    """Rotate a keypoint by 90 degrees counter-clockwise (CCW) a specified number of times.
 
     Args:
-        keypoint: A keypoint `(x, y, angle, scale)`.
-        factor: Number of CCW rotations. Must be in range [0;3] See np.rot90.
-        rows: Image height.
-        cols: Image width.
+        keypoint (KeypointInternalType): A keypoint in the format `(x, y, angle, scale)`.
+        factor (int): The number of 90 degree CCW rotations to apply. Must be in the range [0, 3].
+        rows (int): The height of the image the keypoint belongs to.
+        cols (int): The width of the image the keypoint belongs to.
+        **params: Additional parameters.
 
     Returns:
-        tuple: A keypoint `(x, y, angle, scale)`.
+        KeypointInternalType: The rotated keypoint in the format `(x, y, angle, scale)`.
 
     Raises:
-        ValueError: if factor not in set {0, 1, 2, 3}
-
+        ValueError: If the factor is not in the set {0, 1, 2, 3}.
     """
     x, y, angle, scale = keypoint
 
@@ -249,11 +246,11 @@ def rotate(
     value: Optional[ColorType] = None,
 ) -> np.ndarray:
     height, width = img.shape[:2]
-    # for images we use additional shifts of (0.5, 0.5) as otherwise
-    # we get an ugly black border for 90deg rotations
-    matrix = cv2.getRotationMatrix2D((width / 2 - 0.5, height / 2 - 0.5), angle, 1.0)
 
-    warp_fn = _maybe_process_in_chunks(
+    image_center = center(width, height)
+    matrix = cv2.getRotationMatrix2D(image_center, angle, 1.0)
+
+    warp_fn = maybe_process_in_chunks(
         cv2.warpAffine,
         M=matrix,
         dsize=(width, height),
@@ -314,20 +311,23 @@ def keypoint_rotate(
     cols: int,
     **params: Any,
 ) -> KeypointInternalType:
-    """Rotate a keypoint by angle.
+    """Rotate a keypoint by a specified angle.
 
     Args:
-        keypoint: A keypoint `(x, y, angle, scale)`.
-        angle: Rotation angle.
-        rows: Image height.
-        cols: Image width.
+        keypoint (KeypointInternalType): A keypoint in the format `(x, y, angle, scale)`.
+        angle (float): The angle by which to rotate the keypoint, in degrees.
+        rows (int): The height of the image the keypoint belongs to.
+        cols (int): The width of the image the keypoint belongs to.
+        **params: Additional parameters.
 
     Returns:
-        A keypoint `(x, y, angle, scale)`.
+        KeypointInternalType: The rotated keypoint in the format `(x, y, angle, scale)`.
 
+    Note:
+        The rotation is performed around the center of the image.
     """
-    center = (cols - 1) * 0.5, (rows - 1) * 0.5
-    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    image_center = center(cols, rows)
+    matrix = cv2.getRotationMatrix2D(image_center, angle, 1.0)
     x, y, a, s = keypoint[:4]
     x, y = cv2.transform(np.array([[[x, y]]]), matrix).squeeze()
     return x, y, a + math.radians(angle), s
@@ -376,7 +376,7 @@ def elastic_transform(
     )
     matrix = cv2.getAffineTransform(pts1, pts2)
 
-    warp_fn = _maybe_process_in_chunks(
+    warp_fn = maybe_process_in_chunks(
         cv2.warpAffine,
         M=matrix,
         dsize=(width, height),
@@ -416,7 +416,7 @@ def elastic_transform(
     map_x = np.float32(x + dx)
     map_y = np.float32(y + dy)
 
-    remap_fn = _maybe_process_in_chunks(
+    remap_fn = maybe_process_in_chunks(
         cv2.remap,
         map1=map_x,
         map2=map_y,
@@ -429,10 +429,9 @@ def elastic_transform(
 
 @preserve_channel_dim
 def resize(img: np.ndarray, height: int, width: int, interpolation: int) -> np.ndarray:
-    img_height, img_width = img.shape[:2]
     if (height, width) == img.shape[:2]:
         return img
-    resize_fn = _maybe_process_in_chunks(cv2.resize, dsize=(width, height), interpolation=interpolation)
+    resize_fn = maybe_process_in_chunks(cv2.resize, dsize=(width, height), interpolation=interpolation)
     return resize_fn(img)
 
 
@@ -492,7 +491,7 @@ def perspective(
     interpolation: int,
 ) -> np.ndarray:
     height, width = img.shape[:2]
-    perspective_func = _maybe_process_in_chunks(
+    perspective_func = maybe_process_in_chunks(
         cv2.warpPerspective,
         M=matrix,
         dsize=(max_width, max_height),
@@ -593,7 +592,7 @@ def warp_affine(
         return image
 
     dsize = int(np.round(output_shape[1])), int(np.round(output_shape[0]))
-    warp_fn = _maybe_process_in_chunks(
+    warp_fn = maybe_process_in_chunks(
         cv2.warpAffine,
         M=matrix.params[:2],
         dsize=dsize,
@@ -667,7 +666,7 @@ def safe_rotate(
     border_mode: int = cv2.BORDER_REFLECT_101,
 ) -> np.ndarray:
     height, width = img.shape[:2]
-    warp_fn = _maybe_process_in_chunks(
+    warp_fn = maybe_process_in_chunks(
         cv2.warpAffine,
         M=matrix,
         dsize=(width, height),
@@ -766,7 +765,7 @@ def to_distance_maps(
     method that only supports the augmentation of images.
 
     Args:
-        keypoint: keypoint coordinates
+        keypoints: keypoint coordinates
         height: image height
         width: image width
         inverted (bool): If ``True``, inverted distance maps are returned where each
@@ -1212,7 +1211,7 @@ def pad_with_params(
     border_mode: int,
     value: Optional[ColorType],
 ) -> np.ndarray:
-    pad_fn = _maybe_process_in_chunks(
+    pad_fn = maybe_process_in_chunks(
         cv2.copyMakeBorder,
         top=h_pad_top,
         bottom=h_pad_bottom,
@@ -1305,7 +1304,7 @@ def grid_distortion(
     map_x = map_x.astype(np.float32)
     map_y = map_y.astype(np.float32)
 
-    remap_fn = _maybe_process_in_chunks(
+    remap_fn = maybe_process_in_chunks(
         cv2.remap,
         map1=map_x,
         map2=map_y,
@@ -1357,7 +1356,7 @@ def elastic_transform_approx(
     )
     matrix = cv2.getAffineTransform(pts1, pts2)
 
-    warp_fn = _maybe_process_in_chunks(
+    warp_fn = maybe_process_in_chunks(
         cv2.warpAffine,
         M=matrix,
         dsize=(width, height),
@@ -1380,7 +1379,7 @@ def elastic_transform_approx(
     map_x = np.float32(x + dx)
     map_y = np.float32(y + dy)
 
-    remap_fn = _maybe_process_in_chunks(
+    remap_fn = maybe_process_in_chunks(
         cv2.remap,
         map1=map_x,
         map2=map_y,

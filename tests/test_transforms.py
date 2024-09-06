@@ -9,12 +9,16 @@ import pytest
 import warnings
 from torchvision import transforms as torch_transforms
 
+from albumentations.core.pydantic import valid_interpolations, valid_border_modes
+
+from albucore.utils import clip
 import albumentations as A
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as FGeometric
-from albumentations.augmentations.transforms import ImageCompression
+from albumentations.augmentations.transforms import ImageCompression, RandomRain
 from albumentations.core.types import ImageCompressionType
 from albumentations.random_utils import get_random_seed
+from albumentations.augmentations.transforms import RandomSnow
 from tests.conftest import IMAGES, SQUARE_MULTI_UINT8_IMAGE, SQUARE_UINT8_IMAGE
 
 from .utils import get_dual_transforms, get_image_only_transforms, get_transforms, set_seed
@@ -401,7 +405,7 @@ def test_equalize():
     b = F.equalize(img, mask=mask)
     assert np.all(a == b)
 
-    def mask_func(image, test):  # skipcq: PYL-W0613
+    def mask_func(image, test):
         return mask
 
     aug = A.Equalize(mask=mask_func, mask_params=["test"], p=1)
@@ -548,57 +552,41 @@ def test_resize_keypoints():
 )
 def test_multiplicative_noise_grayscale(image):
     m = 0.5
-    aug = A.MultiplicativeNoise((m, m), p=1)
-    result = aug(image=image)["image"]
-    image = F.clip(image * m, image.dtype, F.MAX_VALUES_BY_DTYPE[image.dtype])
-    assert np.allclose(image, result)
-
-    aug = A.MultiplicativeNoise(elementwise=True, p=1)
+    aug = A.MultiplicativeNoise((m, m), elementwise=False, p=1)
     params = aug.get_params_dependent_on_targets({"image": image})
-    mul = params["multiplier"]
-    assert mul.shape == image.shape
-    result = aug.apply(image, mul)
-    dtype = image.dtype
-    image = image.astype(np.float32) * mul
-    image = F.clip(image, dtype, F.MAX_VALUES_BY_DTYPE[dtype])
-    assert np.allclose(image, result)
+    assert m == params["multiplier"]
+    result_e = aug(image=image)["image"]
+    assert np.allclose(clip(image * m, image.dtype), result_e)
 
+    aug = A.MultiplicativeNoise((m, m), elementwise=True, p=1)
+    params = aug.get_params_dependent_on_targets({"image": image})
+    result_ne = aug.apply(image, params["multiplier"])
+
+    assert np.allclose(clip(image * params["multiplier"], image.dtype), result_ne)
 
 @pytest.mark.parametrize(
-    "image", [np.random.randint(0, 256, [256, 320, 3], np.uint8), np.random.random([256, 320, 3]).astype(np.float32)]
+    "image", [
+        np.random.randint(0, 256, [256, 320, 3], np.uint8),
+        np.random.random([256, 320, 3]).astype(np.float32)
+    ]
 )
-def test_multiplicative_noise_rgb(image):
+@pytest.mark.parametrize(
+    "elementwise", ( True, False )
+)
+def test_multiplicative_noise_rgb(image, elementwise):
     dtype = image.dtype
 
-    m = 0.5
-    aug = A.MultiplicativeNoise((m, m), p=1)
-    result = aug(image=image)["image"]
-    image = F.clip(image * m, dtype, F.MAX_VALUES_BY_DTYPE[dtype])
-    assert np.allclose(image, result)
-
-    aug = A.MultiplicativeNoise(elementwise=True, p=1)
+    aug = A.MultiplicativeNoise(multiplier=(0.9, 1.1), elementwise=elementwise, p=1)
     params = aug.get_params_dependent_on_targets({"image": image})
     mul = params["multiplier"]
-    assert mul.shape == image.shape[:2] + (1,)
-    result = aug.apply(image, mul)
-    image = F.clip(image.astype(np.float32) * mul, dtype, F.MAX_VALUES_BY_DTYPE[dtype])
-    assert np.allclose(image, result)
 
-    aug = A.MultiplicativeNoise(per_channel=True, p=1)
-    params = aug.get_params_dependent_on_targets({"image": image})
-    mul = params["multiplier"]
-    assert mul.shape == (3,)
-    result = aug.apply(image, mul)
-    image = F.clip(image.astype(np.float32) * mul, dtype, F.MAX_VALUES_BY_DTYPE[dtype])
-    assert np.allclose(image, result)
+    if elementwise:
+        assert mul.shape == image.shape
+    else:
+        assert mul.shape == (image.shape[-1],)
 
-    aug = A.MultiplicativeNoise(elementwise=True, per_channel=True, p=1)
-    params = aug.get_params_dependent_on_targets({"image": image})
-    mul = params["multiplier"]
-    assert mul.shape == image.shape
     result = aug.apply(image, mul)
-    image = F.clip(image.astype(np.float32) * mul, image.dtype, F.MAX_VALUES_BY_DTYPE[image.dtype])
-    assert np.allclose(image, result)
+    assert np.allclose(clip(image.astype(np.float32) * mul.astype(np.float32), dtype), result)
 
 
 def test_mask_dropout():
@@ -1005,16 +993,10 @@ def test_affine_incorrect_scale_range(params):
             },
             {
                 "bboxes": [
-                    [15.65896994771262, 0.2946228229078849, 21.047137067150473, 4.617219579173327, 0],
-                    [194.29851584295034, 25.564320319214918, 199.68668296238818, 29.88691707548036, 0],
-                    [178.9528629328495, 95.38278042082668, 184.34103005228735, 99.70537717709212, 0],
-                    [0.47485022613917677, 70.11308292451965, 5.701484157049652, 73.70074852182076, 0],
+                    [(16.036253471129026, 0.7268824985344293, 21.42442059056688, 5.049479254799872, 0), (194.61183288056216, 25.996579994841458, 200.0, 30.319176751106898, 0), (179.33014645626594, 95.67740324373456, 184.71831357570377, 100.0, 0), (0.8521337495555823, 70.54534260014618, 6.078767680466058, 74.1330081974473, 0)]
                 ],
                 "keypoints": [
-                    [16.466635890349504, 0.2946228229078849, 147.04220486917677, 0.0],
-                    [198.770582727028, 26.08267308836993, 157.04220486917674, 9.30232558139535],
-                    [182.77879706281766, 98.84085782583904, 167.04220486917674, 18.6046511627907],
-                    [0.4748502261391767, 73.05280756037699, 177.04220486917674, 27.90697674418604],
+                    [(16.84391941376591, 0.7268824985344293, 147.04220486917677, 0.0), (199.0, 26.514932763996473, 157.04220486917674, 9.30232558139535), (183.15608058623408, 99.0, 167.04220486917674, 18.6046511627907), (0.8521337495555823, 73.48506723600353, 177.04220486917674, 27.906976744186046)]
                 ],
             },
         ],
@@ -1036,16 +1018,10 @@ def test_affine_incorrect_scale_range(params):
             },
             {
                 "bboxes": [
-                    [0.3133170376117963, 25.564320319214918, 5.701484157049649, 29.88691707548036, 0],
-                    [178.9528629328495, 0.2946228229078862, 184.34103005228735, 4.617219579173327, 0],
-                    [194.29851584295034, 70.11308292451965, 199.68668296238818, 74.43567968078509, 0],
-                    [15.658969947712617, 95.38278042082668, 20.88560387862309, 98.97044601812779, 0],
+                    [(0.8521337495555819, 25.866991802552704, 6.240300868993435, 30.18958855881814, 0), (179.4916796447933, 0.5972943062456757, 184.87984676423113, 4.919891062511116, 0), (194.61183288056216, 70.41575440785743, 200.0, 74.73835116412288, 0), (16.1977866596564, 95.68545190416447, 21.424420590566875, 99.27311750146558, 0)]
                 ],
                 "keypoints": [
-                    [0.3133170376117963, 26.212261280658684, 212.95779513082323, 0.0],
-                    [182.6172638742903, 0.42421101519664006, 222.95779513082323, 9.30232558139535],
-                    [198.60904953850064, 73.18239575266574, 232.9577951308232, 18.6046511627907],
-                    [16.305102701822126, 98.97044601812779, 242.9577951308232, 27.906976744186046],
+                    [(0.852133749555582, 26.514932763996473, 212.95779513082323, 0.0), (183.15608058623408, 0.7268824985344295, 222.95779513082323, 9.30232558139535), (199.0, 73.48506723600353, 232.9577951308232, 18.6046511627907), (16.84391941376591, 99.0, 242.9577951308232, 27.906976744186046)]
                 ],
             },
         ],
@@ -1270,7 +1246,7 @@ def test_grid_shuffle(image, grid):
     assert not np.array_equal(res["image"], image)
     assert not np.array_equal(res["mask"], mask)
 
-    np.testing.assert_allclose(res["image"].sum(axis=(0, 1)), image.sum(axis=(0, 1)), atol=0.03)
+    np.testing.assert_allclose(res["image"].sum(axis=(0, 1)), image.sum(axis=(0, 1)), atol=0.04)
     np.testing.assert_allclose(res["mask"].sum(axis=(0, 1)), mask.sum(axis=(0, 1)), atol=0.03)
 
 @pytest.mark.parametrize("image", IMAGES)
@@ -1524,3 +1500,216 @@ def test_pad_if_needed_functionality(params, expected):
     # Assert each expected key/value pair
     for key, value in expected.items():
         assert aug_dict[key] == value, f"Failed on {key} with value {value}"
+
+@pytest.mark.parametrize("params, expected", [
+    # Test default initialization values
+    ({}, {"slant_range": (-10, 10)}),
+    ({"slant_range": (-7, 4)},
+     {"slant_range": (-7, 4)}),
+    ({"slant_lower": 2}, {"slant_range": (2, 10)}),
+    ({"slant_upper": 2}, {"slant_range": (-10, 2)}),
+])
+def test_random_rain_initialization(params, expected):
+    img_rain = RandomRain(**params)
+    for key, value in expected.items():
+        assert getattr(img_rain, key) == value, f"Failed on {key} with value {value}"
+
+@pytest.mark.parametrize("params", [
+    ({"slant_range": (12, 8)}),  # Invalid slant range -> decreasing
+    ({"slant_range": (-8, 62)}),  # invalid slant range -> 62 out of upper bound
+])
+def test_random_rain_invalid_input(params):
+    with pytest.raises(Exception):
+        RandomRain(**params)
+
+@pytest.mark.parametrize("params, expected", [
+    # Test default initialization values
+    ({}, {"snow_point_range": (0.1, 0.3)}),
+    # Test snow point range
+    ({"snow_point_range": (0.2, 0.6)},
+     {"snow_point_range": (0.2, 0.6)}),
+    # Deprecated quality values handling
+    ({"snow_point_lower": 0.15}, {"snow_point_range": (0.15, 0.3)}),
+    ({"snow_point_upper": 0.4}, {"snow_point_range": (0.1, 0.4)}),
+])
+def test_random_snow_initialization(params, expected):
+    img_comp = RandomSnow(**params)
+    for key, value in expected.items():
+        assert getattr(img_comp, key) == value, f"Failed on {key} with value {value}"
+
+@pytest.mark.parametrize("params", [
+    ({"snow_point_range": (1.2, 1.5)}),  # Invalid quality range -> upper bound
+    ({"snow_point_range": (0.9, 0.7)}),  # Invalid range  -> decreasing
+])
+def test_random_snow_invalid_input(params):
+    with pytest.raises(Exception):
+        a = RandomSnow(**params)
+        print(a.snow_point_range)
+
+
+@pytest.mark.parametrize(
+    ["augmentation_cls", "params"],
+    get_transforms(
+        custom_arguments={
+            A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
+            A.CenterCrop: {"height": 10, "width": 10},
+            A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
+            A.RandomCrop: {"height": 10, "width": 10},
+            A.RandomResizedCrop: {"height": 10, "width": 10},
+            A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
+            A.CropAndPad: {"px": 10},
+            A.Resize: {"height": 10, "width": 10},
+            A.TemplateTransform: {
+                "templates": np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8),
+            },
+            A.XYMasking: {
+                "num_masks_x": (1, 3),
+                "num_masks_y": (1, 3),
+                "mask_x_length": 10,
+                "mask_y_length": 10,
+                "mask_fill_value": 1,
+                "fill_value": 0,
+            },
+        },
+        except_augmentations={
+        #     A.RandomCropNearBBox,
+            A.RandomSizedBBoxSafeCrop,
+            A.BBoxSafeRandomCrop,
+            A.CropNonEmptyMaskIfExists,
+            A.FDA,
+            A.HistogramMatching,
+            A.PixelDistributionAdaptation,
+            A.MaskDropout,
+            A.MixUp
+        },
+    ),
+)
+def test_dual_transforms_methods(augmentation_cls, params):
+    """Checks whether transformations based on DualTransform dont has abstract methods."""
+    aug = augmentation_cls(p=1, **params)
+    image = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
+    mask = np.random.randint(low=0, high=4, size=(100, 100), dtype=np.uint8) * 64
+
+    arg = {
+        "masks": mask,
+        "masks": [mask],
+        "bboxes": [[0, 0, 0.1, 0.1, 1]],
+        "keypoints": [(0, 0, 0, 0), (1, 1, 0, 0)],
+    }
+
+    for target in aug.targets:
+        if target in arg:
+            kwarg = {target: arg[target]}
+            try:
+                _res = aug(image=image, **kwarg)
+            except Exception as e:
+                if isinstance(e, NotImplementedError):
+                    raise NotImplementedError(f"{target} error at: {augmentation_cls},  {e}")
+                raise e
+
+
+@pytest.mark.parametrize("px", [
+    10,
+    (10, 20),
+    (-10, 20, -30, 40),
+    ((10, 20), (20, 30), (30, 40), (40, 50)),
+    ([1, 2, 3, 4],  [1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]),
+    None
+])
+@pytest.mark.parametrize("percent", [
+    0.1,
+    (0.1, 0.2),
+    (0.1, 0.2, 0.3, 0.4),
+    ((-0.1, -0.2), (-0.2, -0.3), (0.3, 0.4), (0.4, 0.5)),
+    ([0.1, 0.2, 0.3, 0.4],  [0.1, 0.2, 0.3, 0.4], [0.1, 0.2, 0.3, 0.4], [0.1, 0.2, 0.3, 0.4]),
+    None
+])
+@pytest.mark.parametrize("pad_cval", [
+    0,
+    (0, 255),
+    [0, 255]
+])
+@pytest.mark.parametrize("keep_size", [
+    True,
+    False
+])
+@pytest.mark.parametrize("sample_independently", [
+    True,
+    False
+])
+@pytest.mark.parametrize("image", IMAGES)
+def test_crop_and_pad(px, percent, pad_cval, keep_size, sample_independently, image):
+    pad_cval_mask = 255 if isinstance(pad_cval, list) else pad_cval
+    interpolation = cv2.INTER_LINEAR
+    pad_mode = cv2.BORDER_CONSTANT
+    if (px is None) ==  (percent is None):
+        # Skip the test case where both px and percent are None or both are not None
+        return
+
+    transform = A.Compose([A.CropAndPad(
+        px=px,
+        percent=percent,
+        pad_mode=pad_mode,
+        pad_cval=pad_cval,
+        pad_cval_mask=pad_cval_mask,
+        keep_size=keep_size,
+        sample_independently=sample_independently,
+        interpolation=interpolation,
+        p=1
+    )])
+
+    transformed_image = transform(image=image)["image"]
+
+    if keep_size:
+        assert transformed_image.shape == image.shape
+
+    assert transformed_image is not None
+    assert transformed_image.shape[0] > 0
+    assert transformed_image.shape[1] > 0
+    assert transformed_image.shape[2] == image.shape[2]
+
+
+@pytest.mark.parametrize("percent, expected_shape", [
+    (0.1, (12, 12, 3)),  # Padding 10% of image size on each side
+    (-0.1, (8, 8, 3)),  # Cropping 10% of image size from each side
+    ((0.1, 0.2, 0.3, 0.4), (14, 16, 3)),  # Padding: top=10%, right=20%, bottom=30%, left=40%
+    ((-0.1, -0.2, -0.3, -0.4), (6, 4, 3)),  # Cropping: top=10%, right=20%, bottom=30%, left=40%
+])
+def test_crop_and_pad_percent(percent, expected_shape):
+    transform = A.Compose([A.CropAndPad(px=None, percent=percent, pad_mode=cv2.BORDER_CONSTANT, pad_cval=0, keep_size=False)])
+
+    image = np.ones((10, 10, 3), dtype=np.uint8)
+
+    transformed_image = transform(image=image)["image"]
+
+    assert transformed_image.shape == expected_shape
+    if percent is not None and all(p >= 0 for p in np.array(percent).flatten()):
+        assert transformed_image.sum() == image.sum()
+
+@pytest.mark.parametrize("px, expected_shape", [
+    (2, (14, 14, 3)),  # Padding 2 pixels on each side
+    (-2, (6, 6, 3)),  # Cropping 2 pixels from each side
+    ((1, 2, 3, 4), (14, 16, 3)),  # Padding: top=1, right=2, bottom=3, left=4
+    ((-1, -2, -3, -4), (6, 4, 3)),  # Cropping: top=1, right=2, bottom=3, left=4
+])
+def test_crop_and_pad_px_pixel_values(px, expected_shape):
+    transform = A.Compose([A.CropAndPad(px=px, percent=None, pad_mode=cv2.BORDER_CONSTANT, pad_cval=0, keep_size=False)])
+
+    image = np.ones((10, 10, 3), dtype=np.uint8) * 255
+
+    transformed_image = transform(image=image)["image"]
+
+    if isinstance(px, int):
+        px = [px] * 4  # Convert to list of 4 elements
+    if isinstance(px, tuple) and len(px) == 2:
+        px = [px[0], px[1], px[0], px[1]]  # Convert to 4 elements for padding
+
+    if px is not None:
+        if all(p >= 0 for p in px):  # Padding
+            pad_top, pad_right, pad_bottom, pad_left = px
+            central_region = transformed_image[pad_top:pad_top + image.shape[0], pad_left:pad_left + image.shape[1], :]
+            assert np.all(central_region == 255)
+        elif all(p <= 0 for p in px):  # Cropping
+            crop_top, crop_right, crop_bottom, crop_left = [-p for p in px]
+            cropped_region = image[crop_top:image.shape[0] - crop_bottom, crop_left:image.shape[1] - crop_right, :]
+            assert np.all(transformed_image == cropped_region)

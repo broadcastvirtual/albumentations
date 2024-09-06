@@ -40,6 +40,8 @@ REPR_INDENT_STEP = 2
 TransformType = Union[BasicTransform, "BaseCompose"]
 TransformsSeqType = List[TransformType]
 
+AVAILABLE_KEYS = ("image", "mask", "masks", "bboxes", "keypoints", "global_label")
+
 
 def get_always_apply(transforms: Union["BaseCompose", TransformsSeqType]) -> TransformsSeqType:
     new_transforms: TransformsSeqType = []
@@ -56,6 +58,7 @@ class BaseCompose(Serializable):
         if isinstance(transforms, (BaseCompose, BasicTransform)):
             warnings.warn(
                 "transforms is single transform, but a sequence is expected! Transform will be wrapped into list.",
+                stacklevel=2,
             )
             transforms = [transforms]
 
@@ -148,7 +151,10 @@ class BaseCompose(Serializable):
             self._available_keys.update(["labels"])
             for proc in self.processors.values():
                 if proc.default_data_name not in self._available_keys:  # if no transform to process this data
-                    warnings.warn(f"Got processor for {proc.default_data_name}, but no transform to process it.")
+                    warnings.warn(
+                        f"Got processor for {proc.default_data_name}, but no transform to process it.",
+                        stacklevel=2,
+                    )
                 self._available_keys.update(proc.data_fields)
                 if proc.params.label_fields:
                     self._available_keys.update(proc.params.label_fields)
@@ -207,6 +213,8 @@ class Compose(BaseCompose):
             proc.ensure_transforms_valid(self.transforms)
 
         self.add_targets(additional_targets)
+        if not self.transforms:  # if no transforms -> do nothing, all keys will be available
+            self._available_keys.update(AVAILABLE_KEYS)
 
         self.is_check_args = True
         self._disable_check_args_for_transforms(self.transforms)
@@ -436,7 +444,7 @@ class OneOrOther(BaseCompose):
             transforms = [first, second]
         super().__init__(transforms, p)
         if len(self.transforms) != NUM_ONEOF_TRANSFORMS:
-            warnings.warn("Length of transforms is not equal to 2.")
+            warnings.warn("Length of transforms is not equal to 2.", stacklevel=2)
 
     def __call__(self, *args: Any, force_apply: bool = False, **data: Any) -> Dict[str, Any]:
         if self.replay_mode:
