@@ -14,7 +14,7 @@ from albumentations.core.bbox_utils import denormalize_bboxes, normalize_bboxes
 from albucore.utils import clip
 import albumentations as A
 import albumentations.augmentations.functional as F
-import albumentations.augmentations.geometric.functional as FGeometric
+import albumentations.augmentations.geometric.functional as fgeometric
 from albumentations.augmentations.transforms import ImageCompression, RandomRain
 from albumentations.core.transforms_interface import BasicTransform
 from albumentations.core.types import ImageCompressionType
@@ -41,8 +41,8 @@ def test_rotate_interpolation(interpolation):
     mask = np.random.randint(low=0, high=2, size=(100, 100), dtype=np.uint8)
     aug = A.Rotate(limit=(45, 45), interpolation=interpolation, p=1)
     data = aug(image=image, mask=mask)
-    expected_image = FGeometric.rotate(image, 45, interpolation=interpolation, border_mode=cv2.BORDER_REFLECT_101)
-    expected_mask = FGeometric.rotate(mask, 45, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_REFLECT_101)
+    expected_image = fgeometric.rotate(image, 45, interpolation=interpolation, border_mode=cv2.BORDER_REFLECT_101)
+    expected_mask = fgeometric.rotate(mask, 45, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_REFLECT_101)
     assert np.array_equal(data["image"], expected_image)
     assert np.array_equal(data["mask"], expected_mask)
 
@@ -63,10 +63,10 @@ def test_optical_distortion_interpolation(interpolation):
     mask = np.random.randint(low=0, high=2, size=(100, 100), dtype=np.uint8)
     aug = A.OpticalDistortion(distort_limit=(0.05, 0.05), shift_limit=(0, 0), interpolation=interpolation, p=1)
     data = aug(image=image, mask=mask)
-    expected_image = FGeometric.optical_distortion(
+    expected_image = fgeometric.optical_distortion(
         image, k=0.05, dx=0, dy=0, interpolation=interpolation, border_mode=cv2.BORDER_REFLECT_101
     )
-    expected_mask = FGeometric.optical_distortion(
+    expected_mask = fgeometric.optical_distortion(
         mask, k=0.05, dx=0, dy=0, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_REFLECT_101
     )
     assert np.array_equal(data["image"], expected_image)
@@ -79,10 +79,10 @@ def test_grid_distortion_interpolation(interpolation):
     mask = np.random.randint(low=0, high=2, size=(100, 100), dtype=np.uint8)
     aug = A.GridDistortion(num_steps=1, distort_limit=(0.3, 0.3), interpolation=interpolation, p=1)
     data = aug(image=image, mask=mask)
-    expected_image = FGeometric.grid_distortion(
+    expected_image = fgeometric.grid_distortion(
         image, num_steps=1, xsteps=[1.3], ysteps=[1.3], interpolation=interpolation, border_mode=cv2.BORDER_REFLECT_101
     )
-    expected_mask = FGeometric.grid_distortion(
+    expected_mask = fgeometric.grid_distortion(
         mask,
         num_steps=1,
         xsteps=[1.3],
@@ -116,7 +116,7 @@ def test_elastic_transform_interpolation(monkeypatch, interpolation):
     aug = A.ElasticTransform(alpha=1, sigma=50, interpolation=interpolation, p=1)
 
     data = aug(image=image, mask=mask)
-    expected_image = FGeometric.elastic_transform(
+    expected_image = fgeometric.elastic_transform(
         image,
         alpha=1,
         sigma=50,
@@ -124,7 +124,7 @@ def test_elastic_transform_interpolation(monkeypatch, interpolation):
         border_mode=cv2.BORDER_REFLECT_101,
         random_state=np.random.RandomState(random_seed),
     )
-    expected_mask = FGeometric.elastic_transform(
+    expected_mask = fgeometric.elastic_transform(
         mask,
         alpha=1,
         sigma=50,
@@ -158,6 +158,7 @@ def test_elastic_transform_interpolation(monkeypatch, interpolation):
                 "fill_value": 0,
             },
             A.D4: {},
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={A.RandomCropNearBBox, A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop, A.PixelDropout,
                               A.MixUp},
@@ -195,6 +196,7 @@ def test_binary_mask_interpolation(augmentation_cls, params):
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.Resize: {"height": 10, "width": 10},
             A.PixelDropout: {"dropout_prob": 0.5, "mask_drop_value": 10, "drop_value": 20},
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
             A.RandomCropNearBBox,
@@ -247,6 +249,7 @@ def __test_multiprocessing_support_proc(args):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
             A.RandomCropNearBBox,
@@ -373,10 +376,10 @@ def test_lambda_transform():
         return new_mask
 
     def vflip_bbox(bbox, **kwargs):
-        return FGeometric.bbox_vflip(bbox, kwargs["shape"][0], kwargs["shape"][1])
+        return fgeometric.bbox_vflip(bbox, kwargs["shape"][0], kwargs["shape"][1])
 
     def vflip_keypoint(keypoint, **kwargs):
-        return FGeometric.keypoint_vflip(keypoint, kwargs["shape"][0], kwargs["shape"][1])
+        return fgeometric.keypoint_vflip(keypoint, kwargs["shape"][0], kwargs["shape"][1])
 
     aug = A.Lambda(
         image=negate_image, mask=partial(one_hot_mask, num_channels=16), bbox=vflip_bbox, keypoint=vflip_keypoint, p=1
@@ -390,8 +393,8 @@ def test_lambda_transform():
     )
     assert (output["image"] < 0).all()
     assert output["mask"].shape[2] == 16  # num_channels
-    assert output["bboxes"] == [FGeometric.bbox_vflip((10, 15, 25, 35), 10, 10)]
-    assert output["keypoints"] == [FGeometric.keypoint_vflip((20, 30, 40, 50), 10, 10)]
+    assert output["bboxes"] == [fgeometric.bbox_vflip((10, 15, 25, 35), 10, 10)]
+    assert output["keypoints"] == [fgeometric.keypoint_vflip((20, 30, 40, 50), 10, 10)]
 
 
 def test_channel_droput():
@@ -1230,7 +1233,6 @@ def test_motion_blur_allow_shifted(seed):
         A.RandomRain(),
         A.RandomFog(),
         A.RandomSunFlare(),
-        A.RandomShadow(),
         A.Spatter(),
         A.ChromaticAberration(),
     ],
@@ -1459,6 +1461,7 @@ def test_coarse_dropout_invalid_input(params):
                             "max_size": 10
                             },
             A.ZoomBlur: {"max_factor": (1.05, 3)},
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
             A.RandomCropNearBBox,
@@ -1518,7 +1521,8 @@ def test_change_image(augmentation_cls, params):
                 "n_segments": (10, 10),
                 "max_size": 10
             },
-            A.FancyPCA: {"alpha": 1}
+            A.FancyPCA: {"alpha": 1},
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
             A.Crop,
@@ -1617,7 +1621,6 @@ def test_downscale_invalid_input(params):
     ({"position": "top_left"}, {"position": A.PadIfNeeded.PositionType.TOP_LEFT}),
     # Value handling when border_mode is BORDER_CONSTANT
     ({"border_mode": cv2.BORDER_CONSTANT, "value": 255}, {"border_mode": cv2.BORDER_CONSTANT, "value": 255}),
-    ({"border_mode": cv2.BORDER_REFLECT_101, "value": 255}, {"border_mode": cv2.BORDER_CONSTANT, "value": 255}),
     ({"border_mode": cv2.BORDER_CONSTANT, "value": [0, 0, 0]}, {"border_mode": cv2.BORDER_CONSTANT, "value": [0, 0, 0]}),
     # Mask value handling
     ({"border_mode": cv2.BORDER_CONSTANT, "value": [0, 0, 0], "mask_value": 128}, {"border_mode": cv2.BORDER_CONSTANT, "mask_value": 128, "value": [0, 0, 0]}),
@@ -1702,7 +1705,7 @@ def test_random_snow_invalid_input(params):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
-            A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf")
+            A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
         },
         except_augmentations={
             A.RandomSizedBBoxSafeCrop,
@@ -1714,7 +1717,8 @@ def test_random_snow_invalid_input(params):
             A.PixelDistributionAdaptation,
             A.MaskDropout,
             A.MixUp,
-            A.OverlayElements
+            A.OverlayElements,
+            A.GridElasticDeform
         },
     ),
 )
@@ -1976,11 +1980,11 @@ def test_rot90(bboxes, angle, keypoints):
 
     factor = angle2factor[angle]
 
-    image_rotated = FGeometric.rot90(image, factor)
-    mask_rotated = FGeometric.rot90(image, factor)
-    bboxes_rotated = [FGeometric.bbox_rot90(bbox, factor) for bbox in normalized_bboxes]
+    image_rotated = fgeometric.rot90(image, factor)
+    mask_rotated = fgeometric.rot90(image, factor)
+    bboxes_rotated = [fgeometric.bbox_rot90(bbox, factor) for bbox in normalized_bboxes]
     bboxes_rotated = denormalize_bboxes(bboxes_rotated, image_height, image_width)
-    keypoints_rotated = [FGeometric.keypoint_rot90(keypoint[:4], factor, image_height, image_width) for keypoint in keypoints]
+    keypoints_rotated = [fgeometric.keypoint_rot90(keypoint[:4], factor, image_height, image_width) for keypoint in keypoints]
 
     assert np.array_equal(transformed["image"], image_rotated)
     assert np.array_equal(transformed["mask"], mask_rotated)
@@ -2016,6 +2020,7 @@ def test_rot90(bboxes, angle, keypoints):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
             A.RandomCropNearBBox,

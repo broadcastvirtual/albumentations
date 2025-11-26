@@ -22,6 +22,19 @@ from albumentations import random_utils
 from albumentations.augmentations.blur.functional import blur
 from albumentations.augmentations.blur.transforms import BlurInitSchema, process_blur_limit
 from albumentations.augmentations.utils import check_range
+from albumentations.core.pydantic import (
+    InterpolationType,
+    NonNegativeFloatRangeType,
+    OnePlusFloatRangeType,
+    OnePlusIntRangeType,
+    ProbabilityType,
+    SymmetricRangeType,
+    ZeroOneRangeType,
+    check_0plus,
+    check_01,
+    check_1plus,
+    nondecreasing,
+)
 from albumentations.core.transforms_interface import (
     BaseTransformInitSchema,
     DualTransform,
@@ -52,20 +65,6 @@ from albumentations.core.types import (
 from albumentations.core.utils import format_args, to_tuple
 
 from . import functional as fmain
-
-from albumentations.core.pydantic import (
-    InterpolationType,
-    NonNegativeFloatRangeType,
-    OnePlusFloatRangeType,
-    OnePlusIntRangeType,
-    ProbabilityType,
-    SymmetricRangeType,
-    ZeroOneRangeType,
-    check_0plus,
-    check_01,
-    check_1plus,
-    nondecreasing,
-)
 
 __all__ = [
     "Normalize",
@@ -1131,13 +1130,17 @@ class RandomSunFlare(ImageOnlyTransform):
 
 
 class RandomShadow(ImageOnlyTransform):
-    """Simulates shadows for the image
+    """Simulates shadows for the image by reducing the brightness of the image in shadow regions.
 
     Args:
-        shadow_roi: region of the image where shadows
-            will appear. All values should be in range [0, 1].
-        num_shadows_limit: Lower and upper limits for the possible number of shadows.
-        shadow_dimension: number of edges in the shadow polygons
+        shadow_roi (tuple): region of the image where shadows
+            will appear (x_min, y_min, x_max, y_max). All values should be in range [0, 1].
+        num_shadows_limit (tuple): Lower and upper limits for the possible number of shadows.
+            Default: (1, 2).
+        shadow_dimension (int): number of edges in the shadow polygons. Default: 5.
+        shadow_intensity_range (tuple): Range for the shadow intensity.
+            Should be two float values between 0 and 1. Default: (0.5, 0.5).
+        p (float): probability of applying the transform. Default: 0.5.
 
     Targets:
         image
@@ -1167,6 +1170,15 @@ class RandomShadow(ImageOnlyTransform):
             description="Upper limit for the possible number of shadows",
         )
         shadow_dimension: int = Field(default=5, description="Number of edges in the shadow polygons", ge=1)
+
+        shadow_intensity_range: Annotated[
+            tuple[float, float],
+            AfterValidator(check_01),
+            AfterValidator(nondecreasing),
+        ] = Field(
+            default=(0.5, 0.5),
+            description="Range for the shadow intensity",
+        )
 
         @model_validator(mode="after")
         def validate_shadows(self) -> Self:
@@ -1201,6 +1213,21 @@ class RandomShadow(ImageOnlyTransform):
             if not 0 <= shadow_lower_x <= shadow_upper_x <= 1 or not 0 <= shadow_lower_y <= shadow_upper_y <= 1:
                 raise ValueError(f"Invalid shadow_roi. Got: {self.shadow_roi}")
 
+            if isinstance(self.shadow_intensity_range, float):
+                if not (0 <= self.shadow_intensity_range <= 1):
+                    raise ValueError(
+                        f"shadow_intensity_range value should be within [0, 1] range. "
+                        f"Got: {self.shadow_intensity_range}",
+                    )
+            elif isinstance(self.shadow_intensity_range, tuple):
+                if not (0 <= self.shadow_intensity_range[0] <= self.shadow_intensity_range[1] <= 1):
+                    raise ValueError(
+                        f"shadow_intensity_range values should be within [0, 1] range and increasing. "
+                        f"Got: {self.shadow_intensity_range}",
+                    )
+            else:
+                raise TypeError("shadow_intensity_range should be an float or a tuple of floats.")
+
             return self
 
     def __init__(
@@ -1210,6 +1237,7 @@ class RandomShadow(ImageOnlyTransform):
         num_shadows_lower: int | None = None,
         num_shadows_upper: int | None = None,
         shadow_dimension: int = 5,
+        shadow_intensity_range: tuple[float, float] = (0.5, 0.5),
         always_apply: bool | None = None,
         p: float = 0.5,
     ):
@@ -1218,9 +1246,16 @@ class RandomShadow(ImageOnlyTransform):
         self.shadow_roi = shadow_roi
         self.shadow_dimension = shadow_dimension
         self.num_shadows_limit = num_shadows_limit
+        self.shadow_intensity_range = shadow_intensity_range
 
-    def apply(self, img: np.ndarray, vertices_list: list[np.ndarray], **params: Any) -> np.ndarray:
-        return fmain.add_shadow(img, vertices_list)
+    def apply(
+        self,
+        img: np.ndarray,
+        vertices_list: list[np.ndarray],
+        intensities: np.ndarray,
+        **params: Any,
+    ) -> np.ndarray:
+        return fmain.add_shadow(img, vertices_list, intensities)
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, list[np.ndarray]]:
         height, width = params["shape"][:2]
@@ -1245,7 +1280,14 @@ class RandomShadow(ImageOnlyTransform):
             for _ in range(num_shadows)
         ]
 
-        return {"vertices_list": vertices_list}
+        # Sample shadow intensity for each shadow
+        intensities = random_utils.uniform(
+            self.shadow_intensity_range[0],
+            self.shadow_intensity_range[1],
+            size=num_shadows,
+        )
+
+        return {"vertices_list": vertices_list, "intensities": intensities}
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return (
@@ -2489,10 +2531,11 @@ class ColorJitter(ImageOnlyTransform):
             if isinstance(value, numbers.Number):
                 if value < 0:
                     raise ValueError(f"If {info.field_name} is a single number, it must be non negative.")
-                value = [bias - value, bias + value]
+                left = bias - value
                 if clip:
-                    value[0] = max(value[0], 0)
-            elif isinstance(value, (tuple, list)) and len(value) == PAIR:
+                    left = max(left, 0)
+                value = (left, bias + value)
+            elif isinstance(value, tuple) and len(value) == PAIR:
                 check_range(value, *bounds, info.field_name)
 
             return cast(Tuple[float, float], value)

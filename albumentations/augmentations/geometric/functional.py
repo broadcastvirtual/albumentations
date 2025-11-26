@@ -6,7 +6,7 @@ from typing import Any, Callable, Sequence, cast
 import cv2
 import numpy as np
 import skimage.transform
-from albucore.utils import clipped, maybe_process_in_chunks, preserve_channel_dim, get_num_channels
+from albucore.utils import clipped, get_num_channels, maybe_process_in_chunks, preserve_channel_dim
 
 from albumentations import random_utils
 from albumentations.augmentations.functional import center
@@ -575,11 +575,11 @@ def bbox_affine(
             ],
         )
     elif rotate_method == "ellipse":
-        w = (x_max - x_min) / 2
-        h = (y_max - y_min) / 2
+        bbox_width = (x_max - x_min) / 2
+        bbox_height = (y_max - y_min) / 2
         data = np.arange(0, 360, dtype=np.float32)
-        x = w * np.sin(np.radians(data)) + (w + x_min - 0.5)
-        y = h * np.cos(np.radians(data)) + (h + y_min - 0.5)
+        x = bbox_width * np.sin(np.radians(data)) + (bbox_width + x_min - 0.5)
+        y = bbox_height * np.cos(np.radians(data)) + (bbox_height + y_min - 0.5)
         points = np.hstack([x.reshape(-1, 1), y.reshape(-1, 1)])
     else:
         raise ValueError(f"Method {rotate_method} is not a valid rotation method.")
@@ -1418,3 +1418,518 @@ def elastic_transform(
         random_state,
         same_dxdy,
     )
+
+
+def pad_bboxes(
+    bboxes: np.ndarray,
+    pad_top: int,
+    pad_bottom: int,
+    pad_left: int,
+    pad_right: int,
+    border_mode: int,
+    image_shape: tuple[int, int],
+) -> np.ndarray:
+    if border_mode not in {cv2.BORDER_REFLECT_101, cv2.BORDER_REFLECT101}:
+        shift_vector = np.array([pad_left, pad_top, pad_left, pad_top])
+        return shift_bboxes(bboxes, shift_vector)
+
+    grid_dimensions = get_pad_grid_dimensions(pad_top, pad_bottom, pad_left, pad_right, image_shape)
+
+    bboxes = generate_reflected_bboxes(bboxes, grid_dimensions, image_shape)
+
+    # Calculate the number of grid cells added on each side
+    original_row, original_col = grid_dimensions["original_position"]
+
+    rows, cols = image_shape[:2]
+
+    # Subtract the offset based on the number of added grid cells
+    bboxes[:, 0] -= original_col * cols - pad_left  # x_min
+    bboxes[:, 2] -= original_col * cols - pad_left  # x_max
+    bboxes[:, 1] -= original_row * rows - pad_top  # y_min
+    bboxes[:, 3] -= original_row * rows - pad_top  # y_max
+
+    new_height = pad_top + pad_bottom + rows
+    new_width = pad_left + pad_right + cols
+
+    return validate_bboxes(bboxes, (new_height, new_width))
+
+
+def validate_bboxes(bboxes: np.ndarray, image_shape: tuple[int, int]) -> np.ndarray:
+    """Validate bounding boxes and remove invalid ones.
+
+    Args:
+        bboxes (np.ndarray): Array of bounding boxes with shape (n, 4) where each row is [x_min, y_min, x_max, y_max].
+        image_shape (tuple[int, int]): Shape of the image as (height, width).
+
+    Returns:
+        np.ndarray: Array of valid bounding boxes, potentially with fewer boxes than the input.
+
+    Example:
+        >>> bboxes = np.array([[10, 20, 30, 40], [-10, -10, 5, 5], [100, 100, 120, 120]])
+        >>> valid_bboxes = validate_bboxes(bboxes, (100, 100))
+        >>> print(valid_bboxes)
+        [[10 20 30 40]]
+    """
+    rows, cols = image_shape
+
+    x_min, y_min, x_max, y_max = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
+
+    valid_indices = (x_max > 0) & (y_max > 0) & (x_min < cols) & (y_min < rows)
+
+    return bboxes[valid_indices]
+
+
+def shift_bboxes(bboxes: np.ndarray, shift_vector: np.ndarray) -> np.ndarray:
+    """Shift bounding boxes by a given vector.
+
+    Args:
+        bboxes (np.ndarray): Array of bounding boxes with shape (n, m) where n is the number of bboxes
+                             and m >= 4. The first 4 columns are [x_min, y_min, x_max, y_max].
+        shift_vector (np.ndarray): Vector to shift the bounding boxes by, with shape (4,) for
+                                   [shift_x, shift_y, shift_x, shift_y].
+
+    Returns:
+        np.ndarray: Shifted bounding boxes with the same shape as input.
+    """
+    # Create a copy of the input array to avoid modifying it in-place
+    shifted_bboxes = bboxes.copy()
+
+    # Add the shift vector to the first 4 columns
+    shifted_bboxes[:, :4] += shift_vector
+
+    return shifted_bboxes
+
+
+def get_pad_grid_dimensions(
+    pad_top: int,
+    pad_bottom: int,
+    pad_left: int,
+    pad_right: int,
+    image_shape: tuple[int, int],
+) -> dict[str, tuple[int, int]]:
+    """Calculate the dimensions of the grid needed for reflection padding and the position of the original image.
+
+    Args:
+        pad_top (int): Number of pixels to pad above the image.
+        pad_bottom (int): Number of pixels to pad below the image.
+        pad_left (int): Number of pixels to pad to the left of the image.
+        pad_right (int): Number of pixels to pad to the right of the image.
+        image_shape (tuple[int, int]): Shape of the original image as (height, width).
+
+    Returns:
+        dict[str, tuple[int, int]]: A dictionary containing:
+            - 'grid_shape': A tuple (grid_rows, grid_cols) where:
+                - grid_rows (int): Number of times the image needs to be repeated vertically.
+                - grid_cols (int): Number of times the image needs to be repeated horizontally.
+            - 'original_position': A tuple (original_row, original_col) where:
+                - original_row (int): Row index of the original image in the grid.
+                - original_col (int): Column index of the original image in the grid.
+    """
+    rows, cols = image_shape[:2]
+
+    grid_rows = 1 + math.ceil(pad_top / rows) + math.ceil(pad_bottom / rows)
+    grid_cols = 1 + math.ceil(pad_left / cols) + math.ceil(pad_right / cols)
+    original_row = math.ceil(pad_top / rows)
+    original_col = math.ceil(pad_left / cols)
+
+    return {"grid_shape": (grid_rows, grid_cols), "original_position": (original_row, original_col)}
+
+
+def generate_reflected_bboxes(
+    bboxes: np.ndarray,
+    grid_dims: dict[str, tuple[int, int]],
+    image_shape: tuple[int, int],
+) -> np.ndarray:
+    """Generate reflected bounding boxes for the entire reflection grid.
+
+    Args:
+        bboxes (np.ndarray): Original bounding boxes.
+        grid_dims (dict[str, tuple[int, int]]): Grid dimensions and original position.
+        image_shape (tuple[int, int]): Shape of the original image as (height, width).
+
+    Returns:
+        np.ndarray: Array of reflected and shifted bounding boxes for the entire grid.
+    """
+    rows, cols = image_shape[:2]
+    grid_rows, grid_cols = grid_dims["grid_shape"]
+    original_row, original_col = grid_dims["original_position"]
+
+    # Prepare flipped versions of bboxes
+    bboxes_hflipped = flip_bboxes(bboxes, flip_horizontal=True, image_shape=image_shape)
+    bboxes_vflipped = flip_bboxes(bboxes, flip_vertical=True, image_shape=image_shape)
+    bboxes_hvflipped = flip_bboxes(bboxes, flip_horizontal=True, flip_vertical=True, image_shape=image_shape)
+
+    # Shift all versions to the original position
+    shift_vector = np.array([original_col * cols, original_row * rows, original_col * cols, original_row * rows])
+    bboxes_shifted = shift_bboxes(bboxes, shift_vector)
+    bboxes_hflipped_shifted = shift_bboxes(bboxes_hflipped, shift_vector)
+    bboxes_vflipped_shifted = shift_bboxes(bboxes_vflipped, shift_vector)
+    bboxes_hvflipped_shifted = shift_bboxes(bboxes_hvflipped, shift_vector)
+
+    new_bboxes = []
+
+    for grid_row in range(grid_rows):
+        for grid_col in range(grid_cols):
+            # Determine which version of bboxes to use based on grid position
+            if (grid_row - original_row) % 2 == 0 and (grid_col - original_col) % 2 == 0:
+                current_bboxes = bboxes_shifted
+            elif (grid_row - original_row) % 2 == 0:
+                current_bboxes = bboxes_hflipped_shifted
+            elif (grid_col - original_col) % 2 == 0:
+                current_bboxes = bboxes_vflipped_shifted
+            else:
+                current_bboxes = bboxes_hvflipped_shifted
+
+            # Shift to the current grid cell
+            cell_shift = np.array(
+                [
+                    (grid_col - original_col) * cols,
+                    (grid_row - original_row) * rows,
+                    (grid_col - original_col) * cols,
+                    (grid_row - original_row) * rows,
+                ],
+            )
+            shifted_bboxes = shift_bboxes(current_bboxes, cell_shift)
+
+            new_bboxes.append(shifted_bboxes)
+
+    return np.vstack(new_bboxes)
+
+
+def flip_bboxes(
+    bboxes: np.ndarray,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
+    image_shape: tuple[int, int] = (0, 0),
+) -> np.ndarray:
+    """Flip bounding boxes horizontally and/or vertically.
+
+    Args:
+        bboxes (np.ndarray): Array of bounding boxes with shape (n, m) where each row is
+            [x_min, y_min, x_max, y_max, ...].
+        flip_horizontal (bool): Whether to flip horizontally.
+        flip_vertical (bool): Whether to flip vertically.
+        image_shape (tuple[int, int]): Shape of the image as (height, width).
+
+    Returns:
+        np.ndarray: Flipped bounding boxes.
+    """
+    rows, cols = image_shape[:2]
+    flipped_bboxes = bboxes.copy()
+    if flip_horizontal:
+        flipped_bboxes[:, [0, 2]] = cols - flipped_bboxes[:, [2, 0]]
+    if flip_vertical:
+        flipped_bboxes[:, [1, 3]] = rows - flipped_bboxes[:, [3, 1]]
+    return flipped_bboxes
+
+
+@preserve_channel_dim
+def distort_image(image: np.ndarray, generated_mesh: np.ndarray, interpolation: int) -> np.ndarray:
+    """Apply perspective distortion to an image based on a generated mesh.
+
+    This function applies a perspective transformation to each cell of the image defined by the
+    generated mesh. The distortion is applied using OpenCV's perspective transformation and
+    blending techniques.
+
+    Args:
+        image (np.ndarray): The input image to be distorted. Can be a 2D grayscale image or a
+                            3D color image.
+        generated_mesh (np.ndarray): A 2D array where each row represents a quadrilateral cell
+                                    as [x1, y1, x2, y2, dst_x1, dst_y1, dst_x2, dst_y2, dst_x3, dst_y3, dst_x4, dst_y4].
+                                    The first four values define the source rectangle, and the last eight values
+                                    define the destination quadrilateral.
+        interpolation (int): Interpolation method to be used in the perspective transformation.
+                             Should be one of the OpenCV interpolation flags (e.g., cv2.INTER_LINEAR).
+
+    Returns:
+        np.ndarray: The distorted image with the same shape and dtype as the input image.
+
+    Note:
+        - The function preserves the channel dimension of the input image.
+        - Each cell of the generated mesh is transformed independently and then blended into the output image.
+        - The distortion is applied using perspective transformation, which allows for more complex
+          distortions compared to affine transformations.
+
+    Example:
+        >>> image = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+        >>> mesh = np.array([[0, 0, 50, 50, 5, 5, 45, 5, 45, 45, 5, 45]])
+        >>> distorted = distort_image(image, mesh, cv2.INTER_LINEAR)
+        >>> distorted.shape
+        (100, 100, 3)
+    """
+    distorted_image = np.zeros_like(image)
+
+    for mesh in generated_mesh:
+        # Extract source rectangle and destination quadrilateral
+        x1, y1, x2, y2 = mesh[:4]  # Source rectangle
+        dst_quad = mesh[4:].reshape(4, 2)  # Destination quadrilateral
+
+        # Convert source rectangle to quadrilateral
+        src_quad = np.array(
+            [
+                [x1, y1],  # Top-left
+                [x2, y1],  # Top-right
+                [x2, y2],  # Bottom-right
+                [x1, y2],  # Bottom-left
+            ],
+            dtype=np.float32,
+        )
+
+        # Calculate Perspective transformation matrix
+        perspective_mat = cv2.getPerspectiveTransform(src_quad, dst_quad)
+
+        # Apply Perspective transformation
+        warped = cv2.warpPerspective(image, perspective_mat, (image.shape[1], image.shape[0]), flags=interpolation)
+
+        # Create mask for the transformed region
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.fillConvexPoly(mask, np.int32(dst_quad), 255)
+
+        # Copy only the warped quadrilateral area to the output image
+        distorted_image = cv2.copyTo(warped, mask, distorted_image)
+
+    return distorted_image
+
+
+def calculate_grid_dimensions(
+    image_shape: tuple[int, int],
+    num_grid_xy: tuple[int, int],
+) -> np.ndarray:
+    """Calculate the dimensions of a grid overlay on an image using vectorized operations.
+
+    This function divides an image into a grid and calculates the dimensions
+    (x_min, y_min, x_max, y_max) for each cell in the grid without using loops.
+
+    Args:
+        image_shape (tuple[int, int]): The shape of the image (height, width).
+        num_grid_xy (tuple[int, int]): The number of grid cells in (x, y) directions.
+
+    Returns:
+        np.ndarray: A 3D array of shape (grid_height, grid_width, 4) where each element
+                    is [x_min, y_min, x_max, y_max] for a grid cell.
+
+    Example:
+        >>> image_shape = (100, 150)
+        >>> num_grid_xy = (3, 2)
+        >>> dimensions = calculate_grid_dimensions(image_shape, num_grid_xy)
+        >>> print(dimensions.shape)
+        (2, 3, 4)
+        >>> print(dimensions[0, 0])  # First cell
+        [  0   0  50  50]
+    """
+    num_grid_yx = np.array(num_grid_xy[::-1])  # Reverse to match image_shape order
+    image_shape = np.array(image_shape)
+
+    square_shape = image_shape // num_grid_yx
+    last_square_shape = image_shape - (square_shape * (num_grid_yx - 1))
+
+    grid_width, grid_height = num_grid_xy
+
+    # Create meshgrid for row and column indices
+    col_indices, row_indices = np.meshgrid(np.arange(grid_width), np.arange(grid_height))
+
+    # Calculate x_min and y_min
+    x_min = col_indices * square_shape[1]
+    y_min = row_indices * square_shape[0]
+
+    # Calculate x_max and y_max
+    x_max = np.where(col_indices == grid_width - 1, x_min + last_square_shape[1], x_min + square_shape[1])
+    y_max = np.where(row_indices == grid_height - 1, y_min + last_square_shape[0], y_min + square_shape[0])
+
+    # Stack the dimensions
+    return np.stack([x_min, y_min, x_max, y_max], axis=-1).astype(np.int16)
+
+
+def generate_distorted_grid_polygons(dimensions: np.ndarray, magnitude: int) -> np.ndarray:
+    """Generate distorted grid polygons based on input dimensions and magnitude.
+
+    This function creates a grid of polygons and applies random distortions to the internal vertices,
+    while keeping the boundary vertices fixed. The distortion is applied consistently across shared
+    vertices to avoid gaps or overlaps in the resulting grid.
+
+    Args:
+        dimensions (np.ndarray): A 3D array of shape (grid_height, grid_width, 4) where each element
+                                 is [x_min, y_min, x_max, y_max] representing the dimensions of a grid cell.
+        magnitude (int): Maximum pixel-wise displacement for distortion. The actual displacement
+                         will be randomly chosen in the range [-magnitude, magnitude].
+
+    Returns:
+        np.ndarray: A 2D array of shape (total_cells, 8) where each row represents a distorted polygon
+                    as [x1, y1, x2, y1, x2, y2, x1, y2]. The total_cells is equal to grid_height * grid_width.
+
+    Note:
+        - Only internal grid points are distorted; boundary points remain fixed.
+        - The function ensures consistent distortion across shared vertices of adjacent cells.
+        - The distortion is applied to the following points of each internal cell:
+            * Bottom-right of the cell above and to the left
+            * Bottom-left of the cell above
+            * Top-right of the cell to the left
+            * Top-left of the current cell
+
+    Example:
+        >>> dimensions = np.array([[[0, 0, 50, 50], [50, 0, 100, 50]],
+        ...                        [[0, 50, 50, 100], [50, 50, 100, 100]]])
+        >>> distorted = generate_distorted_grid_polygons(dimensions, magnitude=10)
+        >>> distorted.shape
+        (4, 8)
+    """
+    grid_height, grid_width = dimensions.shape[:2]
+    total_cells = grid_height * grid_width
+
+    # Initialize polygons
+    polygons = np.zeros((total_cells, 8), dtype=np.float32)
+    polygons[:, 0:2] = dimensions.reshape(-1, 4)[:, [0, 1]]  # x1, y1
+    polygons[:, 2:4] = dimensions.reshape(-1, 4)[:, [2, 1]]  # x2, y1
+    polygons[:, 4:6] = dimensions.reshape(-1, 4)[:, [2, 3]]  # x2, y2
+    polygons[:, 6:8] = dimensions.reshape(-1, 4)[:, [0, 3]]  # x1, y2
+
+    # Generate displacements for internal grid points only
+    internal_points_height, internal_points_width = grid_height - 2, grid_width - 2
+    displacements = random_utils.randint(
+        -magnitude,
+        magnitude + 1,
+        size=(internal_points_height, internal_points_width, 2),
+    ).astype(np.float32)
+
+    # Apply displacements to internal polygon vertices
+    for i in range(1, grid_height - 1):
+        for j in range(1, grid_width - 1):
+            dx, dy = displacements[i - 1, j - 1]
+
+            # Bottom-right of cell (i-1, j-1)
+            polygons[(i - 1) * grid_width + (j - 1), 4:6] += [dx, dy]
+
+            # Bottom-left of cell (i-1, j)
+            polygons[(i - 1) * grid_width + j, 6:8] += [dx, dy]
+
+            # Top-right of cell (i, j-1)
+            polygons[i * grid_width + (j - 1), 2:4] += [dx, dy]
+
+            # Top-left of cell (i, j)
+            polygons[i * grid_width + j, 0:2] += [dx, dy]
+
+    return polygons
+
+
+def pad_keypoints(
+    keypoints: np.ndarray,
+    pad_top: int,
+    pad_bottom: int,
+    pad_left: int,
+    pad_right: int,
+    border_mode: int,
+    image_shape: tuple[int, int],
+) -> np.ndarray:
+    if border_mode not in {cv2.BORDER_REFLECT_101, cv2.BORDER_REFLECT101}:
+        shift_vector = np.array([pad_left, pad_top])  # Only shift x and y
+        return shift_keypoints(keypoints, shift_vector)
+
+    grid_dimensions = get_pad_grid_dimensions(pad_top, pad_bottom, pad_left, pad_right, image_shape)
+
+    keypoints = generate_reflected_keypoints(keypoints, grid_dimensions, image_shape)
+
+    rows, cols = image_shape[:2]
+
+    # Calculate the number of grid cells added on each side
+    original_row, original_col = grid_dimensions["original_position"]
+
+    # Subtract the offset based on the number of added grid cells
+    keypoints[:, 0] -= original_col * cols - pad_left  # x
+    keypoints[:, 1] -= original_row * rows - pad_top  # y
+
+    new_height = pad_top + pad_bottom + rows
+    new_width = pad_left + pad_right + cols
+
+    return validate_keypoints(keypoints, (new_height, new_width))
+
+
+def validate_keypoints(keypoints: np.ndarray, image_shape: tuple[int, int]) -> np.ndarray:
+    """Validate keypoints and remove those that fall outside the image boundaries.
+
+    Args:
+        keypoints (np.ndarray): Array of keypoints with shape (N, M) where N is the number of keypoints
+                                and M >= 2. The first two columns represent x and y coordinates.
+        image_shape (tuple[int, int]): Shape of the image as (height, width).
+
+    Returns:
+        np.ndarray: Array of valid keypoints that fall within the image boundaries.
+
+    Note:
+        This function only checks the x and y coordinates (first two columns) of the keypoints.
+        Any additional columns (e.g., angle, scale) are preserved for valid keypoints.
+    """
+    rows, cols = image_shape[:2]
+
+    x, y = keypoints[:, 0], keypoints[:, 1]
+
+    valid_indices = (x >= 0) & (x < cols) & (y >= 0) & (y < rows)
+
+    return keypoints[valid_indices]
+
+
+def shift_keypoints(keypoints: np.ndarray, shift_vector: np.ndarray) -> np.ndarray:
+    shifted_keypoints = keypoints.copy()
+    shifted_keypoints[:, :2] += shift_vector[:2]  # Only shift x and y
+    return shifted_keypoints
+
+
+def generate_reflected_keypoints(
+    keypoints: np.ndarray,
+    grid_dims: dict[str, tuple[int, int]],
+    image_shape: tuple[int, int],
+) -> np.ndarray:
+    grid_rows, grid_cols = grid_dims["grid_shape"]
+    original_row, original_col = grid_dims["original_position"]
+
+    # Prepare flipped versions of keypoints
+    keypoints_hflipped = flip_keypoints(keypoints, flip_horizontal=True, image_shape=image_shape)
+    keypoints_vflipped = flip_keypoints(keypoints, flip_vertical=True, image_shape=image_shape)
+    keypoints_hvflipped = flip_keypoints(keypoints, flip_horizontal=True, flip_vertical=True, image_shape=image_shape)
+
+    rows, cols = image_shape[:2]
+
+    # Shift all versions to the original position
+    shift_vector = np.array([original_col * cols, original_row * rows, 0, 0])  # Only shift x and y
+    keypoints_shifted = shift_keypoints(keypoints, shift_vector)
+    keypoints_hflipped_shifted = shift_keypoints(keypoints_hflipped, shift_vector)
+    keypoints_vflipped_shifted = shift_keypoints(keypoints_vflipped, shift_vector)
+    keypoints_hvflipped_shifted = shift_keypoints(keypoints_hvflipped, shift_vector)
+
+    new_keypoints = []
+
+    for grid_row in range(grid_rows):
+        for grid_col in range(grid_cols):
+            # Determine which version of keypoints to use based on grid position
+            if (grid_row - original_row) % 2 == 0 and (grid_col - original_col) % 2 == 0:
+                current_keypoints = keypoints_shifted
+            elif (grid_row - original_row) % 2 == 0:
+                current_keypoints = keypoints_hflipped_shifted
+            elif (grid_col - original_col) % 2 == 0:
+                current_keypoints = keypoints_vflipped_shifted
+            else:
+                current_keypoints = keypoints_hvflipped_shifted
+
+            # Shift to the current grid cell
+            cell_shift = np.array([(grid_col - original_col) * cols, (grid_row - original_row) * rows, 0, 0])
+            shifted_keypoints = shift_keypoints(current_keypoints, cell_shift)
+
+            new_keypoints.append(shifted_keypoints)
+
+    return np.vstack(new_keypoints)
+
+
+def flip_keypoints(
+    keypoints: np.ndarray,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
+    image_shape: tuple[int, int] = (0, 0),
+) -> np.ndarray:
+    rows, cols = image_shape[:2]
+    flipped_keypoints = keypoints.copy()
+    if flip_horizontal:
+        flipped_keypoints[:, 0] = cols - flipped_keypoints[:, 0]
+        flipped_keypoints[:, 2] = -flipped_keypoints[:, 2]  # Flip angle
+    if flip_vertical:
+        flipped_keypoints[:, 1] = rows - flipped_keypoints[:, 1]
+        flipped_keypoints[:, 2] = -flipped_keypoints[:, 2]  # Flip angle
+    return flipped_keypoints

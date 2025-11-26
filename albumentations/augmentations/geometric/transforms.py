@@ -3,29 +3,39 @@ from __future__ import annotations
 import math
 import random
 from enum import Enum
-from typing import Any, Callable, Literal, Tuple, cast
+from typing import Any, Callable, Literal, Sequence, Tuple, cast
 from warnings import warn
 
 import cv2
 import numpy as np
 import skimage.transform
 from albucore.utils import get_num_channels
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import AfterValidator, Field, ValidationInfo, field_validator, model_validator
 from typing_extensions import Annotated, Self
 
 from albumentations import random_utils
 from albumentations.augmentations.functional import bbox_from_mask, center, center_bbox
 from albumentations.augmentations.utils import check_range
-from albumentations.core.bbox_utils import denormalize_bbox, normalize_bbox
+from albumentations.core.bbox_utils import denormalize_bboxes, normalize_bboxes
+from albumentations.core.pydantic import (
+    BorderModeType,
+    InterpolationType,
+    NonNegativeFloatRangeType,
+    ProbabilityType,
+    SymmetricRangeType,
+    check_1plus,
+)
 from albumentations.core.transforms_interface import BaseTransformInitSchema, DualTransform
 from albumentations.core.types import (
     BIG_INTEGER,
     NUM_MULTI_CHANNEL_DIMENSIONS,
     TWO,
     BoxInternalType,
+    BoxType,
     ColorType,
     D4Type,
     KeypointInternalType,
+    KeypointType,
     ScalarType,
     ScaleFloatType,
     ScaleIntType,
@@ -36,15 +46,6 @@ from albumentations.core.types import (
 from albumentations.core.utils import to_tuple
 
 from . import functional as fgeometric
-
-
-from albumentations.core.pydantic import (
-    BorderModeType,
-    InterpolationType,
-    NonNegativeFloatRangeType,
-    ProbabilityType,
-    SymmetricRangeType,
-)
 
 __all__ = [
     "ShiftScaleRotate",
@@ -60,6 +61,7 @@ __all__ = [
     "GridDistortion",
     "PadIfNeeded",
     "D4",
+    "GridElasticDeform",
 ]
 
 
@@ -793,59 +795,20 @@ class Affine(DualTransform):
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         height, width = params["shape"][:2]
 
-        translate: dict[str, int | float]
-        if self.translate_px is not None:
-            translate = {key: random.randint(*value) for key, value in self.translate_px.items()}
-        elif self.translate_percent is not None:
-            translate = {key: random.uniform(*value) for key, value in self.translate_percent.items()}
-            translate["x"] = translate["x"] * width
-            translate["y"] = translate["y"] * height
-        else:
-            translate = {"x": 0, "y": 0}
-
-        shear = {key: -random.uniform(*value) for key, value in self.shear.items()}
-
+        translate = self._get_translate_params(width, height)
+        shear = self._get_shear_params()
         scale = self.get_scale(self.scale, self.keep_ratio, self.balanced_scale)
         rotate = -random.uniform(*self.rotate)
 
-        shift_x, shift_y = center(width, height)
-        shift_x_bbox, shift_y_bbox = center_bbox(width, height)
+        image_shift = center(width, height)
+        bbox_shift = center_bbox(width, height)
 
-        # Image transformation matrix
-        matrix_to_topleft = skimage.transform.SimilarityTransform(translation=[-shift_x, -shift_y])
-        matrix_shear_y_rot = skimage.transform.AffineTransform(rotation=-np.pi / 2)
-        matrix_shear_y = skimage.transform.AffineTransform(shear=np.deg2rad(shear["y"]))
-        matrix_shear_y_rot_inv = skimage.transform.AffineTransform(rotation=np.pi / 2)
-        matrix_transforms = skimage.transform.AffineTransform(
-            scale=(scale["x"], scale["y"]),
-            translation=(translate["x"], translate["y"]),
-            rotation=np.deg2rad(rotate),
-            shear=np.deg2rad(shear["x"]),
-        )
-        matrix_to_center = skimage.transform.SimilarityTransform(translation=[shift_x, shift_y])
-        matrix = (
-            matrix_to_topleft
-            + matrix_shear_y_rot
-            + matrix_shear_y
-            + matrix_shear_y_rot_inv
-            + matrix_transforms
-            + matrix_to_center
-        )
-
-        # Bounding box transformation matrix
-        matrix_to_topleft_bbox = skimage.transform.SimilarityTransform(translation=[-shift_x_bbox, -shift_y_bbox])
-        matrix_to_center_bbox = skimage.transform.SimilarityTransform(translation=[shift_x_bbox, shift_y_bbox])
-        bbox_matrix = (
-            matrix_to_topleft_bbox
-            + matrix_shear_y_rot
-            + matrix_shear_y
-            + matrix_shear_y_rot_inv
-            + matrix_transforms
-            + matrix_to_center_bbox
-        )
+        matrix = self._create_transformation_matrix(translate, shear, scale, rotate, image_shift)
+        bbox_matrix = self._create_transformation_matrix(translate, shear, scale, rotate, bbox_shift)
 
         if self.fit_output:
             matrix, output_shape = self._compute_affine_warp_output_shape(matrix, params["shape"])
+            bbox_matrix, _ = self._compute_affine_warp_output_shape(bbox_matrix, params["shape"])
         else:
             output_shape = params["shape"]
 
@@ -856,6 +819,46 @@ class Affine(DualTransform):
             "bbox_matrix": bbox_matrix,
             "output_shape": output_shape,
         }
+
+    def _get_translate_params(self, width: int, height: int) -> dict[str, float]:
+        if self.translate_px is not None:
+            return {key: random.randint(*value) for key, value in self.translate_px.items()}
+        if self.translate_percent is not None:
+            translate = {key: random.uniform(*value) for key, value in self.translate_percent.items()}
+            return {"x": translate["x"] * width, "y": translate["y"] * height}
+        return {"x": 0, "y": 0}
+
+    def _get_shear_params(self) -> dict[str, float]:
+        return {key: -random.uniform(*value) for key, value in self.shear.items()}
+
+    @staticmethod
+    def _create_transformation_matrix(
+        translate: dict[str, float],
+        shear: dict[str, float],
+        scale: dict[str, float],
+        rotate: float,
+        shift: tuple[float, float],
+    ) -> skimage.transform.ProjectiveTransform:
+        matrix_to_topleft = skimage.transform.SimilarityTransform(translation=[-shift[0], -shift[1]])
+        matrix_shear_y_rot = skimage.transform.AffineTransform(rotation=-np.pi / 2)
+        matrix_shear_y = skimage.transform.AffineTransform(shear=np.deg2rad(shear["y"]))
+        matrix_shear_y_rot_inv = skimage.transform.AffineTransform(rotation=np.pi / 2)
+        matrix_transforms = skimage.transform.AffineTransform(
+            scale=(scale["x"], scale["y"]),
+            translation=(translate["x"], translate["y"]),
+            rotation=np.deg2rad(rotate),
+            shear=np.deg2rad(shear["x"]),
+        )
+        matrix_to_center = skimage.transform.SimilarityTransform(translation=shift)
+
+        return (
+            matrix_to_topleft
+            + matrix_shear_y_rot
+            + matrix_shear_y
+            + matrix_shear_y_rot_inv
+            + matrix_transforms
+            + matrix_to_center
+        )
 
     @staticmethod
     def _compute_affine_warp_output_shape(
@@ -1261,8 +1264,7 @@ class PadIfNeeded(DualTransform):
             Can be one of 'center', 'top_left', 'top_right', 'bottom_left', 'bottom_right', or 'random'.
             Default is 'center'.
         border_mode (int): Specifies the border mode to use if padding is required.
-            The default is `cv2.BORDER_REFLECT_101`. If `value` is provided and `border_mode` is set to a mode
-            that does not use a constant value, it should be manually set to `cv2.BORDER_CONSTANT`.
+            The default is `cv2.BORDER_REFLECT_101`.
         value (Union[int, float, list[int], list[float]], optional): Value to fill the border pixels if
             the border mode is `cv2.BORDER_CONSTANT`. Default is None.
         mask_value (Union[int, float, list[int], list[float]], optional): Similar to `value` but used for padding masks.
@@ -1333,9 +1335,6 @@ class PadIfNeeded(DualTransform):
             if (self.min_width is None) == (self.pad_width_divisor is None):
                 msg = "Only one of 'min_width' and 'pad_width_divisor' parameters must be set"
                 raise ValueError(msg)
-
-            if self.value is not None and self.border_mode in {cv2.BORDER_REFLECT_101, cv2.BORDER_REFLECT101}:
-                self.border_mode = cv2.BORDER_CONSTANT
 
             if self.border_mode == cv2.BORDER_CONSTANT and self.value is None:
                 msg = "If 'border_mode' is set to 'BORDER_CONSTANT', 'value' must be provided."
@@ -1454,32 +1453,58 @@ class PadIfNeeded(DualTransform):
             value=self.mask_value,
         )
 
-    def apply_to_bbox(
+    def apply_to_bboxes(
         self,
-        bbox: BoxInternalType,
+        bboxes: Sequence[BoxType],
         pad_top: int,
         pad_bottom: int,
         pad_left: int,
         pad_right: int,
-        rows: int,
-        cols: int,
         **params: Any,
-    ) -> BoxInternalType:
-        x_min, y_min, x_max, y_max = denormalize_bbox(bbox, rows, cols)[:4]
-        bbox = x_min + pad_left, y_min + pad_top, x_max + pad_left, y_max + pad_top
-        return cast(BoxInternalType, normalize_bbox(bbox, rows + pad_top + pad_bottom, cols + pad_left + pad_right))
+    ) -> list[BoxType]:
+        image_shape = params["shape"][:2]
 
-    def apply_to_keypoint(
+        rows, cols = image_shape
+
+        bboxes_np = np.array(bboxes)
+        bboxes_np = denormalize_bboxes(bboxes_np, rows, cols)
+
+        result = fgeometric.pad_bboxes(
+            bboxes_np,
+            pad_top,
+            pad_bottom,
+            pad_left,
+            pad_right,
+            self.border_mode,
+            image_shape=image_shape,
+        )
+
+        return list(normalize_bboxes(result, rows + pad_top + pad_bottom, cols + pad_left + pad_right))
+
+    def apply_to_keypoints(
         self,
-        keypoint: KeypointInternalType,
+        keypoints: Sequence[KeypointType],
         pad_top: int,
         pad_bottom: int,
         pad_left: int,
         pad_right: int,
         **params: Any,
-    ) -> KeypointInternalType:
-        x, y, angle, scale = keypoint[:4]
-        return x + pad_left, y + pad_top, angle, scale
+    ) -> Sequence[KeypointType]:
+        # Convert keypoints to numpy array, including all attributes
+        keypoints_array = np.array([list(kp) for kp in keypoints])
+
+        padded_keypoints = fgeometric.pad_keypoints(
+            keypoints_array,
+            pad_top,
+            pad_bottom,
+            pad_left,
+            pad_right,
+            self.border_mode,
+            image_shape=params["shape"][:2],
+        )
+
+        # Convert back to list of tuples
+        return [tuple(kp) for kp in padded_keypoints]
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return (
@@ -2038,3 +2063,90 @@ class D4(DualTransform):
 
     def get_transform_init_args_names(self) -> tuple[()]:
         return ()
+
+
+class GridElasticDeform(DualTransform):
+    """Grid-based Elastic deformation Albumentation implementation
+
+    This class applies elastic transformations using a grid-based approach.
+    The granularity and intensity of the distortions can be controlled using
+    the dimensions of the overlaying distortion grid and the magnitude parameter.
+    Larger grid sizes result in finer, less severe distortions.
+
+    Args:
+        num_grid_xy (tuple[int, int]): Number of grid cells along the width and height.
+            Specified as (grid_width, grid_height). Each value must be greater than 1.
+        magnitude (int): Maximum pixel-wise displacement for distortion. Must be greater than 0.
+        interpolation (int): Interpolation method to be used for the image transformation.
+            Default: cv2.INTER_LINEAR
+        mask_interpolation (int): Interpolation method to be used for mask transformation.
+            Default: cv2.INTER_NEAREST
+        p (float): Probability of applying the transform. Default: 1.0.
+
+    Targets:
+        image, mask
+
+    Image types:
+        uint8, float32
+
+    Example:
+        >>> transform = GridElasticDeform(num_grid_xy=(4, 4), magnitude=10, p=1.0)
+        >>> result = transform(image=image, mask=mask)
+        >>> transformed_image, transformed_mask = result['image'], result['mask']
+
+    Note:
+        This transformation is particularly useful for data augmentation in medical imaging
+        and other domains where elastic deformations can simulate realistic variations.
+    """
+
+    _targets = (Targets.IMAGE, Targets.MASK)
+
+    class InitSchema(BaseTransformInitSchema):
+        num_grid_xy: Annotated[tuple[int, int], AfterValidator(check_1plus)]
+        p: ProbabilityType = 1.0
+        magnitude: int = Field(gt=0)
+        interpolation: InterpolationType = cv2.INTER_LINEAR
+        mask_interpolation: InterpolationType = cv2.INTER_NEAREST
+
+    def __init__(
+        self,
+        num_grid_xy: tuple[int, int],
+        magnitude: int,
+        interpolation: int = cv2.INTER_LINEAR,
+        mask_interpolation: int = cv2.INTER_NEAREST,
+        p: float = 1.0,
+        always_apply: bool | None = None,
+    ):
+        super().__init__(p=p, always_apply=always_apply)
+        self.num_grid_xy = num_grid_xy
+        self.magnitude = magnitude
+        self.interpolation = interpolation
+        self.mask_interpolation = mask_interpolation
+
+    @staticmethod
+    def generate_mesh(polygons: np.ndarray, dimensions: np.ndarray) -> np.ndarray:
+        return np.hstack((dimensions.reshape(-1, 4), polygons))
+
+    def get_params_dependent_on_data(
+        self,
+        params: dict[str, Any],
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        image_shape = np.array(params["shape"][:2])
+
+        dimensions = fgeometric.calculate_grid_dimensions(image_shape, self.num_grid_xy)
+
+        polygons = fgeometric.generate_distorted_grid_polygons(dimensions, self.magnitude)
+
+        generated_mesh = self.generate_mesh(polygons, dimensions)
+
+        return {"generated_mesh": generated_mesh}
+
+    def apply(self, img: np.ndarray, generated_mesh: np.ndarray, **params: Any) -> np.ndarray:
+        return fgeometric.distort_image(img, generated_mesh, self.interpolation)
+
+    def apply_to_mask(self, mask: np.ndarray, generated_mesh: np.ndarray, **params: Any) -> np.ndarray:
+        return fgeometric.distort_image(mask, generated_mesh, self.mask_interpolation)
+
+    def get_transform_init_args_names(self) -> tuple[str, ...]:
+        return "num_grid_xy", "magnitude", "interpolation", "mask_interpolation"
