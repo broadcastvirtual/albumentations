@@ -21,7 +21,6 @@ __all__ = [
 ]
 
 BBOX_WITH_LABEL_SHAPE = 5
-EPSILON = 1e-3
 
 
 class BboxParams(Params):
@@ -443,8 +442,10 @@ def filter_bboxes(
     Returns:
         numpy array of filtered bounding boxes.
     """
+    epsilon = 1e-7
+
     if len(bboxes) == 0:
-        return np.array([], dtype=np.float32)
+        return np.array([], dtype=np.float32).reshape(0, 4)
 
     # Calculate areas of bounding boxes before clipping in pixels
     denormalized_box_areas = calculate_bbox_areas_in_pixels(bboxes, image_shape)
@@ -463,28 +464,24 @@ def filter_bboxes(
 
     # Create a mask for bboxes that meet all criteria
     mask = (
-        (denormalized_box_areas >= (1 - EPSILON))
-        & (clipped_box_areas >= min_area - EPSILON)
-        & (clipped_box_areas / denormalized_box_areas >= min_visibility - EPSILON)
-        & (clipped_widths >= max(min_width, 1 - EPSILON))
-        & (clipped_heights >= max(min_height, 1 - EPSILON))
+        (denormalized_box_areas >= epsilon)
+        & (clipped_box_areas >= min_area - epsilon)
+        & (clipped_box_areas / denormalized_box_areas >= min_visibility - epsilon)
+        & (clipped_widths >= min_width - epsilon)
+        & (clipped_heights >= min_height - epsilon)
     )
 
     # Apply the mask to get the filtered bboxes
     filtered_bboxes = clipped_bboxes[mask]
 
-    # If no bboxes pass the filter, return an empty array with the same number of columns as input
-    if len(filtered_bboxes) == 0:
-        return np.array([], dtype=np.float32)
-
-    return filtered_bboxes
+    return np.array([], dtype=np.float32).reshape(0, 4) if len(filtered_bboxes) == 0 else filtered_bboxes
 
 
 def union_of_bboxes(bboxes: np.ndarray, erosion_rate: float) -> np.ndarray | None:
     """Calculate union of bounding boxes. Boxes could be in albumentations or Pascal Voc format.
 
     Args:
-        bboxes (list[tuple]): List of bounding boxes
+        bboxes (np.ndarray): List of bounding boxes
         erosion_rate (float): How much each bounding box can be shrunk, useful for erosive cropping.
             Set this in range [0, 1]. 0 will not be erosive at all, 1.0 can make any bbox lose its volume.
 
@@ -501,6 +498,8 @@ def union_of_bboxes(bboxes: np.ndarray, erosion_rate: float) -> np.ndarray | Non
     if bboxes.shape[0] == 1:
         return bboxes[0][:4]
 
+    epsilon = 1e-6
+
     x_min, y_min = np.min(bboxes[:, :2], axis=0)
     x_max, y_max = np.max(bboxes[:, 2:4], axis=0)
 
@@ -515,7 +514,43 @@ def union_of_bboxes(bboxes: np.ndarray, erosion_rate: float) -> np.ndarray | Non
     x_max -= erosion_x
     y_max -= erosion_y
 
-    if abs(x_max - x_min) < EPSILON or abs(y_max - y_min) < EPSILON:
+    if abs(x_max - x_min) < epsilon or abs(y_max - y_min) < epsilon:
         return None
 
     return np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
+
+
+def bbox_from_mask(mask: np.ndarray) -> tuple[int, int, int, int]:
+    """Create bounding box from binary mask (fast version)
+
+    Args:
+        mask (numpy.ndarray): binary mask.
+
+    Returns:
+        tuple: A bounding box tuple `(x_min, y_min, x_max, y_max)`.
+
+    """
+    rows = np.any(mask, axis=1)
+    if not rows.any():
+        return -1, -1, -1, -1
+    cols = np.any(mask, axis=0)
+    y_min, y_max = np.where(rows)[0][[0, -1]]
+    x_min, x_max = np.where(cols)[0][[0, -1]]
+    return x_min, y_min, x_max + 1, y_max + 1
+
+
+def mask_from_bbox(img: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray:
+    """Create binary mask from bounding box
+
+    Args:
+        img: input image
+        bbox: A bounding box tuple `(x_min, y_min, x_max, y_max)`
+
+    Returns:
+        mask: binary mask
+
+    """
+    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+    x_min, y_min, x_max, y_max = bbox
+    mask[y_min:y_max, x_min:x_max] = 1
+    return mask

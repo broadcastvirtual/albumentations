@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 import albumentations as A
-from tests.conftest import IMAGES, SQUARE_FLOAT_IMAGE, SQUARE_MULTI_FLOAT_IMAGE, SQUARE_MULTI_UINT8_IMAGE, SQUARE_UINT8_IMAGE
+from albucore import to_float, from_float
+from tests.conftest import IMAGES, RECTANGULAR_UINT8_IMAGE, SQUARE_FLOAT_IMAGE, SQUARE_MULTI_FLOAT_IMAGE, SQUARE_MULTI_UINT8_IMAGE, SQUARE_UINT8_IMAGE
 
 from .utils import get_dual_transforms, get_image_only_transforms, get_transforms, set_seed
 
@@ -46,7 +47,7 @@ def test_image_only_augmentations_mask_persists(augmentation_cls, params):
     mask = image.copy()
     if augmentation_cls == A.TextImage:
         aug = A.Compose([augmentation_cls(p=1, **params)], bbox_params=A.BboxParams(format="pascal_voc"))
-        data= aug(image=image, mask=mask, textimage_metadata=[])
+        data= aug(image=image, mask=mask, textimage_metadata={"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)})
     else:
         aug = A.Compose([augmentation_cls(p=1, **params)])
         data = aug(image=image, mask=mask)
@@ -86,7 +87,6 @@ def test_image_only_augmentations_mask_persists(augmentation_cls, params):
         },
         except_augmentations={
             A.FromFloat,
-            A.Posterize,
         },
     ),
 )
@@ -95,7 +95,7 @@ def test_image_only_augmentations(augmentation_cls, params):
     mask = image[:, :, 0].copy().astype(np.uint8)
     if augmentation_cls == A.TextImage:
         aug = A.Compose([augmentation_cls(p=1, **params)], bbox_params=A.BboxParams(format="pascal_voc"))
-        data= aug(image=image, mask=mask, textimage_metadata=[])
+        data= aug(image=image, mask=mask, textimage_metadata={"text": "Hello, world!", "bbox": (0.1, 0.1, 0.9, 0.2)})
     else:
         aug = augmentation_cls(p=1, **params)
         data = aug(image=image, mask=mask)
@@ -255,7 +255,7 @@ def test_augmentations_wont_change_input(augmentation_cls, params):
     if augmentation_cls == A.OverlayElements:
         aug(image=image, mask=mask, overlay_metadata=[])
     elif augmentation_cls == A.TextImage:
-        aug(image=image, mask=mask, textimage_metadata=[])
+        aug(image=image, mask=mask, textimage_metadata={"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)})
     else:
         aug(image=image, mask=mask)
 
@@ -310,7 +310,6 @@ def test_augmentations_wont_change_input(augmentation_cls, params):
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
-            A.Posterize,
             A.RandomSizedBBoxSafeCrop,
             A.BBoxSafeRandomCrop,
             A.CropNonEmptyMaskIfExists,
@@ -329,7 +328,7 @@ def test_augmentations_wont_change_float_input(augmentation_cls, params):
     if augmentation_cls == A.OverlayElements:
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
-        data["textimage_metadata"] = []
+        data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
 
     aug(**data)
 
@@ -393,19 +392,16 @@ def test_augmentations_wont_change_float_input(augmentation_cls, params):
             A.SmallestMaxSize,
             A.PadIfNeeded,
             A.RGBShift,
-            A.RandomFog,
-            A.RandomGravel,
-            A.RandomRain,
             A.RandomScale,
             A.RandomSnow,
-            A.RandomSunFlare,
             A.ToRGB,
             A.ToSepia,
-            A.UnsharpMask,
             A.RandomCropFromBorders,
             A.Spatter,
             A.ChromaticAberration,
-            A.PlanckianJitter
+            A.PlanckianJitter,
+            A.RandomRain,
+            A.RandomGravel,
         },
     ),
 )
@@ -424,7 +420,7 @@ def test_augmentations_wont_change_shape_grayscale(augmentation_cls, params, sha
     if augmentation_cls == A.OverlayElements:
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
-        data["textimage_metadata"] = []
+        data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
     result = aug(**data)
 
     np.testing.assert_array_equal(image.shape, result["image"].shape)
@@ -508,7 +504,7 @@ def test_augmentations_wont_change_shape_rgb(augmentation_cls, params):
     elif augmentation_cls == A.TextImage:
         data = {
             "image": image_3ch,
-            "textimage_metadata": [],
+            "textimage_metadata": {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)},
             "mask": mask_3ch,
         }
     elif augmentation_cls == A.FromFloat:
@@ -618,13 +614,11 @@ def test_mask_fill_value(augmentation_cls, params):
             A.Normalize,
             A.RGBShift,
             A.RandomCropNearBBox,
-            A.RandomFog,
             A.RandomGravel,
             A.RandomRain,
             A.RandomSizedBBoxSafeCrop,
             A.BBoxSafeRandomCrop,
             A.RandomSnow,
-            A.RandomSunFlare,
             A.ToFloat,
             A.ToRGB,
             A.ToSepia,
@@ -645,7 +639,7 @@ def test_multichannel_image_augmentations(augmentation_cls, params):
     if augmentation_cls == A.OverlayElements:
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
-        data["textimage_metadata"] = []
+        data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
 
     data = aug(**data)
     assert data["image"].dtype == np.uint8
@@ -709,17 +703,14 @@ def test_multichannel_image_augmentations(augmentation_cls, params):
             A.MaskDropout,
             A.RGBShift,
             A.RandomCropNearBBox,
-            A.RandomFog,
             A.RandomGravel,
             A.RandomRain,
             A.RandomSizedBBoxSafeCrop,
             A.BBoxSafeRandomCrop,
             A.RandomSnow,
-            A.RandomSunFlare,
             A.ToRGB,
             A.ToSepia,
             A.Equalize,
-            A.Posterize,
             A.Spatter,
             A.ChromaticAberration,
             A.PlanckianJitter,
@@ -736,7 +727,7 @@ def test_float_multichannel_image_augmentations(augmentation_cls, params):
     if augmentation_cls == A.OverlayElements:
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
-        data["textimage_metadata"] = []
+        data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
 
     data = aug(**data)
 
@@ -792,13 +783,11 @@ def test_float_multichannel_image_augmentations(augmentation_cls, params):
             A.Normalize,
             A.RGBShift,
             A.RandomCropNearBBox,
-            A.RandomFog,
             A.RandomGravel,
             A.RandomRain,
             A.RandomSizedBBoxSafeCrop,
             A.BBoxSafeRandomCrop,
             A.RandomSnow,
-            A.RandomSunFlare,
             A.ToFloat,
             A.ToRGB,
             A.ToSepia,
@@ -823,7 +812,7 @@ def test_multichannel_image_augmentations_diff_channels(augmentation_cls, params
     if augmentation_cls == A.OverlayElements:
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
-        data["textimage_metadata"] = []
+        data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
 
     data = aug(**data)
 
@@ -880,17 +869,14 @@ def test_multichannel_image_augmentations_diff_channels(augmentation_cls, params
             A.MaskDropout,
             A.RGBShift,
             A.RandomCropNearBBox,
-            A.RandomFog,
             A.RandomGravel,
             A.RandomRain,
             A.RandomSizedBBoxSafeCrop,
             A.BBoxSafeRandomCrop,
             A.RandomSnow,
-            A.RandomSunFlare,
             A.ToRGB,
             A.ToSepia,
             A.Equalize,
-            A.Posterize,
             A.FDA,
             A.HistogramMatching,
             A.Spatter,
@@ -901,7 +887,7 @@ def test_multichannel_image_augmentations_diff_channels(augmentation_cls, params
 )
 def test_float_multichannel_image_augmentations_diff_channels(augmentation_cls, params):
     image = SQUARE_MULTI_FLOAT_IMAGE
-    aug = augmentation_cls(p=1, **params)
+    aug = A.Compose([augmentation_cls(p=1, **params)])
 
     data = {
         "image": image,
@@ -910,7 +896,7 @@ def test_float_multichannel_image_augmentations_diff_channels(augmentation_cls, 
     if augmentation_cls == A.OverlayElements:
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
-        data["textimage_metadata"] = []
+        data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
 
     data = aug(**data)
 
@@ -1089,3 +1075,48 @@ def test_perspective_valid_keypoints_after_transform(seed: int, scale: float, h:
     x4, y4 = res[3]
 
     assert x1 < x3 and x1 < x4 and x2 < x3 and x2 < x4 and y1 < y2 and y1 < y3 and y4 < y2 and y4 < y3
+
+
+
+@pytest.mark.parametrize(
+    ["augmentation_cls", "params"],
+    get_transforms(
+        custom_arguments={
+            A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
+            A.CenterCrop: {"height": 10, "width": 10},
+            A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
+            A.RandomCrop: {"height": 10, "width": 10},
+            A.RandomResizedCrop: {"height": 10, "width": 10},
+            A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
+            A.CropAndPad: {"px": 10},
+            A.Resize: {"height": 10, "width": 10},
+            A.XYMasking: {
+                "num_masks_x": (1, 3),
+                "num_masks_y": (1, 3),
+                "mask_x_length": 10,
+                "mask_y_length": 10,
+                "mask_fill_value": 1,
+                "fill_value": 0,
+            },
+            A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
+        },
+        except_augmentations={
+            A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop, A.FromFloat, A.ToFloat, A.Normalize, A.MaskDropout, A.CropNonEmptyMaskIfExists,
+            A.MixUp, A.FDA, A.HistogramMatching, A.PixelDistributionAdaptation, A.TemplateTransform, A.OverlayElements, A.TextImage,
+            A.Solarize, A.RGBShift, A.HueSaturationValue, A.GaussNoise, A.ColorJitter
+            },
+    ),
+)
+def test_augmentations_match_uint8_float32(augmentation_cls, params):
+    image_uint8 = RECTANGULAR_UINT8_IMAGE
+    image_float32 = to_float(image_uint8)
+
+    transform = A.Compose([augmentation_cls(p=1, **params)])
+
+    set_seed(42)
+    transformed_uint8 = transform(image=image_uint8)["image"]
+    set_seed(42)
+    transformed_float32 = transform(image=image_float32)["image"]
+
+    np.testing.assert_array_almost_equal(to_float(transformed_uint8), transformed_float32, decimal=2)

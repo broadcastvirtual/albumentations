@@ -9,12 +9,11 @@ from warnings import warn
 import cv2
 import numpy as np
 import skimage.transform
-from albucore.utils import get_num_channels
+from albucore import hflip, vflip
 from pydantic import AfterValidator, Field, ValidationInfo, field_validator, model_validator
 from typing_extensions import Annotated, Self
 
 from albumentations import random_utils
-from albumentations.augmentations.functional import center, center_bbox
 from albumentations.augmentations.utils import check_range
 from albumentations.core.bbox_utils import denormalize_bboxes, normalize_bboxes
 from albumentations.core.pydantic import (
@@ -776,8 +775,8 @@ class Affine(DualTransform):
         scale = self.get_scale(self.scale, self.keep_ratio, self.balanced_scale)
         rotate = -random.uniform(*self.rotate)
 
-        image_shift = center(image_shape)
-        bbox_shift = center_bbox(image_shape)
+        image_shift = fgeometric.center(image_shape)
+        bbox_shift = fgeometric.center_bbox(image_shape)
 
         matrix = fgeometric.create_affine_transformation_matrix(translate, shear, scale, rotate, image_shift)
         bbox_matrix = fgeometric.create_affine_transformation_matrix(translate, shear, scale, rotate, bbox_shift)
@@ -1475,7 +1474,7 @@ class VerticalFlip(DualTransform):
     _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
-        return fgeometric.vflip(img)
+        return vflip(img)
 
     def apply_to_bboxes(self, bboxes: np.ndarray, **params: Any) -> np.ndarray:
         return fgeometric.bboxes_vflip(bboxes)
@@ -1504,12 +1503,7 @@ class HorizontalFlip(DualTransform):
     _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
-        if get_num_channels(img) > 1 and img.dtype == np.uint8:
-            # Opencv is faster than numpy only in case of
-            # non-gray scale 8bits images
-            return fgeometric.hflip_cv2(img)
-
-        return fgeometric.hflip(img)
+        return hflip(img)
 
     def apply_to_bboxes(self, bboxes: np.ndarray, **params: Any) -> np.ndarray:
         return fgeometric.bboxes_hflip(bboxes)

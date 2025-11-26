@@ -1,35 +1,35 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 from warnings import warn
 
 import cv2
 import numpy as np
 import skimage
-from albucore.functions import (
+from albucore import (
+    MAX_VALUES_BY_DTYPE,
     add,
     add_array,
     add_weighted,
-    from_float,
-    multiply,
-    multiply_add,
-    normalize_per_image,
-    to_float,
-)
-from albucore.utils import (
-    MAX_VALUES_BY_DTYPE,
     clip,
     clipped,
+    float32_io,
+    from_float,
     get_num_channels,
     is_grayscale_image,
     is_rgb_image,
     maybe_process_in_chunks,
+    multiply,
+    multiply_add,
+    normalize_per_image,
     preserve_channel_dim,
+    to_float,
+    uint8_io,
 )
-from typing_extensions import Literal
 
 from albumentations import random_utils
+from albumentations.augmentations.geometric.functional import resize
 from albumentations.augmentations.utils import (
     PCA,
     non_rgb_error,
@@ -50,15 +50,15 @@ __all__ = [
     "add_rain",
     "add_shadow",
     "add_gravel",
-    "add_snow",
-    "add_sun_flare",
+    "add_snow_bleach",
+    "add_snow_texture",
+    "add_sun_flare_overlay",
+    "add_sun_flare_physics_based",
     "adjust_brightness_torchvision",
     "adjust_contrast_torchvision",
     "adjust_hue_torchvision",
     "adjust_saturation_torchvision",
     "brightness_contrast_adjust",
-    "center",
-    "center_bbox",
     "channel_shuffle",
     "clahe",
     "convolve",
@@ -154,6 +154,7 @@ def shift_hsv(img: np.ndarray, hue_shift: np.ndarray, sat_shift: np.ndarray, val
     return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if is_gray else img
 
 
+@clipped
 def solarize(img: np.ndarray, threshold: int = 128) -> np.ndarray:
     """Invert all pixel values above a threshold.
 
@@ -184,8 +185,10 @@ def solarize(img: np.ndarray, threshold: int = 128) -> np.ndarray:
     return result_img
 
 
+@uint8_io
+@clipped
 @preserve_channel_dim
-def posterize(img: np.ndarray, bits: int) -> np.ndarray:
+def posterize(img: np.ndarray, bits: Literal[0, 1, 2, 3, 4, 5, 6, 7, 8]) -> np.ndarray:
     """Reduce the number of bits for each color channel.
 
     Args:
@@ -198,28 +201,17 @@ def posterize(img: np.ndarray, bits: int) -> np.ndarray:
     """
     bits_array = np.uint8(bits)
 
-    if img.dtype != np.uint8:
-        msg = "Image must have uint8 channel type"
-        raise TypeError(msg)
-    if np.any((bits_array < 0) | (bits_array > EIGHT)):
-        msg = "bits must be in range [0, 8]"
-        raise ValueError(msg)
-
     if not bits_array.shape or len(bits_array) == 1:
         if bits_array == 0:
             return np.zeros_like(img)
         if bits_array == EIGHT:
-            return img.copy()
+            return img
 
         lut = np.arange(0, 256, dtype=np.uint8)
         mask = ~np.uint8(2 ** (8 - bits_array) - 1)
         lut &= mask
 
         return cv2.LUT(img, lut)
-
-    if not is_rgb_image(img):
-        msg = "If bits is iterable image must be RGB"
-        raise TypeError(msg)
 
     result_img = np.empty_like(img)
     for i, channel_bits in enumerate(bits_array):
@@ -307,6 +299,7 @@ def _handle_mask(
     return mask[..., i]
 
 
+@uint8_io
 @preserve_channel_dim
 def equalize(
     img: np.ndarray,
@@ -351,11 +344,6 @@ def equalize(
         >>> assert equalized.shape == image.shape
         >>> assert equalized.dtype == image.dtype
     """
-    original_dtype = img.dtype
-
-    if original_dtype != np.uint8:
-        img = from_float(img, dtype=np.uint8)
-
     _check_preconditions(img, mask, by_channels)
 
     function = _equalize_pil if mode == "pil" else _equalize_cv
@@ -373,9 +361,10 @@ def equalize(
         _mask = _handle_mask(mask, i)
         result_img[..., i] = function(img[..., i], _mask)
 
-    return to_float(result_img, max_value=255) if original_dtype == np.float32 else result_img
+    return result_img
 
 
+@uint8_io
 @preserve_channel_dim
 def move_tone_curve(
     img: np.ndarray,
@@ -392,13 +381,6 @@ def move_tone_curve(
             to adjust image tone curve, must be in range [0, 1]
 
     """
-    input_dtype = img.dtype
-    needs_float = False
-
-    if input_dtype == np.float32:
-        img = from_float(img, dtype=np.uint8)
-        needs_float = True
-
     t = np.linspace(0.0, 1.0, 256)
 
     def evaluate_bez(t: np.ndarray, low_y: float | np.ndarray, high_y: float | np.ndarray) -> np.ndarray:
@@ -409,16 +391,14 @@ def move_tone_curve(
 
     if np.isscalar(low_y) and np.isscalar(high_y):
         lut = clip(np.rint(evaluate_bez(t, low_y, high_y)), np.uint8)
-        output = cv2.LUT(img, lut)
-    elif isinstance(low_y, np.ndarray) and isinstance(high_y, np.ndarray):
+        return cv2.LUT(img, lut)
+    if isinstance(low_y, np.ndarray) and isinstance(high_y, np.ndarray):
         luts = clip(np.rint(evaluate_bez(t[:, np.newaxis], low_y, high_y).T), np.uint8)
-        output = cv2.merge([cv2.LUT(img[:, :, i], luts[i]) for i in range(num_channels)])
-    else:
-        raise TypeError(
-            f"low_y and high_y must both be of type float or np.ndarray. Got {type(low_y)} and {type(high_y)}",
-        )
+        return cv2.merge([cv2.LUT(img[:, :, i], luts[i]) for i in range(num_channels)])
 
-    return to_float(output, max_value=255) if needs_float else output
+    raise TypeError(
+        f"low_y and high_y must both be of type float or np.ndarray. Got {type(low_y)} and {type(high_y)}",
+    )
 
 
 @clipped
@@ -426,6 +406,7 @@ def linear_transformation_rgb(img: np.ndarray, transformation_matrix: np.ndarray
     return cv2.transform(img, transformation_matrix)
 
 
+@uint8_io
 @preserve_channel_dim
 def clahe(img: np.ndarray, clip_limit: float, tile_grid_size: tuple[int, int]) -> np.ndarray:
     """Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to the input image.
@@ -459,32 +440,26 @@ def clahe(img: np.ndarray, clip_limit: float, tile_grid_size: tuple[int, int]) -
         >>> assert result.dtype == img.dtype
     """
     img = img.copy()
-    original_dtype = img.dtype
-
-    if img.dtype == np.float32:
-        img = from_float(img, dtype=np.uint8)
-
     clahe_mat = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
 
     if is_grayscale_image(img):
-        result = clahe_mat.apply(img)
-        return to_float(result, max_value=255) if original_dtype == np.float32 else result
+        return clahe_mat.apply(img)
 
     img = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
 
     img[:, :, 0] = clahe_mat.apply(img[:, :, 0])
 
-    result = cv2.cvtColor(img, cv2.COLOR_LAB2RGB)
-
-    return to_float(result, max_value=255) if original_dtype == np.float32 else result
+    return cv2.cvtColor(img, cv2.COLOR_LAB2RGB)
 
 
+@clipped
 @preserve_channel_dim
 def convolve(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     conv_fn = maybe_process_in_chunks(cv2.filter2D, ddepth=-1, kernel=kernel)
     return conv_fn(img)
 
 
+@uint8_io
 @preserve_channel_dim
 def image_compression(img: np.ndarray, quality: int, image_type: Literal[".jpg", ".webp"]) -> np.ndarray:
     if image_type == ".jpg":
@@ -494,57 +469,62 @@ def image_compression(img: np.ndarray, quality: int, image_type: Literal[".jpg",
     else:
         raise NotImplementedError("Only '.jpg' and '.webp' compression transforms are implemented. ")
 
-    input_dtype = img.dtype
-    needs_float = False
-
-    if input_dtype == np.float32:
-        warn(
-            "Image compression augmentation "
-            "is most effective with uint8 inputs, "
-            f"{input_dtype} is used as input.",
-            UserWarning,
-            stacklevel=2,
-        )
-        img = from_float(img, dtype=np.dtype("uint8"))
-        needs_float = True
-    elif input_dtype not in (np.uint8, np.float32):
-        raise ValueError(f"Unexpected dtype {input_dtype} for image augmentation")
-
     _, encoded_img = cv2.imencode(image_type, img, (int(quality_flag), quality))
-    img = cv2.imdecode(encoded_img, cv2.IMREAD_UNCHANGED)
-
-    return to_float(img, max_value=255) if needs_float else img
+    return cv2.imdecode(encoded_img, cv2.IMREAD_UNCHANGED)
 
 
-@preserve_channel_dim
-def add_snow(img: np.ndarray, snow_point: float, brightness_coeff: float) -> np.ndarray:
-    """Bleaches out pixels, imitating snow.
+@uint8_io
+def add_snow_bleach(img: np.ndarray, snow_point: float, brightness_coeff: float) -> np.ndarray:
+    """Adds a simple snow effect to the image by bleaching out pixels.
+
+    This function simulates a basic snow effect by increasing the brightness of pixels
+    that are above a certain threshold (snow_point). It operates in the HLS color space
+    to modify the lightness channel.
 
     Args:
-        img (np.ndarray): Input image.
+        img (np.ndarray): Input image. Can be either RGB uint8 or float32.
         snow_point (float): A float in the range [0, 1], scaled and adjusted to determine
-            the threshold for pixel modification.
-        brightness_coeff (float): Coefficient applied to increase the brightness of pixels below the snow_point
-            threshold. Larger values lead to more pronounced snow effects.
+            the threshold for pixel modification. Higher values result in less snow effect.
+        brightness_coeff (float): Coefficient applied to increase the brightness of pixels
+            below the snow_point threshold. Larger values lead to more pronounced snow effects.
+            Should be greater than 1.0 for a visible effect.
 
     Returns:
-        np.ndarray: Image with simulated snow effect.
+        np.ndarray: Image with simulated snow effect. The output has the same dtype as the input.
 
-    Reference:
-        https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
+    Note:
+        - This function converts the image to the HLS color space to modify the lightness channel.
+        - The snow effect is created by selectively increasing the brightness of pixels.
+        - This method tends to create a 'bleached' look, which may not be as realistic as more
+          advanced snow simulation techniques.
+        - The function automatically handles both uint8 and float32 input images.
 
+    The snow effect is created through the following steps:
+    1. Convert the image from RGB to HLS color space.
+    2. Adjust the snow_point threshold.
+    3. Increase the lightness of pixels below the threshold.
+    4. Convert the image back to RGB.
+
+    Mathematical Formulation:
+        Let L be the lightness channel in HLS space.
+        For each pixel (i, j):
+        If L[i, j] < snow_point:
+            L[i, j] = L[i, j] * brightness_coeff
+
+    Examples:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, [100, 100, 3], dtype=np.uint8)
+        >>> snowy_image = A.functional.add_snow_v1(image, snow_point=0.5, brightness_coeff=1.5)
+
+    References:
+        - HLS Color Space: https://en.wikipedia.org/wiki/HSL_and_HSV
+        - Original implementation: https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
     """
-    non_rgb_error(img)
+    max_value = MAX_VALUES_BY_DTYPE[np.uint8]
 
-    input_dtype = img.dtype
-    needs_float = False
-
-    snow_point *= 127.5  # = 255 / 2
-    snow_point += 85  # = 255 / 3
-
-    if input_dtype == np.float32:
-        img = from_float(img, dtype=np.dtype("uint8"))
-        needs_float = True
+    snow_point *= max_value / 2
+    snow_point += max_value / 3
 
     image_hls = cv2.cvtColor(img, cv2.COLOR_RGB2HLS)
     image_hls = np.array(image_hls, dtype=np.float32)
@@ -555,11 +535,101 @@ def add_snow(img: np.ndarray, snow_point: float, brightness_coeff: float) -> np.
 
     image_hls = np.array(image_hls, dtype=np.uint8)
 
-    image_rgb = cv2.cvtColor(image_hls, cv2.COLOR_HLS2RGB)
-
-    return to_float(image_rgb, max_value=255) if needs_float else image_rgb
+    return cv2.cvtColor(image_hls, cv2.COLOR_HLS2RGB)
 
 
+@uint8_io
+def add_snow_texture(img: np.ndarray, snow_point: float, brightness_coeff: float) -> np.ndarray:
+    """Add a realistic snow effect to the input image.
+
+    This function simulates snowfall by applying multiple visual effects to the image,
+    including brightness adjustment, snow texture overlay, depth simulation, and color tinting.
+    The result is a more natural-looking snow effect compared to simple pixel bleaching methods.
+
+    Args:
+        img (np.ndarray): Input image in RGB format.
+        snow_point (float): Coefficient that controls the amount and intensity of snow.
+            Should be in the range [0, 1], where 0 means no snow and 1 means maximum snow effect.
+        brightness_coeff (float): Coefficient for brightness adjustment to simulate the
+            reflective nature of snow. Should be in the range [0, 1], where higher values
+            result in a brighter image.
+
+    Returns:
+        np.ndarray: Image with added snow effect. The output has the same dtype as the input.
+
+    Note:
+        - The function first converts the image to HSV color space for better control over
+          brightness and color adjustments.
+        - A snow texture is generated using Gaussian noise and then filtered for a more
+          natural appearance.
+        - A depth effect is simulated, with more snow at the top of the image and less at the bottom.
+        - A slight blue tint is added to simulate the cool color of snow.
+        - Random sparkle effects are added to simulate light reflecting off snow crystals.
+
+    The snow effect is created through the following steps:
+    1. Brightness adjustment in HSV space
+    2. Generation of a snow texture using Gaussian noise
+    3. Application of a depth effect to the snow texture
+    4. Blending of the snow texture with the original image
+    5. Addition of a cool blue tint
+    6. Addition of sparkle effects
+
+    Examples:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, [100, 100, 3], dtype=np.uint8)
+        >>> snowy_image = A.functional.add_snow_v2(image, snow_coeff=0.5, brightness_coeff=0.2)
+
+    Note:
+        This function works with both uint8 and float32 image types, automatically
+        handling the conversion between them.
+
+    References:
+        - Perlin Noise: https://en.wikipedia.org/wiki/Perlin_noise
+        - HSV Color Space: https://en.wikipedia.org/wiki/HSL_and_HSV
+    """
+    max_value = MAX_VALUES_BY_DTYPE[np.uint8]
+
+    # Convert to HSV for better color control
+    img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV).astype(np.float32)
+
+    # Increase brightness
+    img_hsv[:, :, 2] = np.clip(img_hsv[:, :, 2] * (1 + brightness_coeff * snow_point), 0, max_value)
+
+    # Generate snow texture
+    snow_texture = random_utils.normal(size=img.shape[:2], loc=0.5, scale=0.3)
+    snow_texture = cv2.GaussianBlur(snow_texture, (0, 0), sigmaX=1, sigmaY=1)
+
+    # Create depth effect for snow simulation
+    # More snow accumulates at the top of the image, gradually decreasing towards the bottom
+    # This simulates natural snow distribution on surfaces
+    # The effect is achieved using a linear gradient from 1 (full snow) to 0.2 (less snow)
+    rows = img.shape[0]
+    depth_effect = np.linspace(1, 0.2, rows)[:, np.newaxis]
+    snow_texture *= depth_effect
+
+    # Apply snow texture
+    snow_layer = (np.dstack([snow_texture] * 3) * max_value * snow_point).astype(np.float32)
+
+    # Blend snow with original image
+    img_with_snow = cv2.addWeighted(img_hsv, 1, snow_layer, 1, 0)
+
+    # Add a slight blue tint to simulate cool snow color
+    blue_tint = np.full_like(img_with_snow, (0.6, 0.75, 1))  # Slight blue in HSV
+
+    img_with_snow = cv2.addWeighted(img_with_snow, 0.85, blue_tint, 0.15 * snow_point, 0)
+
+    # Convert back to RGB
+    img_with_snow = cv2.cvtColor(img_with_snow.astype(np.uint8), cv2.COLOR_HSV2RGB)
+
+    # Add some sparkle effects for snow glitter
+    sparkle = random_utils.random(img.shape[:2]) > 0.99  # noqa: PLR2004
+    img_with_snow[sparkle] = [max_value, max_value, max_value]
+
+    return img_with_snow
+
+
+@uint8_io
 @preserve_channel_dim
 def add_rain(
     img: np.ndarray,
@@ -590,123 +660,139 @@ def add_rain(
     Reference:
         https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
     """
-    non_rgb_error(img)
-
-    input_dtype = img.dtype
-    needs_float = False
-
-    if input_dtype == np.float32:
-        img = from_float(img, dtype=np.dtype("uint8"))
-        needs_float = True
-
-    image = img.copy()
-
     for rain_drop_x0, rain_drop_y0 in rain_drops:
         rain_drop_x1 = rain_drop_x0 + slant
         rain_drop_y1 = rain_drop_y0 + drop_length
 
         cv2.line(
-            image,
+            img,
             (rain_drop_x0, rain_drop_y0),
             (rain_drop_x1, rain_drop_y1),
             drop_color,
             drop_width,
         )
 
-    image = cv2.blur(image, (blur_value, blur_value))  # rainy view are blurry
-    image_hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV).astype(np.float32)
+    img = cv2.blur(img, (blur_value, blur_value))  # rainy view are blurry
+    image_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV).astype(np.float32)
     image_hsv[:, :, 2] *= brightness_coefficient
 
-    image_rgb = cv2.cvtColor(image_hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-
-    return to_float(image_rgb, max_value=255) if needs_float else image_rgb
+    return cv2.cvtColor(image_hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
 
 
+@uint8_io
+@clipped
 @preserve_channel_dim
-def add_fog(img: np.ndarray, fog_coef: float, alpha_coef: float, haze_list: list[tuple[int, int]]) -> np.ndarray:
-    """Add fog to an image using the provided coefficients and haze points.
+def add_fog(
+    img: np.ndarray,
+    fog_intensity: float,
+    alpha_coef: float,
+    fog_particle_positions: list[tuple[int, int]],
+    random_state: np.random.RandomState | None = None,
+) -> np.ndarray:
+    """Add fog to the input image.
 
     Args:
-        img (np.ndarray): The input image, expected to be a numpy array.
-        fog_coef (float): The fog coefficient, used to determine the intensity of the fog.
-        alpha_coef (float): The alpha coefficient, used to determine the transparency of the fog.
-        haze_list (list[tuple[int, int]]): A list of tuples, where each tuple represents the x and y
-            coordinates of a haze point.
-
+        img (np.ndarray): Input image.
+        fog_intensity (float): Intensity of the fog effect, between 0 and 1.
+        alpha_coef (float): Base alpha (transparency) value for fog particles.
+        fog_particle_positions (list[tuple[int, int]]): List of (x, y) coordinates for fog particles.
+        random_state (np.random.RandomState | None): If specified, this will be random state used
     Returns:
-        np.ndarray: The output image with added fog, as a numpy array.
-
-    Raises:
-        ValueError: If the input image's dtype is not uint8 or float32.
-
-    Reference:
-        https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
+        np.ndarray: Image with added fog effect.
     """
-    non_rgb_error(img)
+    height, width = img.shape[:2]
+    num_channels = get_num_channels(img)
 
-    input_dtype = img.dtype
-    needs_float = False
+    fog_layer = np.zeros((height, width, num_channels), dtype=np.uint8)
 
-    if input_dtype == np.float32:
-        img = from_float(img, dtype=np.dtype("uint8"))
-        needs_float = True
-    elif input_dtype not in (np.uint8, np.float32):
-        raise ValueError(f"Unexpected dtype {input_dtype} for RandomFog augmentation")
+    max_fog_radius = int(
+        min(height, width) * 0.1 * fog_intensity,
+    )  # Maximum radius scales with image size and intensity
 
-    width = img.shape[1]
+    for x, y in fog_particle_positions:
+        radius = random_utils.randint(max_fog_radius // 2, max_fog_radius, random_state=random_state)
+        color = 255 if num_channels == 1 else (255,) * num_channels
+        cv2.circle(
+            fog_layer,
+            center=(x, y),
+            radius=radius,
+            color=color,
+            thickness=-1,
+        )
 
-    hw = max(int(width // 3 * fog_coef), 10)
+    # Apply gaussian blur to the fog layer
+    fog_layer = cv2.GaussianBlur(fog_layer, (25, 25), 0)
 
-    for haze_points in haze_list:
-        x, y = haze_points
-        overlay = img.copy()
-        output = img.copy()
-        alpha = alpha_coef * fog_coef
-        rad = hw // 2
-        point = (x + hw // 2, y + hw // 2)
-        cv2.circle(overlay, point, int(rad), (255, 255, 255), -1)
-        output = add_weighted(overlay, alpha, output, 1 - alpha)
+    # Blend the fog layer with the original image
+    alpha = np.mean(fog_layer, axis=2, keepdims=True) / 255 * alpha_coef * fog_intensity
+    fog_image = img * (1 - alpha) + fog_layer * alpha
 
-        img = output.copy()
-
-    image_rgb = cv2.blur(img, (hw // 10, hw // 10))
-
-    return to_float(image_rgb, max_value=255) if needs_float else image_rgb
+    return fog_image.astype(np.uint8)
 
 
+@uint8_io
 @preserve_channel_dim
-def add_sun_flare(
+def add_sun_flare_overlay(
     img: np.ndarray,
     flare_center: tuple[float, float],
     src_radius: int,
     src_color: ColorType,
     circles: list[Any],
 ) -> np.ndarray:
-    """Add a sun flare effect to an image.
+    """Add a sun flare effect to an image using a simple overlay technique.
+
+    This function creates a basic sun flare effect by overlaying multiple semi-transparent
+    circles of varying sizes and intensities on the input image. The effect simulates
+    a simple lens flare caused by bright light sources.
 
     Args:
         img (np.ndarray): The input image.
         flare_center (tuple[float, float]): (x, y) coordinates of the flare center
-        src_radius (int): The radius of the source of the flare.
-        src_color (ColorType): The color of the flare, represented as a tuple of RGB values.
-        circles (list[Any]): A list of tuples, each representing a circle that contributes to the flare effect.
-            Each tuple contains the alpha value, the center coordinates, the radius, and the color of the circle.
+            in pixel coordinates.
+        src_radius (int): The radius of the main sun circle in pixels.
+        src_color (ColorType): The color of the sun, represented as a tuple of RGB values.
+        circles (list[Any]): A list of tuples, each representing a circle that contributes
+            to the flare effect. Each tuple contains:
+            - alpha (float): The transparency of the circle (0.0 to 1.0).
+            - center (tuple[int, int]): (x, y) coordinates of the circle center.
+            - radius (int): The radius of the circle.
+            - color (tuple[int, int, int]): RGB color of the circle.
 
     Returns:
         np.ndarray: The output image with the sun flare effect added.
 
-    Reference:
-        https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
+    Note:
+        - This function uses a simple alpha blending technique to overlay flare elements.
+        - The main sun is created as a gradient circle, fading from the center outwards.
+        - Additional flare circles are added along an imaginary line from the sun's position.
+        - This method is computationally efficient but may produce less realistic results
+          compared to more advanced techniques.
+
+    The flare effect is created through the following steps:
+    1. Create an overlay image and output image as copies of the input.
+    2. Add smaller flare circles to the overlay.
+    3. Blend the overlay with the output image using alpha compositing.
+    4. Add the main sun circle with a radial gradient.
+
+    Examples:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, [100, 100, 3], dtype=np.uint8)
+        >>> flare_center = (50, 50)
+        >>> src_radius = 20
+        >>> src_color = (255, 255, 200)
+        >>> circles = [
+        ...     (0.1, (60, 60), 5, (255, 200, 200)),
+        ...     (0.2, (70, 70), 3, (200, 255, 200))
+        ... ]
+        >>> flared_image = A.functional.add_sun_flare_overlay(
+        ...     image, flare_center, src_radius, src_color, circles
+        ... )
+
+    References:
+        - Alpha compositing: https://en.wikipedia.org/wiki/Alpha_compositing
+        - Lens flare: https://en.wikipedia.org/wiki/Lens_flare
     """
-    non_rgb_error(img)
-
-    input_dtype = img.dtype
-    needs_float = False
-
-    if input_dtype == np.float32:
-        img = from_float(img, dtype=np.dtype("uint8"))
-        needs_float = True
-
     overlay = img.copy()
     output = img.copy()
 
@@ -725,9 +811,122 @@ def add_sun_flare(
         alp = alpha[num_times - i - 1] * alpha[num_times - i - 1] * alpha[num_times - i - 1]
         output = add_weighted(overlay, alp, output, 1 - alp)
 
-    return to_float(output, max_value=255) if needs_float else output
+    return output
 
 
+@uint8_io
+@clipped
+def add_sun_flare_physics_based(
+    img: np.ndarray,
+    flare_center: tuple[int, int],
+    src_radius: int,
+    src_color: tuple[int, int, int],
+    circles: list[Any],
+) -> np.ndarray:
+    """Add a more realistic sun flare effect to the image.
+
+    This function creates a complex sun flare effect by simulating various optical phenomena
+    that occur in real camera lenses when capturing bright light sources. The result is a
+    more realistic and physically plausible lens flare effect.
+
+    Args:
+        img (np.ndarray): Input image.
+        flare_center (tuple[int, int]): (x, y) coordinates of the sun's center in pixels.
+        src_radius (int): Radius of the main sun circle in pixels.
+        src_color (tuple[int, int, int]): Color of the sun in RGB format.
+        circles (list[Any]): List of tuples, each representing a flare circle with parameters:
+            (alpha, center, size, color)
+            - alpha (float): Transparency of the circle (0.0 to 1.0).
+            - center (tuple[int, int]): (x, y) coordinates of the circle center.
+            - size (float): Size factor for the circle radius.
+            - color (tuple[int, int, int]): RGB color of the circle.
+
+    Returns:
+        np.ndarray: Image with added sun flare effect.
+
+    Note:
+        This function implements several techniques to create a more realistic flare:
+        1. Separate flare layer: Allows for complex manipulations of the flare effect.
+        2. Lens diffraction spikes: Simulates light diffraction in camera aperture.
+        3. Radial gradient mask: Creates natural fading of the flare from the center.
+        4. Gaussian blur: Softens the flare for a more natural glow effect.
+        5. Chromatic aberration: Simulates color fringing often seen in real lens flares.
+        6. Screen blending: Provides a more realistic blending of the flare with the image.
+
+    The flare effect is created through the following steps:
+    1. Create a separate flare layer.
+    2. Add the main sun circle and diffraction spikes to the flare layer.
+    3. Add additional flare circles based on the input parameters.
+    4. Apply Gaussian blur to soften the flare.
+    5. Create and apply a radial gradient mask for natural fading.
+    6. Simulate chromatic aberration by applying different blurs to color channels.
+    7. Blend the flare with the original image using screen blending mode.
+
+    Examples:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, [1000, 1000, 3], dtype=np.uint8)
+        >>> flare_center = (500, 500)
+        >>> src_radius = 50
+        >>> src_color = (255, 255, 200)
+        >>> circles = [
+        ...     (0.1, (550, 550), 10, (255, 200, 200)),
+        ...     (0.2, (600, 600), 5, (200, 255, 200))
+        ... ]
+        >>> flared_image = A.functional.add_sun_flare_physics_based(
+        ...     image, flare_center, src_radius, src_color, circles
+        ... )
+
+    References:
+        - Lens flare: https://en.wikipedia.org/wiki/Lens_flare
+        - Diffraction: https://en.wikipedia.org/wiki/Diffraction
+        - Chromatic aberration: https://en.wikipedia.org/wiki/Chromatic_aberration
+        - Screen blending: https://en.wikipedia.org/wiki/Blend_modes#Screen
+    """
+    output = img.copy()
+    height, width = img.shape[:2]
+
+    # Create a separate flare layer
+    flare_layer = np.zeros_like(img, dtype=np.float32)
+
+    # Add the main sun
+    cv2.circle(flare_layer, flare_center, src_radius, src_color, -1)
+
+    # Add lens diffraction spikes
+    for angle in [0, 45, 90, 135]:
+        end_point = (
+            int(flare_center[0] + np.cos(np.radians(angle)) * max(width, height)),
+            int(flare_center[1] + np.sin(np.radians(angle)) * max(width, height)),
+        )
+        cv2.line(flare_layer, flare_center, end_point, src_color, 2)
+
+    # Add flare circles
+    for _, center, size, color in circles:
+        cv2.circle(flare_layer, center, int(size**0.33), color, -1)
+
+    # Apply gaussian blur to soften the flare
+    flare_layer = cv2.GaussianBlur(flare_layer, (0, 0), sigmaX=15, sigmaY=15)
+
+    # Create a radial gradient mask
+    y, x = np.ogrid[:height, :width]
+    mask = np.sqrt((x - flare_center[0]) ** 2 + (y - flare_center[1]) ** 2)
+    mask = 1 - np.clip(mask / (max(width, height) * 0.7), 0, 1)
+    mask = np.dstack([mask] * 3)
+
+    # Apply the mask to the flare layer
+    flare_layer *= mask
+
+    # Add chromatic aberration
+    channels = list(cv2.split(flare_layer))
+    channels[0] = cv2.GaussianBlur(channels[0], (0, 0), sigmaX=3, sigmaY=3)  # Blue channel
+    channels[2] = cv2.GaussianBlur(channels[2], (0, 0), sigmaX=5, sigmaY=5)  # Red channel
+    flare_layer = cv2.merge(channels)
+
+    # Blend the flare with the original image using screen blending
+    return 255 - ((255 - output) * (255 - flare_layer) / 255)
+
+
+@uint8_io
 @preserve_channel_dim
 def add_shadow(img: np.ndarray, vertices_list: list[np.ndarray], intensities: np.ndarray) -> np.ndarray:
     """Add shadows to the image by reducing the intensity of the pixel values in specified regions.
@@ -743,14 +942,8 @@ def add_shadow(img: np.ndarray, vertices_list: list[np.ndarray], intensities: np
     Reference:
         https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
     """
-    input_dtype = img.dtype
-    needs_float = False
     num_channels = get_num_channels(img)
     max_value = MAX_VALUES_BY_DTYPE[np.uint8]
-
-    if input_dtype == np.float32:
-        img = from_float(img, dtype=np.dtype("uint8"))
-        needs_float = True
 
     img_shadowed = img.copy()
 
@@ -771,46 +964,21 @@ def add_shadow(img: np.ndarray, vertices_list: list[np.ndarray], intensities: np
             np.uint8,
         )
 
-    if needs_float:
-        return to_float(img_shadowed, max_value=max_value)
-
     return img_shadowed
 
 
+@uint8_io
+@clipped
 @preserve_channel_dim
 def add_gravel(img: np.ndarray, gravels: list[Any]) -> np.ndarray:
-    """Add gravel to the image.
-
-    Args:
-        img (numpy.ndarray): image to add gravel to
-        gravels (list): list of gravel parameters. (float, float, float, float):
-            (top-left x, top-left y, bottom-right x, bottom right y)
-
-    Returns:
-        numpy.ndarray:
-
-    Reference:
-        https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
-    """
     non_rgb_error(img)
-    input_dtype = img.dtype
-    needs_float = False
-
-    if input_dtype == np.float32:
-        img = from_float(img, dtype=np.dtype("uint8"))
-        needs_float = True
-    elif input_dtype not in (np.uint8, np.float32):
-        raise ValueError(f"Unexpected dtype {input_dtype} for AddGravel augmentation")
-
     image_hls = cv2.cvtColor(img, cv2.COLOR_RGB2HLS)
 
     for gravel in gravels:
-        y1, y2, x1, x2, sat = gravel
-        image_hls[x1:x2, y1:y2, 1] = sat
+        min_y, max_y, min_x, max_x, sat = gravel
+        image_hls[min_y:max_y, min_x:max_x, 1] = sat
 
-    image_rgb = cv2.cvtColor(image_hls, cv2.COLOR_HLS2RGB)
-
-    return to_float(image_rgb, max_value=255) if needs_float else image_rgb
+    return cv2.cvtColor(image_hls, cv2.COLOR_HLS2RGB)
 
 
 def invert(img: np.ndarray) -> np.ndarray:
@@ -846,6 +1014,7 @@ def brightness_contrast_adjust(
     return multiply_add(img, alpha, value)
 
 
+@float32_io
 @clipped
 def iso_noise(
     image: np.ndarray,
@@ -872,13 +1041,6 @@ def iso_noise(
     Number of channels:
         3
     """
-    input_dtype = image.dtype
-    factor = 1
-
-    if input_dtype == np.uint8:
-        image = to_float(image)
-        factor = MAX_VALUES_BY_DTYPE[input_dtype]
-
     hls = cv2.cvtColor(image, cv2.COLOR_RGB2HLS)
     _, stddev = cv2.meanStdDev(hls)
 
@@ -892,7 +1054,7 @@ def iso_noise(
     luminance = hls[..., 1]
     luminance += (luminance_noise / 255) * (1.0 - luminance)
 
-    return cv2.cvtColor(hls, cv2.COLOR_HLS2RGB) * factor
+    return cv2.cvtColor(hls, cv2.COLOR_HLS2RGB)
 
 
 def to_gray_weighted_average(img: np.ndarray) -> np.ndarray:
@@ -917,6 +1079,7 @@ def to_gray_weighted_average(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
 
+@uint8_io
 @clipped
 def to_gray_from_lab(img: np.ndarray) -> np.ndarray:
     """Convert an RGB image to grayscale using the L channel from the LAB color space.
@@ -948,11 +1111,7 @@ def to_gray_from_lab(img: np.ndarray) -> np.ndarray:
     Number of channels:
         3
     """
-    dtype = img.dtype
-    img_uint8 = from_float(img, dtype=np.uint8) if dtype == np.float32 else img
-    result = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2LAB)[..., 0]
-
-    return to_float(result) if dtype == np.float32 else result
+    return cv2.cvtColor(img, cv2.COLOR_RGB2LAB)[..., 0]
 
 
 @clipped
@@ -1082,7 +1241,7 @@ def to_gray_pca(img: np.ndarray) -> np.ndarray:
     grayscale = pca_result.reshape(img.shape[:2])
     grayscale = normalize_per_image(grayscale, "min_max")
 
-    return from_float(grayscale, dtype=np.uint8) if dtype == np.uint8 else grayscale
+    return from_float(grayscale, target_dtype=dtype) if dtype == np.uint8 else grayscale
 
 
 def to_gray(
@@ -1123,9 +1282,6 @@ def grayscale_to_multichannel(grayscale_image: np.ndarray, num_output_channels: 
     Returns:
         np.ndarray: Multi-channel image with shape (height, width, num_channels).
 
-    Raises:
-        ValueError: If the input is not a 2D grayscale image or 3D with shape (height, width, 1).
-
     Note:
         If the input is already a multi-channel image with the desired number of channels,
         it will be returned unchanged.
@@ -1153,7 +1309,7 @@ def downscale(
     downscaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=down_interpolation)
     upscaled = cv2.resize(downscaled, (width, height), interpolation=up_interpolation)
 
-    return from_float(upscaled, dtype=np.uint8) if need_cast else upscaled
+    return from_float(upscaled, target_dtype=np.uint8) if need_cast else upscaled
 
 
 def noop(input_obj: Any, **params: Any) -> Any:
@@ -1186,42 +1342,7 @@ def swap_tiles_on_image(image: np.ndarray, tiles: np.ndarray, mapping: list[int]
     return new_image
 
 
-def bbox_from_mask(mask: np.ndarray) -> tuple[int, int, int, int]:
-    """Create bounding box from binary mask (fast version)
-
-    Args:
-        mask (numpy.ndarray): binary mask.
-
-    Returns:
-        tuple: A bounding box tuple `(x_min, y_min, x_max, y_max)`.
-
-    """
-    rows = np.any(mask, axis=1)
-    if not rows.any():
-        return -1, -1, -1, -1
-    cols = np.any(mask, axis=0)
-    y_min, y_max = np.where(rows)[0][[0, -1]]
-    x_min, x_max = np.where(cols)[0][[0, -1]]
-    return x_min, y_min, x_max + 1, y_max + 1
-
-
-def mask_from_bbox(img: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray:
-    """Create binary mask from bounding box
-
-    Args:
-        img: input image
-        bbox: A bounding box tuple `(x_min, y_min, x_max, y_max)`
-
-    Returns:
-        mask: binary mask
-
-    """
-    mask = np.zeros(img.shape[:2], dtype=np.uint8)
-    x_min, y_min, x_max, y_max = bbox
-    mask[y_min:y_max, x_min:x_max] = 1
-    return mask
-
-
+@float32_io
 @clipped
 @preserve_channel_dim
 def fancy_pca(img: np.ndarray, alpha_vector: np.ndarray) -> np.ndarray:
@@ -1239,7 +1360,7 @@ def fancy_pca(img: np.ndarray, alpha_vector: np.ndarray) -> np.ndarray:
         uint8, float32
 
     Number of channels:
-        any
+        Any
 
     Note:
         - This function generalizes the Fancy PCA augmentation to work with any number of channels.
@@ -1256,12 +1377,7 @@ def fancy_pca(img: np.ndarray, alpha_vector: np.ndarray) -> np.ndarray:
         In Advances in neural information processing systems (pp. 1097-1105).
     """
     orig_shape = img.shape
-    orig_dtype = img.dtype
     num_channels = get_num_channels(img)
-
-    # Convert to float32 and scale to [0, 1] if necessary
-    if orig_dtype == np.uint8:
-        img = to_float(img)
 
     # Reshape image to 2D array of pixels
     img_reshaped = img.reshape(-1, num_channels)
@@ -1296,9 +1412,7 @@ def fancy_pca(img: np.ndarray, alpha_vector: np.ndarray) -> np.ndarray:
     img_pca = img_pca.reshape(orig_shape)
 
     # Clip values to [0, 1] range
-    img_pca = np.clip(img_pca, 0, 1)
-
-    return from_float(img_pca, dtype=orig_dtype) if orig_dtype == np.uint8 else img_pca
+    return np.clip(img_pca, 0, 1)
 
 
 @preserve_channel_dim
@@ -1326,6 +1440,7 @@ def adjust_contrast_torchvision(img: np.ndarray, factor: float) -> np.ndarray:
     return multiply_add(img, factor, mean * (1 - factor))
 
 
+@clipped
 @preserve_channel_dim
 def adjust_saturation_torchvision(img: np.ndarray, factor: float, gamma: float = 0) -> np.ndarray:
     if factor == 1:
@@ -1340,11 +1455,7 @@ def adjust_saturation_torchvision(img: np.ndarray, factor: float, gamma: float =
     if factor == 0:
         return gray
 
-    result = cv2.addWeighted(img, factor, gray, 1 - factor, gamma=gamma)
-    if img.dtype == np.uint8:
-        return result
-
-    return clip(result, img.dtype)
+    return cv2.addWeighted(img, factor, gray, 1 - factor, gamma=gamma)
 
 
 def _adjust_hue_torchvision_uint8(img: np.ndarray, factor: float) -> np.ndarray:
@@ -1358,10 +1469,7 @@ def _adjust_hue_torchvision_uint8(img: np.ndarray, factor: float) -> np.ndarray:
 
 
 def adjust_hue_torchvision(img: np.ndarray, factor: float) -> np.ndarray:
-    if is_grayscale_image(img):
-        return img
-
-    if factor == 0:
+    if is_grayscale_image(img) or factor == 0:
         return img
 
     if img.dtype == np.uint8:
@@ -1390,8 +1498,7 @@ def superpixels(
             scale = max_size / size
             height, width = image.shape[:2]
             new_height, new_width = int(height * scale), int(width * scale)
-            resize_fn = maybe_process_in_chunks(cv2.resize, dsize=(new_width, new_height), interpolation=interpolation)
-            image = resize_fn(image)
+            image = resize(image, (new_height, new_width), interpolation)
 
     segments = skimage.segmentation.slic(
         image,
@@ -1403,16 +1510,19 @@ def superpixels(
     min_value = 0
     max_value = MAX_VALUES_BY_DTYPE[image.dtype]
     image = np.copy(image)
+
     if image.ndim == MONO_CHANNEL_DIMENSIONS:
-        image = image.reshape(*image.shape, 1)
-    nb_channels = image.shape[2]
-    for c in range(nb_channels):
+        image = np.expand_dims(image, axis=-1)
+
+    num_channels = get_num_channels(image)
+
+    for c in range(num_channels):
         # segments+1 here because otherwise regionprops always misses the last label
         regions = skimage.measure.regionprops(segments + 1, intensity_image=image[..., c])
-        for ridx, region in enumerate(regions):
+        for region_idx, region in enumerate(regions):
             # with mod here, because slic can sometimes create more superpixel than requested.
             # replace_samples then does not have enough values, so we just start over with the first one again.
-            if replace_samples[ridx % len(replace_samples)]:
+            if replace_samples[region_idx % len(replace_samples)]:
                 mean_intensity = region.mean_intensity
                 image_sp_c = image[..., c]
 
@@ -1426,19 +1536,12 @@ def superpixels(
                 else:
                     value = mean_intensity
 
-                image_sp_c[segments == ridx] = value
+                image_sp_c[segments == region_idx] = value
 
-    if orig_shape != image.shape:
-        resize_fn = maybe_process_in_chunks(
-            cv2.resize,
-            dsize=(orig_shape[1], orig_shape[0]),
-            interpolation=interpolation,
-        )
-        return resize_fn(image)
-
-    return image
+    return resize(image, orig_shape[:2], interpolation) if orig_shape != image.shape else image
 
 
+@float32_io
 @clipped
 @preserve_channel_dim
 def unsharp_mask(
@@ -1450,26 +1553,23 @@ def unsharp_mask(
 ) -> np.ndarray:
     blur_fn = maybe_process_in_chunks(cv2.GaussianBlur, ksize=(ksize, ksize), sigmaX=sigma)
 
-    input_dtype = image.dtype
-
-    if input_dtype == np.uint8:
-        image = to_float(image)
+    if image.ndim == NUM_MULTI_CHANNEL_DIMENSIONS and get_num_channels(image) == 1:
+        image = np.squeeze(image, axis=-1)
 
     blur = blur_fn(image)
     residual = image - blur
 
     # Do not sharpen noise
     mask = np.abs(residual) * 255 > threshold
-    mask = mask.astype("float32")
+    mask = mask.astype(np.float32)
 
     sharp = image + alpha * residual
     # Avoid color noise artefacts.
     sharp = np.clip(sharp, 0, 1)
 
     soft_mask = blur_fn(mask)
-    output = add(multiply(sharp, soft_mask), multiply(image, 1 - soft_mask))
 
-    return from_float(output, dtype=input_dtype) if input_dtype == np.uint8 else output
+    return add(multiply(sharp, soft_mask), multiply(image, 1 - soft_mask))
 
 
 @preserve_channel_dim
@@ -1481,6 +1581,7 @@ def pixel_dropout(image: np.ndarray, drop_mask: np.ndarray, drop_value: float | 
     return np.where(drop_mask, drop_values, image)
 
 
+@float32_io
 @clipped
 @preserve_channel_dim
 def spatter(
@@ -1490,19 +1591,13 @@ def spatter(
     rain: np.ndarray | None,
     mode: SpatterMode,
 ) -> np.ndarray:
-    non_rgb_error(img)
-
-    dtype = img.dtype
-
-    img = to_float(img)
-
     if mode == "rain":
         if rain is None:
             msg = "Rain spatter requires rain mask"
             raise ValueError(msg)
 
-        img += rain
-    elif mode == "mud":
+        return img + rain
+    if mode == "mud":
         if mud is None:
             msg = "Mud spatter requires mud mask"
             raise ValueError(msg)
@@ -1510,11 +1605,9 @@ def spatter(
             msg = "Mud spatter requires non_mud mask"
             raise ValueError(msg)
 
-        img = img * non_mud + mud
-    else:
-        raise ValueError("Unsupported spatter mode: " + str(mode))
+        return img * non_mud + mud
 
-    return from_float(img, dtype=dtype)
+    raise ValueError(f"Unsupported spatter mode: {mode}")
 
 
 def almost_equal_intervals(n: int, parts: int) -> np.ndarray:
@@ -1634,6 +1727,8 @@ def shuffle_tiles_within_shape_groups(
     return mapping
 
 
+@uint8_io
+@clipped
 def chromatic_aberration(
     img: np.ndarray,
     primary_distortion_red: float,
@@ -1720,32 +1815,6 @@ def morphology(img: np.ndarray, kernel: np.ndarray, operation: str) -> np.ndarra
     raise ValueError(f"Unsupported operation: {operation}")
 
 
-def center(image_shape: tuple[int, int]) -> tuple[float, float]:
-    """Calculate the center coordinates if image. Used by images, masks and keypoints.
-
-    Args:
-        image_shape (tuple[int, int]): The shape of the image.
-
-    Returns:
-        tuple[float, float]: The center coordinates.
-    """
-    height, width = image_shape[:2]
-    return width / 2 - 0.5, height / 2 - 0.5
-
-
-def center_bbox(image_shape: tuple[int, int]) -> tuple[float, float]:
-    """Calculate the center coordinates for of image for bounding boxes.
-
-    Args:
-        image_shape (tuple[int, int]): The shape of the image.
-
-    Returns:
-        tuple[float, float]: The center coordinates.
-    """
-    height, width = image_shape[:2]
-    return width / 2, height / 2
-
-
 PLANCKIAN_COEFFS = {
     "blackbody": {
         3_000: [0.6743, 0.4029, 0.0013],
@@ -1802,6 +1871,7 @@ PLANCKIAN_COEFFS = {
 }
 
 
+@float32_io
 @clipped
 def planckian_jitter(img: np.ndarray, temperature: int, mode: PlanckianJitterMode = "blackbody") -> np.ndarray:
     img = img.copy()
@@ -1815,13 +1885,11 @@ def planckian_jitter(img: np.ndarray, temperature: int, mode: PlanckianJitterMod
 
     coeffs = w_left * np.array(PLANCKIAN_COEFFS[mode][t_left]) + w_right * np.array(PLANCKIAN_COEFFS[mode][t_right])
 
-    image = to_float(img) if img.dtype == np.uint8 else img
+    img[:, :, 0] = img[:, :, 0] * (coeffs[0] / coeffs[1])
+    img[:, :, 2] = img[:, :, 2] * (coeffs[2] / coeffs[1])
+    img[img > 1] = 1
 
-    image[:, :, 0] = image[:, :, 0] * (coeffs[0] / coeffs[1])
-    image[:, :, 2] = image[:, :, 2] * (coeffs[2] / coeffs[1])
-    image[image > 1] = 1
-
-    return from_float(image, dtype=img.dtype) if img.dtype == np.uint8 else image
+    return img
 
 
 def generate_approx_gaussian_noise(

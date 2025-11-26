@@ -7,11 +7,10 @@ import skimage
 
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as fgeometric
-from albucore.utils import is_multispectral_image, MAX_VALUES_BY_DTYPE, get_num_channels, clip
-from albucore.functions import to_float
+from albucore import is_multispectral_image, MAX_VALUES_BY_DTYPE, get_num_channels, clip, to_float
 
 from albumentations.core.types import d4_group_elements
-from tests.conftest import IMAGES, RECTANGULAR_FLOAT_IMAGE, RECTANGULAR_IMAGES, RECTANGULAR_UINT8_IMAGE, SQUARE_UINT8_IMAGE, UINT8_IMAGES
+from tests.conftest import IMAGES, RECTANGULAR_IMAGES, RECTANGULAR_UINT8_IMAGE, SQUARE_UINT8_IMAGE, UINT8_IMAGES
 from tests.utils import convert_2d_to_target_format, set_seed
 
 
@@ -490,18 +489,6 @@ def test_solarize(dtype):
         assert np.max(result_img) <= max_value
 
 
-def test_posterize_checks():
-    img = np.random.random([256, 256, 3])
-    with pytest.raises(TypeError) as exc_info:
-        F.posterize(img, 4)
-    assert str(exc_info.value) == "Image must have uint8 channel type"
-
-    img = np.random.randint(0, 256, [256, 256], dtype=np.uint8)
-    with pytest.raises(TypeError) as exc_info:
-        F.posterize(img, [1, 2, 3])
-    assert str(exc_info.value) == "If bits is iterable image must be RGB"
-
-
 @pytest.mark.parametrize(
     "img_shape, img_dtype, mask_shape, by_channels, expected_error, expected_message",
     [
@@ -854,7 +841,7 @@ def test_planckian_jitter_cied():
         [[0.4963, 0.6977, 0.1759], [0.7682, 0.8   , 0.2698], [0.0885, 0.161 , 0.1507], [0.132 , 0.2823, 0.0317]],
         [[0.3074, 0.6816, 0.2081], [0.6341, 0.9152, 0.9298], [0.4901, 0.3971, 0.7231], [0.8964, 0.8742, 0.7423]],
         [[0.4556, 0.4194, 0.5263], [0.6323, 0.5529, 0.2437], [0.3489, 0.9527, 0.5846], [0.4017, 0.0362, 0.0332]],
-        [[0.0223, 0.1852, 0.1387], [0.1689, 0.3734, 0.2422], [0.2939, 0.3051, 0.8155], [0.5185, 0.932 , 0.7932]]]
+        [[0.0223, 0.1852, 0.1387], [0.1689, 0.3734, 0.2422], [0.2939, 0.3051, 0.8155], [0.5185, 0.932 , 0.7932]]],
     )
 
     expected_cied_plankian_jitter = np.array([
@@ -863,7 +850,6 @@ def test_planckian_jitter_cied():
         [[0.5561, 0.4194, 0.3437], [0.7718, 0.5529, 0.1592], [0.4259, 0.9527, 0.3818], [0.4903, 0.0362, 0.0217]],
         [[0.0272, 0.1852, 0.0906], [0.2062, 0.3734, 0.1582], [0.3587, 0.3051, 0.5326], [0.6329, 0.9320, 0.5180]]]
     )
-
     cied_plankian_jitter = F.planckian_jitter(img, temperature=4500, mode="cied")
     assert np.allclose(cied_plankian_jitter, expected_cied_plankian_jitter, atol=1e-4)
 
@@ -899,7 +885,7 @@ def test_iso_noise(image, color_shift, intensity):
     set_seed(42)
     result_float = F.iso_noise(float_image, color_shift=color_shift, intensity=intensity)
 
-    result_float = F.from_float(result_float, dtype=np.uint8)  # Convert the float result back to uint8
+    result_float = F.from_float(result_float, target_dtype=np.uint8)  # Convert the float result back to uint8
 
     np.testing.assert_allclose(result_uint8, result_float, rtol=1e-5, atol=1)
 

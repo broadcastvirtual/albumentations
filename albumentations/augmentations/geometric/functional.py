@@ -6,12 +6,11 @@ from typing import Any, Callable, Literal, Sequence, Tuple, TypedDict, cast
 import cv2
 import numpy as np
 import skimage.transform
-from albucore.utils import clipped, get_num_channels, maybe_process_in_chunks, preserve_channel_dim
+from albucore import clipped, get_num_channels, hflip, maybe_process_in_chunks, preserve_channel_dim, vflip
 
 from albumentations import random_utils
-from albumentations.augmentations.functional import bbox_from_mask, center
 from albumentations.augmentations.utils import angle_2pi_range, handle_empty_array
-from albumentations.core.bbox_utils import denormalize_bboxes, normalize_bboxes
+from albumentations.core.bbox_utils import bbox_from_mask, denormalize_bboxes, normalize_bboxes
 from albumentations.core.types import (
     NUM_KEYPOINTS_COLUMNS_IN_ALBUMENTATIONS,
     NUM_MULTI_CHANNEL_DIMENSIONS,
@@ -42,10 +41,7 @@ __all__ = [
     "piecewise_affine",
     "to_distance_maps",
     "from_distance_maps",
-    "hflip",
-    "hflip_cv2",
     "transpose",
-    "vflip",
     "d4",
     "bboxes_rotate",
     "keypoints_rotate",
@@ -59,6 +55,8 @@ __all__ = [
     "keypoints_vflip",
     "bboxes_hflip",
     "keypoints_hflip",
+    "center",
+    "center_bbox",
 ]
 
 PAIR = 2
@@ -887,7 +885,23 @@ def bboxes_affine_ellipse(bboxes: np.ndarray, matrix: skimage.transform.Projecti
     points = np.stack([x, y], axis=-1).reshape(-1, 2)
 
     # Transform all points at once
-    transformed_points = skimage.transform.matrix_transform(points, matrix.params)
+    # Replacing skimage.transform.matrix_transform with numpy ops:
+    # points reshape from N, 2 to N, 3 with extra dim filled with 1
+    points = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)
+
+    # change matrix.params.T to matrix.T if matrix is np.ndarray and no longer skimage.transform.ProjectiveTransform
+    transformed_points = points @ matrix.params.T
+
+    # set zero to very small number before homogeneous divide
+    transformed_points[:, -1:] = np.where(
+        transformed_points[:, -1:] == 0,
+        np.finfo(float).eps,
+        transformed_points[:, -1:],
+    )
+
+    # homogeneous divide and then get x, y
+    transformed_points = (transformed_points / transformed_points[:, -1:])[:, :2]
+
     transformed_points = transformed_points.reshape(len(bboxes), -1, 2)
 
     # Compute new bounding boxes
@@ -1240,18 +1254,6 @@ def bboxes_piecewise_affine(
 
     # Normalize the new bboxes
     return normalize_bboxes(new_bboxes, image_shape)
-
-
-def vflip(img: np.ndarray) -> np.ndarray:
-    return img[::-1, ...]
-
-
-def hflip(img: np.ndarray) -> np.ndarray:
-    return img[:, ::-1, ...]
-
-
-def hflip_cv2(img: np.ndarray) -> np.ndarray:
-    return cv2.flip(img, 1)
 
 
 def d4(img: np.ndarray, group_member: D4Type) -> np.ndarray:
@@ -2642,3 +2644,29 @@ def bboxes_grid_distortion(
 
     # Normalize the returned bboxes
     return normalize_bboxes(bboxes_returned, image_shape)
+
+
+def center(image_shape: tuple[int, int]) -> tuple[float, float]:
+    """Calculate the center coordinates if image. Used by images, masks and keypoints.
+
+    Args:
+        image_shape (tuple[int, int]): The shape of the image.
+
+    Returns:
+        tuple[float, float]: The center coordinates.
+    """
+    height, width = image_shape[:2]
+    return width / 2 - 0.5, height / 2 - 0.5
+
+
+def center_bbox(image_shape: tuple[int, int]) -> tuple[float, float]:
+    """Calculate the center coordinates for of image for bounding boxes.
+
+    Args:
+        image_shape (tuple[int, int]): The shape of the image.
+
+    Returns:
+        tuple[float, float]: The center coordinates.
+    """
+    height, width = image_shape[:2]
+    return width / 2, height / 2

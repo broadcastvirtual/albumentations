@@ -5,8 +5,13 @@ from typing import TYPE_CHECKING, Any, Sequence
 
 import cv2
 import numpy as np
-from albucore.functions import from_float, to_float
-from albucore.utils import MONO_CHANNEL_DIMENSIONS, NUM_MULTI_CHANNEL_DIMENSIONS, NUM_RGB_CHANNELS, preserve_channel_dim
+from albucore import (
+    MONO_CHANNEL_DIMENSIONS,
+    NUM_MULTI_CHANNEL_DIMENSIONS,
+    NUM_RGB_CHANNELS,
+    preserve_channel_dim,
+    uint8_io,
+)
 
 from albumentations.core.types import PAIR
 
@@ -36,9 +41,9 @@ def swap_random_words(words: list[str], num_words: int = 1) -> str:
     return " ".join(words)
 
 
-def insert_random_stopwords(words: list[str], num_insertions: int = 1, stopwords: list[str] | None = None) -> str:
+def insert_random_stopwords(words: list[str], num_insertions: int = 1, stopwords: tuple[str, ...] | None = None) -> str:
     if stopwords is None:
-        stopwords = ["and", "the", "is", "in", "at", "of"]  # Default stopwords if none provided
+        stopwords = ("and", "the", "is", "in", "at", "of")  # Default stopwords if none provided
 
     for _ in range(num_insertions):
         idx = random.randint(0, len(words))
@@ -100,8 +105,25 @@ def draw_text_on_multi_channel_image(image: np.ndarray, metadata_list: list[dict
         text = metadata["text"]
         font = metadata["font"]
         font_color = metadata["font_color"]
-        if isinstance(font_color, Sequence):
-            font_color = tuple(int(c) for c in font_color)
+
+        # Handle different font_color types
+        if isinstance(font_color, str):
+            # If it's a string, use it as is for all channels
+            font_color = [font_color] * image.shape[2]
+        elif isinstance(font_color, (int, float)):
+            # If it's a single number, convert to int and use for all channels
+            font_color = [int(font_color)] * image.shape[2]
+        elif isinstance(font_color, Sequence):
+            # If it's a sequence, ensure it has the right length and convert to int
+            if len(font_color) != image.shape[2]:
+                raise ValueError(
+                    f"font_color sequence length ({len(font_color)}) "
+                    f"must match the number of image channels ({image.shape[2]})",
+                )
+            font_color = [int(c) for c in font_color]
+        else:
+            raise TypeError(f"Unsupported font_color type: {type(font_color)}")
+
         position = bbox_coords[:2]
 
         for channel_id, pil_image in enumerate(pil_images):
@@ -110,13 +132,9 @@ def draw_text_on_multi_channel_image(image: np.ndarray, metadata_list: list[dict
     return np.stack([np.array(channel) for channel in channels], axis=2)
 
 
+@uint8_io
 @preserve_channel_dim
 def render_text(image: np.ndarray, metadata_list: list[dict[str, Any]], clear_bg: bool) -> np.ndarray:
-    original_dtype = image.dtype
-
-    if original_dtype == np.float32:
-        image = from_float(image, dtype=np.uint8)
-
     # First clean background under boxes using seamless clone if clear_bg is True
     if clear_bg:
         image = inpaint_text_background(image, metadata_list)
@@ -126,11 +144,9 @@ def render_text(image: np.ndarray, metadata_list: list[dict[str, Any]], clear_bg
     ):
         pil_image = convert_image_to_pil(image)
         pil_image = draw_text_on_pil_image(pil_image, metadata_list)
-        result = np.array(pil_image)
-    else:
-        result = draw_text_on_multi_channel_image(image, metadata_list)
+        return np.array(pil_image)
 
-    return to_float(result) if original_dtype == np.float32 else result
+    return draw_text_on_multi_channel_image(image, metadata_list)
 
 
 def inpaint_text_background(
