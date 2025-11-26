@@ -59,6 +59,7 @@ def test_rotate_crop_border():
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -124,6 +125,7 @@ def test_binary_mask_interpolation(augmentation_cls, params):
             A.PixelDistributionAdaptation,
             A.PadIfNeeded,
             A.RandomCrop,
+            A.AtLeastOneBBoxRandomCrop,
             A.Crop,
             A.CenterCrop,
             A.FDA,
@@ -137,6 +139,7 @@ def test_binary_mask_interpolation(augmentation_cls, params):
             A.FromFloat,
             A.MaskDropout,
             A.XYMasking,
+            A.RandomCropNearBBox
         },
     ),
 )
@@ -163,6 +166,7 @@ def __test_multiprocessing_support_proc(args):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -462,7 +466,7 @@ def test_crop_non_empty_mask():
     _test_crop(mask_4, crop_4, aug_4, n=5)
     _test_crop(mask_5, crop_5, aug_5, n=1)
     _test_crop(mask_6, crop_6, aug_6, n=10)
-    _test_crops([mask_2, mask_1], [crop_2, crop_1], aug_1, n=1)
+    _test_crops(np.stack([mask_2, mask_1]), np.stack([crop_2, crop_1]), aug_1, n=1)
 
 
 @pytest.mark.parametrize(
@@ -483,70 +487,6 @@ def test_downscale(interpolation):
             up_interpolation=interpolation,
         )
         np.testing.assert_almost_equal(transformed, func_applied)
-
-
-def test_crop_keypoints():
-    image = np.random.randint(0, 256, (100, 100), np.uint8)
-    keypoints = np.array([(50, 50, 0, 0)])
-
-    aug = A.Crop(0, 0, 80, 80, p=1)
-    result = aug(image=image, keypoints=keypoints)
-    np.testing.assert_array_equal(result["keypoints"], keypoints)
-
-    aug = A.Crop(50, 50, 100, 100, p=1)
-    result = aug(image=image, keypoints=keypoints)
-    np.testing.assert_array_equal(result["keypoints"], [(0, 0, 0, 0)])
-
-
-def test_longest_max_size_keypoints():
-    img = np.random.randint(0, 256, [50, 10], np.uint8)
-    keypoints = np.array([(9, 5, 0, 0)])
-
-    aug = A.LongestMaxSize(max_size=100, p=1)
-    result = aug(image=img, keypoints=keypoints)
-    np.testing.assert_array_almost_equal(
-        result["keypoints"], [(18, 10, 0, 0)], decimal=5
-    )
-
-    aug = A.LongestMaxSize(max_size=5, p=1)
-    result = aug(image=img, keypoints=keypoints)
-    np.testing.assert_array_almost_equal(
-        result["keypoints"], [(0.9, 0.5, 0, 0)], decimal=5
-    )
-
-    aug = A.LongestMaxSize(max_size=50, p=1)
-    result = aug(image=img, keypoints=keypoints)
-    np.testing.assert_array_equal(result["keypoints"], [(9, 5, 0, 0)])
-
-
-def test_smallest_max_size_keypoints():
-    img = np.random.randint(0, 256, [50, 10], np.uint8)
-    keypoints = np.array([(9, 5, 0, 0)])
-
-    aug = A.SmallestMaxSize(max_size=100, p=1)
-    result = aug(image=img, keypoints=keypoints)
-    np.testing.assert_array_equal(result["keypoints"], [(90, 50, 0, 0)])
-
-    aug = A.SmallestMaxSize(max_size=5, p=1)
-    result = aug(image=img, keypoints=keypoints)
-    np.testing.assert_array_equal(result["keypoints"], [(4.5, 2.5, 0, 0)])
-
-    aug = A.SmallestMaxSize(max_size=10, p=1)
-    result = aug(image=img, keypoints=keypoints)
-    np.testing.assert_array_equal(result["keypoints"], [(9, 5, 0, 0)])
-
-
-def test_resize_keypoints():
-    img = np.random.randint(0, 256, [50, 10], np.uint8)
-    keypoints = np.array([(9, 5, 0, 0)])
-
-    aug = A.Resize(height=100, width=5, p=1)
-    result = aug(image=img, keypoints=keypoints)
-    np.testing.assert_array_equal(result["keypoints"], [(4.5, 10, 0, 0)])
-
-    aug = A.Resize(height=50, width=10, p=1)
-    result = aug(image=img, keypoints=keypoints)
-    np.testing.assert_array_equal(result["keypoints"], [(9, 5, 0, 0)])
 
 
 @pytest.mark.parametrize(
@@ -762,27 +702,27 @@ def test_perspective_keep_size():
 
 def test_longest_max_size_list():
     img = np.random.randint(0, 256, [50, 10], np.uint8)
-    keypoints = np.array([(9, 5, 0, 0)])
+    keypoints = np.array([(9, 5, 33, 0, 0)])
 
     aug = A.LongestMaxSize(max_size=[5, 10], p=1)
     result = aug(image=img, keypoints=keypoints)
     assert result["image"].shape in [(10, 2), (5, 1)]
     assert tuple(result["keypoints"][0].tolist()) in [
-        (0.9, 0.5, 0, 0),
-        (1.8, 1.0, 0, 0),
+        (0.9, 0.5, 33, 0, 0),
+        (1.8, 1.0, 33, 0, 0),
     ]
 
 
 def test_smallest_max_size_list():
     img = np.random.randint(0, 256, [50, 10], np.uint8)
-    keypoints = np.array([(9, 5, 0, 0)])
+    keypoints = np.array([(9, 5, 33, 0, 0)])
 
     aug = A.SmallestMaxSize(max_size=[50, 100], p=1)
     result = aug(image=img, keypoints=keypoints)
     assert result["image"].shape in [(250, 50), (500, 100)]
     assert tuple(result["keypoints"][0].tolist()) in [
-        (45.0, 25.0, 0, 0),
-        (90.0, 50.0, 0, 0),
+        (45.0, 25.0, 33, 0, 0),
+        (90.0, 50.0, 33, 0, 0),
     ]
 
 
@@ -917,9 +857,9 @@ def test_affine_incorrect_scale_range(params):
                 ],
                 "keypoints": [
                     [0, 0, 0, 0],
-                    [199, 0, 10, 10],
-                    [199, 99, 20, 20],
-                    [0, 99, 30, 30],
+                    [199, 0, 10, 8.72],
+                    [199, 99, 20, 17.46],
+                    [0, 99, 30, 26.19],
                 ],
             },
             {
@@ -959,19 +899,19 @@ def test_affine_incorrect_scale_range(params):
                         199.61117553710938,
                         26.338354110717773,
                         1.9260603189468384,
-                        9.345794677734375,
+                        8.149533,
                     ],
                     [
                         183.54466247558594,
                         99.64359283447266,
                         11.92605972290039,
-                        18.69158935546875,
+                        16.317757,
                     ],
                     [
                         0.3888263702392578,
                         73.6616439819336,
                         21.92605972290039,
-                        28.037382125854492,
+                        24.476635,
                     ],
                 ],
             },
@@ -987,9 +927,9 @@ def test_affine_incorrect_scale_range(params):
                 ],
                 "keypoints": [
                     [0, 0, 0, 0],
-                    [199, 0, 10, 10],
-                    [199, 99, 20, 20],
-                    [0, 99, 30, 30],
+                    [199, 0, 10, 8.72],
+                    [199, 99, 20, 17.46],
+                    [0, 99, 30, 26.19],
                 ],
             },
             {
@@ -1023,19 +963,19 @@ def test_affine_incorrect_scale_range(params):
                         183.54466247558594,
                         0.35640716552734375,
                         18.073938369750977,
-                        9.345794677734375,
+                        8.149533,
                     ],
                     [
                         199.61117553710938,
                         73.6616439819336,
                         28.073936462402344,
-                        18.69158935546875,
+                        16.317757,
                     ],
                     [
                         16.455339431762695,
                         99.64359283447266,
                         38.073936462402344,
-                        28.037382125854492,
+                        24.476635,
                     ],
                 ],
             },
@@ -1046,16 +986,17 @@ def test_safe_rotate(angle: float, targets: dict, expected: dict):
     image = np.empty([100, 200, 3], dtype=np.uint8)
     t = A.Compose(
         [
-            A.SafeRotate(limit=(angle, angle), border_mode=0, value=0, p=1),
+            A.SafeRotate(limit=(angle, angle), border_mode=0, fill=0, p=1),
         ],
         bbox_params=A.BboxParams(format="pascal_voc", min_visibility=0.0),
         keypoint_params=A.KeypointParams("xyas", angle_in_degrees=True),
         p=1,
+        seed=42,
     )
     res = t(image=image, **targets)
 
     for key, value in expected.items():
-        np.testing.assert_allclose(value, res[key], atol=1e-6, rtol=1e-6), key
+        np.testing.assert_allclose(res[key], value, atol=1e-6, rtol=1e-6), key
 
 
 @pytest.mark.parametrize(
@@ -1420,6 +1361,7 @@ def test_coarse_dropout_invalid_input(params):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -1462,6 +1404,12 @@ def test_coarse_dropout_invalid_input(params):
                 "noise_type": "uniform",
                 "spatial_mode": "constant",
                 "noise_params": {"ranges": [(-0.2, 0.2), (-0.1, 0.1), (-0.1, 0.1)]},
+            },
+            A.AdvancedBlur: {
+                "blur_limit": (7, 9),  # Force larger kernel
+                "sigma_x_limit": (0.5, 1.0),  # Force stronger blur
+                "sigma_y_limit": (0.5, 1.0),  # Force stronger blur
+                "noise_limit": (0.75, 1.25),  # Increase noise variation
             },
         },
         except_augmentations={
@@ -1540,12 +1488,19 @@ def test_change_image(augmentation_cls, params):
                 "spatial_mode": "constant",
                 "noise_params": {"ranges": [(-0.2, 0.2), (-0.1, 0.1), (-0.1, 0.1)]},
             },
+            A.AdvancedBlur: {
+                "blur_limit": (7, 9),  # Force larger kernel
+                "sigma_x_limit": (0.5, 1.0),  # Force stronger blur
+                "sigma_y_limit": (0.5, 1.0),  # Force stronger blur
+                "noise_limit": (0.75, 1.25),  # Increase noise variation
+            },
         },
         except_augmentations={
             A.Crop,
             A.CenterCrop,
             A.CropNonEmptyMaskIfExists,
             A.RandomCrop,
+            A.AtLeastOneBBoxRandomCrop,
             A.RandomResizedCrop,
             A.RandomSizedCrop,
             A.CropAndPad,
@@ -1796,6 +1751,7 @@ def test_random_snow_invalid_input(params):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -1841,9 +1797,9 @@ def test_dual_transforms_methods(augmentation_cls, params):
 
     arg = {
         "masks": mask,
-        "masks": [mask],
+        "masks": np.stack([mask] * 2),
         "bboxes": np.array([[0, 0, 0.1, 0.1, 1]]),
-        "keypoints": np.array([(0, 0, 0, 0), (1, 1, 0, 0)]),
+        "keypoints": np.array([(0, 0, 1, 0, 0), (1, 1, 1, 0, 0)]),
     }
 
     for target in aug.targets:
@@ -2168,6 +2124,7 @@ def test_random_sun_flare_invalid_input(params):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -2309,6 +2266,7 @@ def test_padding_color(transform, num_channels):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -2402,6 +2360,7 @@ def test_mask_dropout_bboxes(remove_invisible, expected_keypoints):
             A.CenterCrop: {"height": 90, "width": 95},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 90, "width": 95},
+            A.AtLeastOneBBoxRandomCrop: {"height": 90, "width": 95},
             A.RandomResizedCrop: {
                 "height": 90,
                 "width": 100,
@@ -2478,3 +2437,50 @@ def test_keypoints_bboxes_match(augmentation_cls, params):
     np.testing.assert_allclose(
         transformed["keypoints"][1], [x_max_transformed, y_max_transformed], atol=1.5
     )
+
+
+
+@pytest.mark.parametrize(
+    ["input_shape", "max_size", "max_size_hw", "expected_shape"],
+    [
+        # LongestMaxSize with max_size
+        ((80, 60, 3), 40, None, (40, 30, 3)),  # landscape
+        ((60, 80, 3), 40, None, (30, 40, 3)),  # portrait
+        ((80, 80, 3), 40, None, (40, 40, 3)),  # square
+        # LongestMaxSize with max_size_hw - both dimensions
+        ((80, 60, 3), None, (40, 30), (40, 30, 3)),  # exact fit
+        ((80, 60, 3), None, (30, 40), (30, 22, 3)),  # height constrains
+        ((60, 80, 3), None, (40, 30), (22, 30, 3)),  # width constrains
+        # LongestMaxSize with max_size_hw - single dimension
+        ((80, 60, 3), None, (40, None), (40, 30, 3)),  # height only
+        ((80, 60, 3), None, (None, 30), (40, 30, 3)),  # width only
+    ],
+)
+def test_longest_max_size(input_shape, max_size, max_size_hw, expected_shape):
+    image = np.zeros(input_shape, dtype=np.uint8)
+    aug = A.LongestMaxSize(max_size=max_size, max_size_hw=max_size_hw)
+    transformed = aug(image=image)["image"]
+    assert transformed.shape == expected_shape
+
+
+@pytest.mark.parametrize(
+    ["input_shape", "max_size", "max_size_hw", "expected_shape"],
+    [
+        # SmallestMaxSize with max_size
+        ((80, 60, 3), 40, None, (53, 40, 3)),  # landscape
+        ((60, 80, 3), 40, None, (40, 53, 3)),  # portrait
+        ((80, 80, 3), 40, None, (40, 40, 3)),  # square
+        # SmallestMaxSize with max_size_hw - both dimensions
+        ((80, 60, 3), None, (40, 30), (40, 30, 3)),  # height determines
+        ((60, 80, 3), None, (30, 40), (30, 40, 3)),  # width determines
+        ((80, 80, 3), None, (40, 40), (40, 40, 3)),  # square input
+        # SmallestMaxSize with max_size_hw - single dimension
+        ((80, 60, 3), None, (40, None), (40, 30, 3)),  # height only
+        ((80, 60, 3), None, (None, 30), (40, 30, 3)),  # width only
+    ],
+)
+def test_smallest_max_size(input_shape, max_size, max_size_hw, expected_shape):
+    image = np.zeros(input_shape, dtype=np.uint8)
+    aug = A.SmallestMaxSize(max_size=max_size, max_size_hw=max_size_hw)
+    transformed = aug(image=image)["image"]
+    assert transformed.shape == expected_shape

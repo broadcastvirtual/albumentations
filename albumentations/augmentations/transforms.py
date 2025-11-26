@@ -14,6 +14,7 @@ import numpy as np
 from albucore import (
     MAX_VALUES_BY_DTYPE,
     NUM_MULTI_CHANNEL_DIMENSIONS,
+    batch_transform,
     clip,
     from_float,
     get_num_channels,
@@ -265,6 +266,18 @@ class Normalize(ImageOnlyTransform):
                 self.denominator,
             )
         return normalize_per_image(img, self.normalization)
+
+    @batch_transform("channel", has_batch_dim=True, has_depth_dim=False)
+    def apply_to_images(self, images: np.ndarray, **params: Any) -> np.ndarray:
+        return self.apply(images, **params)
+
+    @batch_transform("channel", has_batch_dim=False, has_depth_dim=True)
+    def apply_to_volume(self, volume: np.ndarray, **params: Any) -> np.ndarray:
+        return self.apply(volume, **params)
+
+    @batch_transform("channel", has_batch_dim=True, has_depth_dim=True)
+    def apply_to_volumes(self, volumes: np.ndarray, **params: Any) -> np.ndarray:
+        return self.apply(volumes, **params)
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return "mean", "std", "max_pixel_value", "normalization"
@@ -990,7 +1003,7 @@ class RandomFog(ImageOnlyTransform):
         uint8, float32
 
     Number of channels:
-        Any
+        3
 
     Note:
         - The fog effect is created by overlaying semi-transparent circles on the image.
@@ -1097,6 +1110,7 @@ class RandomFog(ImageOnlyTransform):
         intensity: float,
         **params: Any,
     ) -> np.ndarray:
+        non_rgb_error(img)
         return fmain.add_fog(
             img,
             intensity,
@@ -1208,8 +1222,7 @@ class RandomSunFlare(ImageOnlyTransform):
         uint8, float32
 
     Number of channels:
-        - overlay: Any
-        - physics_based: RGB
+        3
 
     Note:
         The transform offers two methods for generating sun flares:
@@ -1416,6 +1429,7 @@ class RandomSunFlare(ImageOnlyTransform):
         circles: list[Any],
         **params: Any,
     ) -> np.ndarray:
+        non_rgb_error(img)
         if self.method == "overlay":
             return fmain.add_sun_flare_overlay(
                 img,
@@ -1425,7 +1439,6 @@ class RandomSunFlare(ImageOnlyTransform):
                 circles,
             )
         if self.method == "physics_based":
-            non_rgb_error(img)
             return fmain.add_sun_flare_physics_based(
                 img,
                 flare_center,
@@ -2522,9 +2535,7 @@ class GaussNoise(ImageOnlyTransform):
     """
 
     class InitSchema(BaseTransformInitSchema):
-        var_limit: ScaleFloatType | None = Field(
-            deprecated="var_limit parameter is deprecated. Use std_range instead.",
-        )
+        var_limit: ScaleFloatType | None
         mean: float | None
         std_range: Annotated[
             tuple[float, float],
@@ -2542,6 +2553,7 @@ class GaussNoise(ImageOnlyTransform):
         @model_validator(mode="after")
         def check_range(self) -> Self:
             if self.var_limit is not None:
+                warnings.warn("`var_limit` deprecated. Use `std_range` instead.", DeprecationWarning, stacklevel=2)
                 self.var_limit = to_tuple(self.var_limit, 0)
                 if self.var_limit[1] > 1:
                     # Convert legacy uint8 variance to normalized std dev

@@ -37,6 +37,8 @@ from albumentations.core.types import (
 from . import functional as fcrops
 
 __all__ = [
+    "AtLeastOneBBoxRandomCrop",
+    "AtLeastOneBBoxRandomCrop",
     "BBoxSafeRandomCrop",
     "CenterCrop",
     "Crop",
@@ -296,17 +298,20 @@ class RandomCrop(BaseCropAndPad):
         border_mode: BorderModeType
         fill: ColorType
         fill_mask: ColorType
-        pad_mode: BorderModeType | None = Field(deprecated="pad_mode is deprecated, use border_mode instead ")
-        pad_cval: ColorType | None = Field(deprecated="pad_cval is deprecated, use fill instead")
-        pad_cval_mask: ColorType | None = Field(deprecated="pad_cval_mask is deprecated, use fill_mask instead")
+        pad_mode: BorderModeType | None
+        pad_cval: ColorType | None
+        pad_cval_mask: ColorType | None
 
         @model_validator(mode="after")
         def validate_dimensions(self) -> Self:
             if self.pad_mode is not None:
+                warn("pad_mode is deprecated, use border_mode instead", DeprecationWarning, stacklevel=2)
                 self.border_mode = self.pad_mode
             if self.pad_cval is not None:
+                warn("pad_cval is deprecated, use fill instead", DeprecationWarning, stacklevel=2)
                 self.fill = self.pad_cval
             if self.pad_cval_mask is not None:
+                warn("pad_cval_mask is deprecated, use fill_mask instead", DeprecationWarning, stacklevel=2)
                 self.fill_mask = self.pad_cval_mask
             return self
 
@@ -1285,17 +1290,35 @@ class RandomCropNearBBox(BaseCrop):
 
 
 class BBoxSafeRandomCrop(BaseCrop):
-    """Crop a random part of the input without loss of bounding boxes.
+    """Crop an area from image while ensuring all bounding boxes are preserved in the crop.
 
-    This transform performs a random crop of the input image while ensuring that all bounding boxes remain within
-    the cropped area. It's particularly useful for object detection tasks where preserving all objects in the image
-    is crucial.
+    Similar to AtLeastOneBboxRandomCrop, but with a key difference:
+    - BBoxSafeRandomCrop ensures ALL bounding boxes are preserved in the crop
+    - AtLeastOneBboxRandomCrop ensures AT LEAST ONE bounding box is present in the crop
+
+    This makes BBoxSafeRandomCrop more suitable for scenarios where:
+    - You need to preserve all objects in the scene
+    - Losing any bounding box would be problematic (e.g., rare object classes)
+    - You're training a model that needs to detect multiple objects simultaneously
+
+    The algorithm:
+    1. If bounding boxes exist:
+        - Computes the union of all bounding boxes
+        - Applies erosion based on erosion_rate to this union
+        - Clips the eroded union to valid image coordinates [0,1]
+        - Randomly samples crop coordinates within the clipped union area
+    2. If no bounding boxes exist:
+        - Computes crop height based on erosion_rate
+        - Sets crop width to maintain original aspect ratio
+        - Randomly places the crop within the image
 
     Args:
-        erosion_rate (float): A value between 0.0 and 1.0 that determines the minimum allowable size of the crop
-            as a fraction of the original image size. For example, an erosion_rate of 0.2 means the crop will be
-            at least 80% of the original image height. Default: 0.0 (no minimum size).
-        p (float): Probability of applying the transform. Default: 1.0.
+        erosion_rate (float): Controls how much the valid crop region can deviate from the bbox union.
+            Must be in range [0.0, 1.0].
+            - 0.0: crop must contain the exact bbox union
+            - 1.0: crop can deviate maximally from the bbox union while still containing all boxes
+            Defaults to 0.0.
+        p (float, optional): Probability of applying the transform. Defaults to 1.0.
 
     Targets:
         image, mask, bboxes, keypoints, volume, mask3d
@@ -1303,22 +1326,25 @@ class BBoxSafeRandomCrop(BaseCrop):
     Image types:
         uint8, float32
 
-    Note:
-        This transform ensures that all bounding boxes in the original image are fully contained within the
-        cropped area. If it's not possible to find such a crop (e.g., when bounding boxes are too spread out),
-        it will default to cropping the entire image.
+    Raises:
+        CropSizeError: If requested crop size exceeds image dimensions
 
     Example:
-        >>> import numpy as np
         >>> import albumentations as A
-        >>> image = np.ones((300, 300, 3), dtype=np.uint8)
-        >>> bboxes = [(10, 10, 50, 50), (100, 100, 150, 150)]
-        >>> transform = A.Compose([
-        ...     A.BBoxSafeRandomCrop(erosion_rate=0.2, p=1.0),
-        ... ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
-        >>> transformed = transform(image=image, bboxes=bboxes, labels=['cat', 'dog'])
-        >>> transformed_image = transformed['image']
-        >>> transformed_bboxes = transformed['bboxes']
+        >>> transform = A.BBoxSafeRandomCrop(erosion_rate=0.2)
+        >>> result = transform(
+        ...     image=image,
+        ...     bboxes=[[0.1, 0.2, 0.5, 0.7, 'cat'], [0.3, 0.4, 0.6, 0.8, 'dog']],
+        ...     bbox_format='yolo'  # or 'coco', 'pascal_voc'
+        ... )
+        >>> transformed_image = result['image']
+        >>> transformed_bboxes = result['bboxes']
+
+    Note:
+        - All bounding boxes will be preserved in their entirety
+        - Aspect ratio is preserved only when no bounding boxes are present
+        - May be more restrictive in crop placement compared to AtLeastOneBboxRandomCrop
+        - The crop size is determined by the bounding boxes when present
     """
 
     _targets = ALL_TARGETS
@@ -1989,3 +2015,178 @@ class RandomCropFromBorders(BaseCrop):
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return "crop_left", "crop_right", "crop_top", "crop_bottom"
+
+
+class AtLeastOneBBoxRandomCrop(BaseCrop):
+    """Crop an area from image while ensuring at least one bounding box is present in the crop.
+
+    Similar to BBoxSafeRandomCrop, but with a key difference:
+    - BBoxSafeRandomCrop ensures ALL bounding boxes are preserved in the crop
+    - AtLeastOneBBoxRandomCrop ensures AT LEAST ONE bounding box is present in the crop
+
+    This makes AtLeastOneBBoxRandomCrop more flexible for scenarios where:
+    - You want to focus on individual objects rather than all objects
+    - You're willing to lose some bounding boxes to get more varied crops
+    - The image has many bounding boxes and keeping all of them would be too restrictive
+
+    The algorithm:
+    1. If bounding boxes exist:
+        - Randomly selects a reference bounding box from available boxes
+        - Computes an eroded version of this box (shrunk by erosion_factor)
+        - Calculates valid crop bounds that ensure overlap with the eroded box
+        - Randomly samples crop coordinates within these bounds
+    2. If no bounding boxes exist:
+        - Uses full image dimensions as valid bounds
+        - Randomly samples crop coordinates within these bounds
+
+    Args:
+        height (int): Fixed height of the crop
+        width (int): Fixed width of the crop
+        erosion_factor (float, optional): Factor by which to erode (shrink) the reference
+            bounding box when computing valid crop regions. Must be in range [0.0, 1.0].
+            - 0.0 means no erosion (crop must fully contain the reference box)
+            - 1.0 means maximum erosion (crop can be anywhere that intersects the reference box)
+            Defaults to 0.0.
+        p (float, optional): Probability of applying the transform. Defaults to 1.0.
+
+    Targets:
+        image, mask, bboxes, keypoints, volume, mask3d
+
+    Image types:
+        uint8, float32
+
+    Raises:
+        CropSizeError: If requested crop size exceeds image dimensions
+
+    Example:
+        >>> import albumentations as A
+        >>> transform = A.AtLeastOneBBoxRandomCrop(height=100, width=100)
+        >>> result = transform(
+        ...     image=image,
+        ...     bboxes=[[0.1, 0.2, 0.5, 0.7, 'cat']],
+        ...     bbox_format='yolo'  # or 'coco', 'pascal_voc'
+        ... )
+        >>> transformed_image = result['image']
+        >>> transformed_bboxes = result['bboxes']
+
+    Note:
+        - Uses fixed crop dimensions (height and width)
+        - Bounding boxes that end up partially outside the crop will be adjusted
+        - Bounding boxes that end up completely outside the crop will be removed
+        - If no bounding boxes are provided, acts as a regular random crop
+    """
+
+    _targets = ALL_TARGETS
+
+    class InitSchema(BaseCrop.InitSchema):
+        height: Annotated[int, Field(ge=1)]
+        width: Annotated[int, Field(ge=1)]
+        erosion_factor: Annotated[float, Field(ge=0.0, le=1.0)]
+
+    def __init__(
+        self,
+        height: int,
+        width: int,
+        erosion_factor: float = 0.0,
+        p: float = 1.0,
+        always_apply: bool | None = None,
+    ):
+        super().__init__(p=p, always_apply=always_apply)
+        self.height = height
+        self.width = width
+        self.erosion_factor = erosion_factor
+
+    def get_params_dependent_on_data(
+        self,
+        params: dict[str, Any],
+        data: dict[str, Any],
+    ) -> dict[str, tuple[int, int, int, int]]:
+        image_height, image_width = params["shape"][:2]
+        bboxes = data.get("bboxes", [])
+
+        if self.height > image_height or self.width > image_width:
+            raise CropSizeError(
+                f"Crop size (height, width) exceeds image dimensions (height, width):"
+                f" {(self.height, self.width)} vs {image_height, image_width}",
+            )
+
+        if len(bboxes) > 0:
+            # Pick a bbox amongst all possible as our reference bbox.
+            bboxes = denormalize_bboxes(bboxes, shape=(image_height, image_width))
+            reference_bbox = self.py_random.choice(bboxes)
+
+            bbox_x1, bbox_y1, bbox_x2, bbox_y2 = reference_bbox[:4]
+
+            # Compute valid crop bounds:
+            # erosion_factor = 0.0: crop must fully contain the bbox
+            # erosion_factor = 1.0: crop can be anywhere that intersects the bbox
+            if self.erosion_factor < 1.0:
+                # Regular case: compute eroded box dimensions
+                bbox_width = bbox_x2 - bbox_x1
+                bbox_height = bbox_y2 - bbox_y1
+                eroded_width = bbox_width * (1.0 - self.erosion_factor)
+                eroded_height = bbox_height * (1.0 - self.erosion_factor)
+
+                min_crop_x = np.clip(
+                    a=bbox_x1 + eroded_width - self.width,
+                    a_min=0.0,
+                    a_max=image_width - self.width,
+                )
+                max_crop_x = np.clip(
+                    a=bbox_x2 - eroded_width,
+                    a_min=0.0,
+                    a_max=image_width - self.width,
+                )
+
+                min_crop_y = np.clip(
+                    a=bbox_y1 + eroded_height - self.height,
+                    a_min=0.0,
+                    a_max=image_height - self.height,
+                )
+                max_crop_y = np.clip(
+                    a=bbox_y2 - eroded_height,
+                    a_min=0.0,
+                    a_max=image_height - self.height,
+                )
+            else:
+                # Maximum erosion case: crop can be anywhere that intersects the bbox
+                min_crop_x = np.clip(
+                    a=bbox_x1 - self.width,  # leftmost position that still intersects
+                    a_min=0.0,
+                    a_max=image_width - self.width,
+                )
+                max_crop_x = np.clip(
+                    a=bbox_x2,  # rightmost position that still intersects
+                    a_min=0.0,
+                    a_max=image_width - self.width,
+                )
+
+                min_crop_y = np.clip(
+                    a=bbox_y1 - self.height,  # topmost position that still intersects
+                    a_min=0.0,
+                    a_max=image_height - self.height,
+                )
+                max_crop_y = np.clip(
+                    a=bbox_y2,  # bottommost position that still intersects
+                    a_min=0.0,
+                    a_max=image_height - self.height,
+                )
+        else:
+            # If there are no bboxes, just crop anywhere in the image.
+            min_crop_x = 0.0
+            max_crop_x = image_width - self.width
+
+            min_crop_y = 0.0
+            max_crop_y = image_height - self.height
+
+        # Randomly draw the upper-left corner of the crop.
+        crop_x1 = int(self.py_random.uniform(a=min_crop_x, b=max_crop_x))
+        crop_y1 = int(self.py_random.uniform(a=min_crop_y, b=max_crop_y))
+
+        crop_x2 = crop_x1 + self.width
+        crop_y2 = crop_y1 + self.height
+
+        return {"crop_coords": (crop_x1, crop_y1, crop_x2, crop_y2)}
+
+    def get_transform_init_args_names(self) -> tuple[str, ...]:
+        return "height", "width", "erosion_factor"

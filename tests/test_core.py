@@ -1,7 +1,7 @@
 import typing
 from unittest import mock
 from unittest.mock import MagicMock, Mock, call, patch
-
+import torch
 import cv2
 import numpy as np
 import pytest
@@ -21,7 +21,7 @@ from albumentations.core.composition import (
     SomeOf,
 )
 from albumentations.core.transforms_interface import DualTransform, ImageOnlyTransform, NoOp
-from albumentations.core.utils import to_tuple
+from albumentations.core.utils import to_tuple, get_shape
 from tests.conftest import (
     IMAGES,
     SQUARE_FLOAT_IMAGE,
@@ -375,7 +375,7 @@ def test_targets_type_check(targets, additional_targets, err_message):
 def test_check_each_transform(targets, bbox_params, keypoint_params, expected):
     image = np.empty([100, 100], dtype=np.uint8)
     augs = Compose(
-        [A.Crop(0, 0, 50, 50), A.PadIfNeeded(100, 100, border_mode=cv2.BORDER_CONSTANT, value=0)],
+        [A.Crop(0, 0, 50, 50), A.PadIfNeeded(100, 100, border_mode=cv2.BORDER_CONSTANT, fill=0)],
         bbox_params=bbox_params,
         keypoint_params=keypoint_params,
     )
@@ -693,6 +693,7 @@ def test_single_transform_compose(
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"size": (10, 10)},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "size": (10, 10)},
             A.CropAndPad: {"px": 10},
@@ -724,6 +725,7 @@ def test_single_transform_compose(
             A.BBoxSafeRandomCrop,
             A.OverlayElements,
             A.TextImage,
+            A.RandomCropNearBBox,
         },
     ),
 )
@@ -1069,6 +1071,7 @@ def test_transform_always_apply_warning() -> None:
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"size": (10, 10)},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "size": (10, 10)},
             A.CropAndPad: {"px": 10},
@@ -1105,6 +1108,7 @@ def test_transform_always_apply_warning() -> None:
             A.BBoxSafeRandomCrop,
             A.OverlayElements,
             A.TextImage,
+            A.RandomCropNearBBox,
         },
     ),
 )
@@ -1114,7 +1118,7 @@ def test_images_as_target(augmentation_cls, params, as_array, shape):
     if len(shape) == 2:
         if augmentation_cls in {A.ChannelDropout, A.Spatter, A.ISONoise,
                                 A.RandomGravel, A.ChromaticAberration, A.PlanckianJitter, A.PixelDistributionAdaptation,
-                                A.MaskDropout, A.ChannelShuffle, A.ToRGB}:
+                                A.MaskDropout, A.ChannelShuffle, A.ToRGB, A.RandomSunFlare, A.RandomFog, A.RandomSnow, A.RandomRain}:
             pytest.skip("ChannelDropout is not applicable to grayscale images")
 
 
@@ -1160,7 +1164,7 @@ def test_images_as_target(augmentation_cls, params, as_array, shape):
         if len(shape) == 3:
             assert transformed["images"].shape[-1] == image.shape[2]  # Channels match input
 
-        if augmentation_cls not in [A.RandomCrop, A.RandomResizedCrop, A.Resize, A.RandomSizedCrop, A.RandomSizedBBoxSafeCrop,
+        if augmentation_cls not in [A.RandomCrop, A.AtLeastOneBBoxRandomCrop, A.RandomResizedCrop, A.Resize, A.RandomSizedCrop, A.RandomSizedBBoxSafeCrop,
                                     A.BBoxSafeRandomCrop, A.Transpose, A.RandomCropNearBBox, A.CenterCrop, A.Crop, A.CropAndPad,
                                     A.LongestMaxSize, A.RandomScale, A.PadIfNeeded, A.SmallestMaxSize, A.RandomCropFromBorders,
                                     A.RandomRotate90, A.D4]:
@@ -1198,6 +1202,7 @@ def test_images_as_target(augmentation_cls, params, as_array, shape):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -1214,6 +1219,9 @@ def test_images_as_target(augmentation_cls, params, as_array, shape):
             },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
+        },
+        except_augmentations={
+            A.RandomCropNearBBox,
         },
     ),
 )
@@ -1292,6 +1300,7 @@ def test_non_contiguous_input_with_compose(augmentation_cls, params, bboxes):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"size": (10, 10)},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "size": (10, 10)},
             A.CropAndPad: {"px": 10},
@@ -1330,6 +1339,8 @@ def test_non_contiguous_input_with_compose(augmentation_cls, params, bboxes):
             A.TextImage,
             A.FromFloat,
             A.MaskDropout,
+            A.RandomCropNearBBox,
+            A.PadIfNeeded,
         },
     ),
 )
@@ -1378,6 +1389,7 @@ def test_masks_as_target(augmentation_cls, params, masks):
             A.PixelDistributionAdaptation,
             A.PadIfNeeded,
             A.RandomCrop,
+            A.AtLeastOneBBoxRandomCrop,
             A.Crop,
             A.CenterCrop,
             A.FDA,
@@ -1394,6 +1406,11 @@ def test_masks_as_target(augmentation_cls, params, masks):
             A.TimeMasking,
             A.FrequencyMasking,
             A.Erasing,
+            A.ElasticTransform,
+            A.RandomCropNearBBox,
+            A.GridDropout,
+            A.CoarseDropout,
+            A.PadIfNeeded,
         },
     ),
 )
@@ -1406,7 +1423,7 @@ def test_mask_interpolation(augmentation_cls, params, interpolation):
     image = SQUARE_UINT8_IMAGE
     mask = image.copy()
 
-    aug = A.Compose([augmentation_cls(p=1, interpolation=interpolation, mask_interpolation=interpolation, seed=42,**params)])
+    aug = A.Compose([augmentation_cls(p=1, interpolation=interpolation, mask_interpolation=interpolation, **params)], seed=42)
 
     transformed = aug(image=image, mask=mask)
 
@@ -1573,3 +1590,104 @@ def test_compose_probability():
     result = transform(image=np.zeros((100, 100, 3), dtype=np.uint8))
 
     assert len(result["applied_transforms"]) == 0
+
+
+@pytest.mark.parametrize(
+    ["data", "expected_shape"],
+    [
+        # Test numpy image formats
+        (
+            {"image": np.zeros((100, 200, 3))},  # HWC
+            {"height": 100, "width": 200},
+        ),
+        (
+            {"image": np.zeros((100, 200))},  # HW
+            {"height": 100, "width": 200},
+        ),
+        (
+            {"images": [np.zeros((100, 200, 3)), np.zeros((100, 200, 3))]},  # N×HWC
+            {"height": 100, "width": 200},
+        ),
+
+        # Test torch image formats
+        (
+            {"image": torch.zeros(3, 100, 200)},  # CHW
+            {"height": 100, "width": 200},
+        ),
+        (
+            {"image": torch.zeros(1, 100, 200)},  # 1HW
+            {"height": 100, "width": 200},
+        ),
+        (
+            {"images": torch.zeros(5, 3, 100, 200)},  # NCHW
+            {"height": 100, "width": 200},
+        ),
+
+        # Test numpy volume formats
+        (
+            {"volume": np.zeros((50, 100, 200, 3))},  # DHWC
+            {"depth": 50, "height": 100, "width": 200},
+        ),
+        (
+            {"volume": np.zeros((50, 100, 200))},  # DHW
+            {"depth": 50, "height": 100, "width": 200},
+        ),
+
+        # Test torch volume formats
+        (
+            {"volume": torch.zeros(3, 50, 100, 200)},  # CDHW
+            {"depth": 50, "height": 100, "width": 200},
+        ),
+        (
+            {"volume": torch.zeros(1, 50, 100, 200)},  # 1DHW
+            {"depth": 50, "height": 100, "width": 200},
+        ),
+    ],
+)
+def test_get_shape(data, expected_shape):
+    assert get_shape(data) == expected_shape
+
+
+@pytest.mark.parametrize(
+    ["data", "error_type", "error_message"],
+    [
+        (
+            {},
+            ValueError,
+            "No image or volume found in data",
+        ),
+        (
+            {"wrong_key": np.zeros((100, 200))},
+            ValueError,
+            "No image or volume found in data",
+        ),
+        (
+            {"image": "not_an_array"},
+            RuntimeError,
+            "Unsupported image type: <class 'str'>",
+        ),
+        (
+            {"volume": "not_an_array"},
+            RuntimeError,
+            "Unsupported volume type: <class 'str'>",
+        ),
+    ],
+)
+def test_get_shape_errors(data, error_type, error_message):
+    with pytest.raises(error_type, match=error_message):
+        get_shape(data)
+
+
+@pytest.mark.parametrize(
+    "key", ["image", "images", "volume"]
+)
+def test_get_shape_empty_arrays(key):
+    # Test that empty arrays don't cause issues
+    if key == "images":
+        data = {key: [np.zeros((0, 0, 3))]}
+    else:
+        data = {key: np.zeros((0, 0, 3))}
+
+    shape = get_shape(data)
+    assert isinstance(shape, dict)
+    assert all(isinstance(v, int) for v in shape.values())

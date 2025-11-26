@@ -9,8 +9,8 @@ INSTALL_REQUIRES = [
     "PyYAML",
     "typing-extensions>=4.9.0; python_version<'3.10'",
     "pydantic>=2.9.2",
-    "albucore==0.0.21",
-    "eval-type-backport",
+    "albucore==0.0.23",
+    "eval-type-backport; python_version<'3.10'",
 ]
 
 MIN_OPENCV_VERSION = "4.9.0.80"

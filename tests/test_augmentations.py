@@ -117,6 +117,7 @@ def test_image_only_augmentations(augmentation_cls, params):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -141,10 +142,12 @@ def test_dual_augmentations(augmentation_cls, params):
     image = SQUARE_UINT8_IMAGE
     mask = image[:, :, 0].copy()
     aug = A.Compose([augmentation_cls(p=1, **params)])
+    data = {"image": image, "mask": mask}
     if augmentation_cls == A.OverlayElements:
-        data = aug(image=image, mask=mask, overlay_metadata=[])
-    else:
-        data = aug(image=image, mask=mask)
+        data["overlay_metadata"] = []
+    elif augmentation_cls == A.RandomCropNearBBox:
+        data["cropping_bbox"] = [0, 0, 10, 10]
+    data = aug(**data)
     assert data["image"].dtype == image.dtype
     assert data["mask"].dtype == mask.dtype
 
@@ -157,6 +160,7 @@ def test_dual_augmentations(augmentation_cls, params):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -181,10 +185,15 @@ def test_dual_augmentations_with_float_values(augmentation_cls, params):
     image = SQUARE_FLOAT_IMAGE
     mask = image.copy()[:, :, 0].astype(np.uint8)
     aug = augmentation_cls(p=1, **params)
+
+    data = {"image": image, "mask": mask}
+
     if augmentation_cls == A.OverlayElements:
-        data = aug(image=image, mask=mask, overlay_metadata=[])
-    else:
-        data = aug(image=image, mask=mask)
+        data["overlay_metadata"] = []
+    elif augmentation_cls == A.RandomCropNearBBox:
+        data["cropping_bbox"] = [0, 0, 10, 10]
+
+    data = aug(**data)
 
     assert data["image"].dtype == np.float32
     assert data["mask"].dtype == np.uint8
@@ -211,6 +220,7 @@ def test_dual_augmentations_with_float_values(augmentation_cls, params):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -236,22 +246,26 @@ def test_dual_augmentations_with_float_values(augmentation_cls, params):
     ),
 )
 def test_augmentations_wont_change_input(augmentation_cls, params):
+
     image = SQUARE_FLOAT_IMAGE if augmentation_cls == A.FromFloat else SQUARE_UINT8_IMAGE
     mask = image[:, :, 0].copy()
     image_copy = image.copy()
     mask_copy = mask.copy()
     aug = augmentation_cls(p=1, **params)
 
+    data = {"image": image, "mask": mask}
+
     if augmentation_cls == A.OverlayElements:
-        aug(image=image, mask=mask, overlay_metadata=[])
+        data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
-        aug(
-            image=image,
-            mask=mask,
-            textimage_metadata={"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)},
-        )
-    else:
-        aug(image=image, mask=mask)
+        data["textimage_metadata"] = {
+            "text": "May the transformations be ever in your favor!",
+            "bbox": (0.1, 0.1, 0.9, 0.2),
+        }
+    elif augmentation_cls == A.RandomCropNearBBox:
+        data["cropping_bbox"] = [0, 0, 10, 10]
+
+    aug(**data)
 
     np.testing.assert_array_equal(image, image_copy)
     np.testing.assert_array_equal(mask, mask_copy)
@@ -279,6 +293,7 @@ def test_augmentations_wont_change_input(augmentation_cls, params):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -323,6 +338,8 @@ def test_augmentations_wont_change_float_input(augmentation_cls, params):
         mask = np.zeros_like(image)[:, :, 0]
         mask[:20, :20] = 1
         data["mask"] = mask
+    elif augmentation_cls == A.RandomCropNearBBox:
+        data["cropping_bbox"] = [0, 0, 10, 10]
 
     aug(**data)
 
@@ -372,6 +389,7 @@ def test_augmentations_wont_change_float_input(augmentation_cls, params):
             A.Crop,
             A.CropNonEmptyMaskIfExists,
             A.RandomCrop,
+            A.AtLeastOneBBoxRandomCrop,
             A.RandomResizedCrop,
             A.RandomSizedCrop,
             A.CropAndPad,
@@ -390,6 +408,8 @@ def test_augmentations_wont_change_float_input(augmentation_cls, params):
             A.PlanckianJitter,
             A.RandomRain,
             A.RandomGravel,
+            A.RandomSunFlare,
+            A.RandomFog,
         },
     ),
 )
@@ -462,6 +482,7 @@ def test_augmentations_wont_change_shape_grayscale(augmentation_cls, params, sha
             A.Crop,
             A.CropNonEmptyMaskIfExists,
             A.RandomCrop,
+            A.AtLeastOneBBoxRandomCrop,
             A.RandomResizedCrop,
             A.RandomSizedCrop,
             A.CropAndPad,
@@ -557,6 +578,7 @@ def test_mask_fill_value(augmentation_cls, params):
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -602,6 +624,8 @@ def test_mask_fill_value(augmentation_cls, params):
             A.Spatter,
             A.ChromaticAberration,
             A.PlanckianJitter,
+            A.RandomSunFlare,
+            A.RandomFog,
         },
     ),
 )
@@ -645,6 +669,7 @@ def test_multichannel_image_augmentations(augmentation_cls, params):
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -691,6 +716,8 @@ def test_multichannel_image_augmentations(augmentation_cls, params):
             A.Spatter,
             A.ChromaticAberration,
             A.PlanckianJitter,
+            A.RandomSunFlare,
+            A.RandomFog,
         },
     ),
 )
@@ -726,6 +753,7 @@ def test_float_multichannel_image_augmentations(augmentation_cls, params):
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -774,6 +802,8 @@ def test_float_multichannel_image_augmentations(augmentation_cls, params):
             A.Spatter,
             A.ChromaticAberration,
             A.PlanckianJitter,
+            A.RandomSunFlare,
+            A.RandomFog,
         },
     ),
 )
@@ -811,6 +841,7 @@ def test_multichannel_image_augmentations_diff_channels(augmentation_cls, params
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -859,6 +890,8 @@ def test_multichannel_image_augmentations_diff_channels(augmentation_cls, params
             A.Spatter,
             A.ChromaticAberration,
             A.PlanckianJitter,
+            A.RandomSunFlare,
+            A.RandomFog,
         },
     ),
 )
@@ -1053,6 +1086,7 @@ def test_pad_if_needed_position(params, image_shape):
             A.CenterCrop: {"height": 10, "width": 10},
             A.CropNonEmptyMaskIfExists: {"height": 10, "width": 10},
             A.RandomCrop: {"height": 10, "width": 10},
+            A.AtLeastOneBBoxRandomCrop: {"height": 10, "width": 10},
             A.RandomResizedCrop: {"height": 10, "width": 10},
             A.RandomSizedCrop: {"min_max_height": (4, 8), "height": 10, "width": 10},
             A.CropAndPad: {"px": 10},
@@ -1099,6 +1133,8 @@ def test_augmentations_match_uint8_float32(augmentation_cls, params):
         mask = np.zeros_like(image_uint8)[:, :, 0]
         mask[:20, :20] = 1
         data["mask"] = mask
+    elif augmentation_cls == A.RandomCropNearBBox:
+        data["cropping_bbox"] = [12, 77, 177, 231]
 
     transformed_uint8 = transform(**data)["image"]
 
@@ -1113,11 +1149,11 @@ def test_augmentations_match_uint8_float32(augmentation_cls, params):
 def test_solarize_threshold():
     image = SQUARE_UINT8_IMAGE
     image[20:40, 20:40] = 255
-    transform = A.Solarize(threshold=128, p=1)
+    transform = A.Solarize(threshold_range = (0.5, 0.5), p=1)
     transformed_image = transform(image=image)["image"]
     assert (transformed_image[20:40, 20:40] == 0).all()
 
-    transform = A.Solarize(threshold=0.5, p=1)
+    transform = A.Solarize(threshold_range=(0.5, 0.5), p=1)
 
     float_image = SQUARE_FLOAT_IMAGE
     float_image[20:40, 20:40] = 1

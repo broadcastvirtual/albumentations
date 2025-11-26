@@ -154,6 +154,7 @@ AUGMENTATION_CLS_PARAMS = [
     ],
     [A.CenterCrop, {"height": 10, "width": 10}],
     [A.RandomCrop, {"height": 10, "width": 10}],
+    [A.AtLeastOneBBoxRandomCrop, {"height": 10, "width": 10}],
     [A.CropNonEmptyMaskIfExists, {"height": 10, "width": 10}],
     [A.RandomSizedCrop, {"min_max_height": (4, 8), "height": 10, "width": 10}],
     [A.Crop, {"x_max": 64, "y_max": 64}],
@@ -269,7 +270,6 @@ AUGMENTATION_CLS_PARAMS = [
     [A.ChannelDropout, dict(channel_drop_range=(1, 2), fill=1)],
     [A.ChannelShuffle, {}],
     [A.Downscale, dict(scale_min=0.5, scale_max=0.75, interpolation=cv2.INTER_LINEAR)],
-    [A.Flip, {}],
     [A.FromFloat, dict(dtype="uint8", max_value=1)],
     [A.HorizontalFlip, {}],
     [A.ISONoise, dict(color_shift=(0.2, 0.3), intensity=(0.7, 0.9))],
@@ -410,4 +410,5 @@ AUGMENTATION_CLS_PARAMS = [
     [A.RandomCrop3D, {"size": (2, 30, 30)}],
     [A.CoarseDropout3D, {"num_holes_range": (1, 3), "hole_depth_range": (0.1, 0.2), "hole_height_range": (0.1, 0.2), "hole_width_range": (0.1, 0.2), "fill": 0, "fill_mask": None}],
     [A.CubicSymmetry, {}],
+    [A.AtLeastOneBBoxRandomCrop, {"height": 10, "width": 10, "erosion_factor": 0.2}],
 ]
