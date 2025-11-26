@@ -56,9 +56,6 @@ from albumentations.core.pydantic import (
     ProbabilityType,
     SymmetricRangeType,
     ZeroOneRangeType,
-    check_0plus,
-    check_01,
-    check_1plus,
     check_range_bounds,
     nondecreasing,
 )
@@ -70,11 +67,12 @@ from albumentations.core.transforms_interface import (
     NoOp,
 )
 from albumentations.core.types import (
-    EIGHT,
+    ALL_TARGETS,
     MAX_RAIN_ANGLE,
     MONO_CHANNEL_DIMENSIONS,
     NUM_RGB_CHANNELS,
     PAIR,
+    SEVEN,
     ChromaticAberrationMode,
     ColorType,
     ImageMode,
@@ -83,7 +81,6 @@ from albumentations.core.types import (
     ScaleFloatType,
     ScaleIntType,
     SpatterMode,
-    Targets,
 )
 from albumentations.core.utils import format_args, to_tuple
 
@@ -185,7 +182,7 @@ class Normalize(ImageOnlyTransform):
         - For "standard" normalization, `mean`, `std`, and `max_pixel_value` must be provided.
         - For other normalization types, these parameters are ignored.
         - For inception normalization, use mean values of (0.5, 0.5, 0.5).
-        - For YOLO normalization, use mean values of (0.5, 0.5, 0.5) and std values of (0, 0, 0).
+        - For YOLO normalization, use mean values of (0, 0, 0) and std values of (1, 1, 1).
         - This transform is often used as a final step in image preprocessing pipelines to
           prepare images for neural network input.
 
@@ -330,7 +327,7 @@ class ImageCompression(ImageOnlyTransform):
     class InitSchema(BaseTransformInitSchema):
         quality_range: Annotated[
             tuple[int, int],
-            AfterValidator(check_1plus),
+            AfterValidator(check_range_bounds(1, 100)),
             AfterValidator(nondecreasing),
         ]
 
@@ -494,7 +491,7 @@ class RandomSnow(ImageOnlyTransform):
     class InitSchema(BaseTransformInitSchema):
         snow_point_range: Annotated[
             tuple[float, float],
-            AfterValidator(check_01),
+            AfterValidator(check_range_bounds(0, 1)),
             AfterValidator(nondecreasing),
         ]
 
@@ -1049,7 +1046,7 @@ class RandomFog(ImageOnlyTransform):
         )
         fog_coef_range: Annotated[
             tuple[float, float],
-            AfterValidator(check_01),
+            AfterValidator(check_range_bounds(0, 1)),
             AfterValidator(nondecreasing),
         ]
 
@@ -1316,13 +1313,13 @@ class RandomSunFlare(ImageOnlyTransform):
 
         angle_range: Annotated[
             tuple[float, float],
-            AfterValidator(check_01),
+            AfterValidator(check_range_bounds(0, 1)),
             AfterValidator(nondecreasing),
         ]
 
         num_flare_circles_range: Annotated[
             tuple[int, int],
-            AfterValidator(check_1plus),
+            AfterValidator(check_range_bounds(1, None)),
             AfterValidator(nondecreasing),
         ]
         method: Literal["overlay", "physics_based"]
@@ -1582,7 +1579,7 @@ class RandomShadow(ImageOnlyTransform):
         shadow_roi: tuple[float, float, float, float]
         num_shadows_limit: Annotated[
             tuple[int, int],
-            AfterValidator(check_1plus),
+            AfterValidator(check_range_bounds(1, None)),
             AfterValidator(nondecreasing),
         ]
         num_shadows_lower: int | None
@@ -1591,7 +1588,7 @@ class RandomShadow(ImageOnlyTransform):
 
         shadow_intensity_range: Annotated[
             tuple[float, float],
-            AfterValidator(check_01),
+            AfterValidator(check_range_bounds(0, 1)),
             AfterValidator(nondecreasing),
         ]
 
@@ -2021,13 +2018,10 @@ class Solarize(ImageOnlyTransform):
     """
 
     class InitSchema(BaseTransformInitSchema):
-        threshold: ScaleFloatType | None = Field(
-            default=None,
-            deprecated="threshold parameter is deprecated. Use threshold_range instead.",
-        )
+        threshold: ScaleFloatType | None
         threshold_range: Annotated[
             tuple[float, float],
-            AfterValidator(check_01),
+            AfterValidator(check_range_bounds(0, 1)),
             AfterValidator(nondecreasing),
         ]
 
@@ -2037,10 +2031,11 @@ class Solarize(ImageOnlyTransform):
             threshold_range: tuple[float, float],
         ) -> tuple[float, float]:
             """Convert legacy threshold or use threshold_range, normalizing to [0,1] range."""
-            if threshold is None:
-                return threshold_range
-            value = to_tuple(threshold, threshold)
-            return (value[0] / 255, value[1] / 255) if value[1] > 1 else value
+            if threshold is not None:
+                warn("`threshold` deprecated. Use `threshold_range` instead.", DeprecationWarning, stacklevel=2)
+                value = to_tuple(threshold, threshold)
+                return (value[0] / 255, value[1] / 255) if value[1] > 1 else value
+            return threshold_range
 
         @model_validator(mode="after")
         def process_threshold(self) -> Self:
@@ -2080,8 +2075,8 @@ class Posterize(ImageOnlyTransform):
     Args:
         num_bits (int | tuple[int, int] | list[int] | list[tuple[int, int]]):
             Defines the number of bits to keep for each color channel. Can be specified in several ways:
-            - Single int: Same number of bits for all channels. Range: [1, 8].
-            - tuple of two ints: (min_bits, max_bits) to randomly choose from. Range for each: [1, 8].
+            - Single int: Same number of bits for all channels. Range: [1, 7].
+            - tuple of two ints: (min_bits, max_bits) to randomly choose from. Range for each: [1, 7].
             - list of three ints: Specific number of bits for each channel [r_bits, g_bits, b_bits].
             - list of three tuples: Ranges for each channel [(r_min, r_max), (g_min, g_max), (b_min, b_max)].
             Default: 4
@@ -2099,8 +2094,6 @@ class Posterize(ImageOnlyTransform):
 
     Note:
         - The effect becomes more pronounced as the number of bits is reduced.
-        - Using 0 bits for a channel will reduce it to a single color (usually black).
-        - Using 8 bits leaves the channel unchanged.
         - This transform can create interesting artistic effects or be used for image compression simulation.
         - Posterization is particularly useful for:
           * Creating stylized or retro-looking images
@@ -2149,8 +2142,8 @@ class Posterize(ImageOnlyTransform):
             num_bits: Any,
         ) -> tuple[int, int] | list[tuple[int, int]]:
             if isinstance(num_bits, int):
-                if num_bits < 1 or num_bits > EIGHT:
-                    raise ValueError("num_bits must be in the range [1, 8]")
+                if num_bits < 1 or num_bits > SEVEN:
+                    raise ValueError("num_bits must be in the range [1, 7]")
                 return (num_bits, num_bits)
             if isinstance(num_bits, Sequence) and len(num_bits) > PAIR:
                 return [to_tuple(i, i) for i in num_bits]
@@ -2165,7 +2158,12 @@ class Posterize(ImageOnlyTransform):
         super().__init__(p=p, always_apply=always_apply)
         self.num_bits = cast(Union[tuple[int, int], list[tuple[int, int]]], num_bits)
 
-    def apply(self, img: np.ndarray, num_bits: int, **params: Any) -> np.ndarray:
+    def apply(
+        self,
+        img: np.ndarray,
+        num_bits: Literal[1, 2, 3, 4, 5, 6, 7] | list[Literal[1, 2, 3, 4, 5, 6, 7]],
+        **params: Any,
+    ) -> np.ndarray:
         return fmain.posterize(img, num_bits)
 
     def get_params(self) -> dict[str, Any]:
@@ -2202,7 +2200,7 @@ class Equalize(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -2342,7 +2340,7 @@ class RandomBrightnessContrast(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -2491,7 +2489,7 @@ class GaussNoise(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -2527,12 +2525,10 @@ class GaussNoise(ImageOnlyTransform):
         var_limit: ScaleFloatType | None = Field(
             deprecated="var_limit parameter is deprecated. Use std_range instead.",
         )
-        mean: float | None = Field(
-            deprecated="mean parameter is deprecated. Use mean_range instead.",
-        )
+        mean: float | None
         std_range: Annotated[
             tuple[float, float],
-            AfterValidator(check_01),
+            AfterValidator(check_range_bounds(0, 1)),
             AfterValidator(nondecreasing),
         ]
         mean_range: Annotated[
@@ -2556,10 +2552,9 @@ class GaussNoise(ImageOnlyTransform):
                         math.sqrt(self.var_limit[0]),
                         math.sqrt(self.var_limit[1]),
                     )
-            if self.mean is not None:
-                self.mean_range = (0.0, 0.0)
 
             if self.mean is not None:
+                warn("`mean` deprecated. Use `mean_range` instead.", DeprecationWarning, stacklevel=2)
                 if self.mean >= 1:
                     # Convert legacy uint8 mean to normalized range
                     self.mean_range = (self.mean / 255, self.mean / 255)
@@ -2650,7 +2645,7 @@ class ISONoise(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -2682,12 +2677,12 @@ class ISONoise(ImageOnlyTransform):
     class InitSchema(BaseTransformInitSchema):
         color_shift: Annotated[
             tuple[float, float],
-            AfterValidator(check_01),
+            AfterValidator(check_range_bounds(0, 1)),
             AfterValidator(nondecreasing),
         ]
         intensity: Annotated[
             tuple[float, float],
-            AfterValidator(check_0plus),
+            AfterValidator(check_range_bounds(0, None)),
             AfterValidator(nondecreasing),
         ]
 
@@ -2765,7 +2760,7 @@ class CLAHE(ImageOnlyTransform):
           adaptiveness but can lead to an unnatural look if set too high.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -2789,7 +2784,7 @@ class CLAHE(ImageOnlyTransform):
 
     class InitSchema(BaseTransformInitSchema):
         clip_limit: OnePlusFloatRangeType
-        tile_grid_size: Annotated[tuple[int, int], AfterValidator(check_1plus)]
+        tile_grid_size: Annotated[tuple[int, int], AfterValidator(check_range_bounds(1, None))]
 
     def __init__(
         self,
@@ -2859,7 +2854,7 @@ class InvertImg(ImageOnlyTransform):
         p: probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -2895,7 +2890,7 @@ class RandomGamma(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -3080,7 +3075,7 @@ class ToRGB(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -3143,21 +3138,24 @@ class ToSepia(ImageOnlyTransform):
     This transform converts a color image to a sepia tone, giving it a warm, brownish tint
     that is reminiscent of old photographs. The sepia effect is achieved by applying a
     specific color transformation matrix to the RGB channels of the input image.
+    For grayscale images, the transform is a no-op and returns the original image.
 
     Args:
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
 
     Number of channels:
-        3
+        1,3
 
     Note:
-        - This transform only works with RGB images (3 channels).
+        - The sepia effect only works with RGB images (3 channels). For grayscale images,
+          the original image is returned unchanged since the sepia transformation would
+          have no visible effect when R=G=B.
         - The sepia effect is created using a fixed color transformation matrix:
           [[0.393, 0.769, 0.189],
            [0.349, 0.686, 0.168],
@@ -3165,27 +3163,30 @@ class ToSepia(ImageOnlyTransform):
         - The output image will have the same data type as the input image.
         - For float32 images, ensure the input values are in the range [0, 1].
 
-    Raises:
-        TypeError: If the input image is not a 3-channel RGB image.
-
     Examples:
         >>> import numpy as np
         >>> import albumentations as A
         >>>
-        # Apply sepia effect to a uint8 image
+        # Apply sepia effect to a uint8 RGB image
         >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
         >>> transform = A.ToSepia(p=1.0)
         >>> sepia_image = transform(image=image)['image']
         >>> assert sepia_image.shape == image.shape
         >>> assert sepia_image.dtype == np.uint8
         >>>
-        # Apply sepia effect to a float32 image
+        # Apply sepia effect to a float32 RGB image
         >>> image = np.random.rand(100, 100, 3).astype(np.float32)
         >>> transform = A.ToSepia(p=1.0)
         >>> sepia_image = transform(image=image)['image']
         >>> assert sepia_image.shape == image.shape
         >>> assert sepia_image.dtype == np.float32
         >>> assert 0 <= sepia_image.min() <= sepia_image.max() <= 1.0
+        >>>
+        # No effect on grayscale images
+        >>> gray_image = np.random.randint(0, 256, (100, 100), dtype=np.uint8)
+        >>> transform = A.ToSepia(p=1.0)
+        >>> result = transform(image=gray_image)['image']
+        >>> assert np.array_equal(result, gray_image)
 
     Mathematical Formulation:
         Given an input pixel [R, G, B], the sepia tone is calculated as:
@@ -3193,7 +3194,10 @@ class ToSepia(ImageOnlyTransform):
         G_sepia = 0.349*R + 0.686*G + 0.168*B
         B_sepia = 0.272*R + 0.534*G + 0.131*B
 
-        The output values are then clipped to the valid range for the image's data type.
+        For grayscale images where R=G=B, this transformation would result in a simple
+        scaling of the original value, so we skip it.
+
+        The output values are clipped to the valid range for the image's data type.
 
     See Also:
         ToGray: For converting images to grayscale instead of sepia.
@@ -3206,7 +3210,12 @@ class ToSepia(ImageOnlyTransform):
         )
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
-        non_rgb_error(img)
+        if is_grayscale_image(img):
+            return img
+
+        if not is_rgb_image(img):
+            msg = "ToSepia transformation expects 1 or 3-channel images."
+            raise TypeError(msg)
         return fmain.linear_transformation_rgb(img, self.sepia_transformation_matrix)
 
     def get_transform_init_args_names(self) -> tuple[()]:
@@ -3231,7 +3240,7 @@ class ToFloat(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, uint16, uint32, float32
@@ -3305,7 +3314,7 @@ class FromFloat(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         float32, float64
@@ -3389,7 +3398,7 @@ class Downscale(ImageOnlyTransform):
             Default: 0.5
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -3429,7 +3438,7 @@ class Downscale(ImageOnlyTransform):
 
         scale_range: Annotated[
             tuple[float, float],
-            AfterValidator(check_01),
+            AfterValidator(check_range_bounds(0, 1)),
             AfterValidator(nondecreasing),
         ]
 
@@ -3514,7 +3523,7 @@ class Lambda(NoOp):
         p: probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -3636,7 +3645,7 @@ class MultiplicativeNoise(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -3668,7 +3677,7 @@ class MultiplicativeNoise(ImageOnlyTransform):
     class InitSchema(BaseTransformInitSchema):
         multiplier: Annotated[
             tuple[float, float],
-            AfterValidator(check_0plus),
+            AfterValidator(check_range_bounds(0, None)),
             AfterValidator(nondecreasing),
         ]
         per_channel: bool
@@ -3748,7 +3757,7 @@ class FancyPCA(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -3861,7 +3870,7 @@ class ColorJitter(ImageOnlyTransform):
 
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -4002,7 +4011,7 @@ class Sharpen(ImageOnlyTransform):
             Only used in 'kernel' method. Larger values create higher contrast.
             Values should be greater than 0. Default: (0.5, 1.0).
 
-        method (str): Sharpening algorithm to use:
+        method (Literal['kernel', 'gaussian']): Sharpening algorithm to use:
             - 'kernel': Traditional kernel-based sharpening using Laplacian operator
             - 'gaussian': Interpolation between Gaussian blurred and original image
             Default: 'kernel'
@@ -4104,8 +4113,8 @@ class Sharpen(ImageOnlyTransform):
     """
 
     class InitSchema(BaseTransformInitSchema):
-        alpha: Annotated[tuple[float, float], AfterValidator(check_01)]
-        lightness: Annotated[tuple[float, float], AfterValidator(check_0plus)]
+        alpha: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, 1))]
+        lightness: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, None))]
         method: Literal["kernel", "gaussian"]
         kernel_size: int = Field(ge=3)
         sigma: float = Field(gt=0)
@@ -4199,7 +4208,7 @@ class Emboss(ImageOnlyTransform):
             Default: 0.5
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -4227,8 +4236,8 @@ class Emboss(ImageOnlyTransform):
     """
 
     class InitSchema(BaseTransformInitSchema):
-        alpha: Annotated[tuple[float, float], AfterValidator(check_01)]
-        strength: Annotated[tuple[float, float], AfterValidator(check_0plus)]
+        alpha: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, 1))]
+        strength: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, None))]
 
     def __init__(
         self,
@@ -4324,7 +4333,7 @@ class Superpixels(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -4436,7 +4445,7 @@ class RingingOvershoot(ImageOnlyTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -4581,7 +4590,7 @@ class UnsharpMask(ImageOnlyTransform):
         p (float): probability of applying the transform. Default: 0.5.
 
     Targets:
-        image
+        image, volume
 
     Image types:
         uint8, float32
@@ -4715,7 +4724,7 @@ class PixelDropout(DualTransform):
             Default: 0.5
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -4752,7 +4761,7 @@ class PixelDropout(DualTransform):
                 raise ValueError(msg)
             return self
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     def __init__(
         self,
@@ -5287,7 +5296,7 @@ class Morphological(DualTransform):
         p (float, optional): The probability of applying this transformation. Default is 0.5.
 
     Targets:
-        image, mask, keypoints, bboxes
+        image, mask, keypoints, bboxes, volume, mask3d
 
     Image types:
         uint8, float32
@@ -5303,7 +5312,7 @@ class Morphological(DualTransform):
         >>> image = transform(image=image)["image"]
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.KEYPOINTS, Targets.BBOXES)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         scale: OnePlusIntRangeType
@@ -5520,6 +5529,7 @@ class PlanckianJitter(ImageOnlyTransform):
         self.sampling_method = sampling_method
 
     def apply(self, img: np.ndarray, temperature: int, **params: Any) -> np.ndarray:
+        non_rgb_error(img)
         return fmain.planckian_jitter(img, temperature, mode=self.mode)
 
     def get_params(self) -> dict[str, Any]:
@@ -5633,7 +5643,7 @@ class ShotNoise(ImageOnlyTransform):
         scale_range: Annotated[
             tuple[float, float],
             AfterValidator(nondecreasing),
-            AfterValidator(check_0plus),
+            AfterValidator(check_range_bounds(0, None)),
         ]
 
     def __init__(
@@ -6127,8 +6137,8 @@ class SaltAndPepper(ImageOnlyTransform):
     """
 
     class InitSchema(BaseTransformInitSchema):
-        amount: Annotated[tuple[float, float], AfterValidator(check_01)]
-        salt_vs_pepper: Annotated[tuple[float, float], AfterValidator(check_01)]
+        amount: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, 1))]
+        salt_vs_pepper: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, 1))]
 
     def __init__(
         self,
@@ -6462,7 +6472,7 @@ class PlasmaShadow(ImageOnlyTransform):
     """
 
     class InitSchema(BaseTransformInitSchema):
-        shadow_intensity_range: Annotated[tuple[float, float], AfterValidator(check_01)]
+        shadow_intensity_range: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, 1))]
         plasma_size: int = Field(default=256, gt=0)
         roughness: float = Field(default=3.0, gt=0)
 
@@ -6690,7 +6700,7 @@ class Illumination(ImageOnlyTransform):
         # Determine if brightening or darkening
         sign = 1  # brighten
         if self.effect_type == "both":
-            sign = 1 if self.py_random.random() > 0.5 else -1  # noqa: PLR2004
+            sign = 1 if self.py_random.random() > 0.5 else -1
         elif self.effect_type == "darken":
             sign = -1
 

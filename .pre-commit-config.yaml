@@ -40,7 +40,7 @@ repos:
     - id: check-docstrings
       name: Check Docstrings for '---' sequences
       entry: python tools/check_docstrings.py
-      language: system
+      language: python
       types: [python]
   - repo: local
     hooks:
@@ -51,7 +51,7 @@ repos:
         files: setup.py
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.8.2
+    rev: v0.8.3
     hooks:
       # Run the linter.
       - id: ruff

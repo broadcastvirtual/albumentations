@@ -16,7 +16,7 @@ from albumentations.augmentations.domain_adaptation.functional import (
 )
 from albumentations.augmentations.utils import read_rgb_image
 from albumentations.core.composition import Compose
-from albumentations.core.pydantic import ZeroOneRangeType, check_01, nondecreasing
+from albumentations.core.pydantic import ZeroOneRangeType, check_range_bounds, nondecreasing
 from albumentations.core.transforms_interface import BaseTransformInitSchema, BasicTransform, ImageOnlyTransform
 from albumentations.core.types import ScaleFloatType
 
@@ -90,7 +90,11 @@ class HistogramMatching(ImageOnlyTransform):
 
     class InitSchema(BaseTransformInitSchema):
         reference_images: Sequence[Any]
-        blend_ratio: Annotated[tuple[float, float], AfterValidator(nondecreasing), AfterValidator(check_01)]
+        blend_ratio: Annotated[
+            tuple[float, float],
+            AfterValidator(nondecreasing),
+            AfterValidator(check_range_bounds(0, 1)),
+        ]
         read_fn: Callable[[Any], np.ndarray]
 
     def __init__(
@@ -216,8 +220,9 @@ class FDA(ImageOnlyTransform):
         return fourier_domain_adaptation(img, target_image, beta)
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, np.ndarray]:
+        height, width = params["shape"][:2]
         target_img = self.read_fn(self.py_random.choice(self.reference_images))
-        target_img = cv2.resize(target_img, dsize=(params["cols"], params["rows"]))
+        target_img = cv2.resize(target_img, dsize=(width, height))
 
         return {"target_image": target_img, "beta": self.py_random.uniform(*self.beta_limit)}
 
@@ -300,7 +305,11 @@ class PixelDistributionAdaptation(ImageOnlyTransform):
 
     class InitSchema(BaseTransformInitSchema):
         reference_images: Sequence[Any]
-        blend_ratio: Annotated[tuple[float, float], AfterValidator(nondecreasing), AfterValidator(check_01)]
+        blend_ratio: Annotated[
+            tuple[float, float],
+            AfterValidator(nondecreasing),
+            AfterValidator(check_range_bounds(0, 1)),
+        ]
         read_fn: Callable[[Any], np.ndarray]
         transform_type: Literal["pca", "standard", "minmax"]
 

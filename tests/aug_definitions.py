@@ -192,7 +192,7 @@ AUGMENTATION_CLS_PARAMS = [
         {
             "scale": 0.5,
             "keep_size": False,
-            "pad_mode": cv2.BORDER_REFLECT_101,
+            "border_mode": cv2.BORDER_REFLECT_101,
             "fill": 10,
             "fill_mask": 100,
             "fit_output": True,
@@ -404,4 +404,10 @@ AUGMENTATION_CLS_PARAMS = [
     [A.Illumination, {}],
     [A.ThinPlateSpline, {}],
     [A.AutoContrast, {}],
+    [A.PadIfNeeded3D, {"min_zyx": (300, 200, 400), "pad_divisor_zyx": (10, 10, 10), "position": "center", "fill": 10, "fill_mask": 20}],
+    [A.Pad3D, {"padding": 10}],
+    [A.CenterCrop3D, {"size": (2, 30, 30)}],
+    [A.RandomCrop3D, {"size": (2, 30, 30)}],
+    [A.CoarseDropout3D, {"num_holes_range": (1, 3), "hole_depth_range": (0.1, 0.2), "hole_height_range": (0.1, 0.2), "hole_width_range": (0.1, 0.2), "fill": 0, "fill_mask": None}],
+    [A.CubicSymmetry, {}],
 ]

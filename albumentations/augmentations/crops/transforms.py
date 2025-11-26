@@ -8,7 +8,7 @@ from warnings import warn
 
 import cv2
 import numpy as np
-from pydantic import AfterValidator, Field, field_validator, model_validator
+from pydantic import AfterValidator, Field, model_validator
 from typing_extensions import Self
 
 from albumentations.augmentations.geometric import functional as fgeometric
@@ -18,12 +18,12 @@ from albumentations.core.pydantic import (
     InterpolationType,
     OnePlusIntRangeType,
     ZeroOneRangeType,
-    check_0plus,
-    check_01,
+    check_range_bounds,
     nondecreasing,
 )
 from albumentations.core.transforms_interface import BaseTransformInitSchema, DualTransform
 from albumentations.core.types import (
+    ALL_TARGETS,
     NUM_MULTI_CHANNEL_DIMENSIONS,
     PAIR,
     ColorType,
@@ -32,7 +32,6 @@ from albumentations.core.types import (
     PxType,
     ScaleFloatType,
     ScaleIntType,
-    Targets,
 )
 
 from . import functional as fcrops
@@ -59,7 +58,7 @@ class CropSizeError(Exception):
 class BaseCrop(DualTransform):
     """Base class for transforms that only perform cropping."""
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     def apply(
         self,
@@ -173,7 +172,27 @@ class BaseCropAndPad(BaseCrop):
                 border_mode=self.border_mode,
                 value=self.fill,
             )
-        return super().apply(img, crop_coords, **params)
+        return BaseCrop.apply(self, img, crop_coords, **params)
+
+    def apply_to_mask(
+        self,
+        mask: np.ndarray,
+        crop_coords: Any,
+        **params: Any,
+    ) -> np.ndarray:
+        pad_params = params.get("pad_params")
+        if pad_params is not None:
+            mask = fgeometric.pad_with_params(
+                mask,
+                pad_params["pad_top"],
+                pad_params["pad_bottom"],
+                pad_params["pad_left"],
+                pad_params["pad_right"],
+                border_mode=self.border_mode,
+                value=self.fill_mask,
+            )
+        # Note' that super().apply would apply the padding twice as it is looped to this.apply
+        return BaseCrop.apply(self, mask, crop_coords=crop_coords, **params)
 
     def apply_to_bboxes(
         self,
@@ -208,10 +227,10 @@ class BaseCropAndPad(BaseCrop):
 
             params["shape"] = padded_shape
 
-            return super().apply_to_bboxes(bboxes_np, crop_coords, **params)
+            return BaseCrop.apply_to_bboxes(self, bboxes_np, crop_coords, **params)
 
         # If no padding, use original function behavior
-        return super().apply_to_bboxes(bboxes, crop_coords, **params)
+        return BaseCrop.apply_to_bboxes(self, bboxes, crop_coords, **params)
 
     def apply_to_keypoints(
         self,
@@ -241,7 +260,7 @@ class BaseCropAndPad(BaseCrop):
             # Update image shape for subsequent crop operation
             params = {**params, "shape": (padded_height, padded_width)}
 
-        return super().apply_to_keypoints(keypoints, crop_coords, **params)
+        return BaseCrop.apply_to_keypoints(self, keypoints, crop_coords, **params)
 
 
 class RandomCrop(BaseCropAndPad):
@@ -261,7 +280,7 @@ class RandomCrop(BaseCropAndPad):
         p: probability of applying the transform. Default: 1.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -392,7 +411,7 @@ class CenterCrop(BaseCropAndPad):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -409,17 +428,20 @@ class CenterCrop(BaseCropAndPad):
         border_mode: BorderModeType
         fill: ColorType
         fill_mask: ColorType
-        pad_mode: BorderModeType | None = Field(deprecated="pad_mode is deprecated, use border_mode instead")
-        pad_cval: ColorType | None = Field(deprecated="pad_cval is deprecated, use fill instead")
-        pad_cval_mask: ColorType | None = Field(deprecated="pad_cval_mask is deprecated, use fill_mask instead")
+        pad_mode: BorderModeType | None
+        pad_cval: ColorType | None
+        pad_cval_mask: ColorType | None
 
         @model_validator(mode="after")
         def validate_dimensions(self) -> Self:
             if self.pad_mode is not None:
+                warn("pad_mode is deprecated, use border_mode instead", DeprecationWarning, stacklevel=2)
                 self.border_mode = self.pad_mode
             if self.pad_cval is not None:
+                warn("pad_cval is deprecated, use fill instead", DeprecationWarning, stacklevel=2)
                 self.fill = self.pad_cval
             if self.pad_cval_mask is not None:
+                warn("pad_cval_mask is deprecated, use fill_mask instead", DeprecationWarning, stacklevel=2)
                 self.fill_mask = self.pad_cval_mask
             return self
 
@@ -521,7 +543,7 @@ class Crop(BaseCropAndPad):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -541,9 +563,9 @@ class Crop(BaseCropAndPad):
         border_mode: BorderModeType
         fill: ColorType
         fill_mask: ColorType
-        pad_mode: BorderModeType | None = Field(deprecated="pad_mode is deprecated, use border_mode instead")
-        pad_cval: ColorType | None = Field(deprecated="pad_cval is deprecated, use fill instead")
-        pad_cval_mask: ColorType | None = Field(deprecated="pad_cval_mask is deprecated, use fill_mask instead")
+        pad_mode: BorderModeType | None
+        pad_cval: ColorType | None
+        pad_cval_mask: ColorType | None
 
         @model_validator(mode="after")
         def validate_coordinates(self) -> Self:
@@ -555,10 +577,13 @@ class Crop(BaseCropAndPad):
                 raise ValueError(msg)
 
             if self.pad_mode is not None:
+                warn("pad_mode is deprecated, use border_mode instead", DeprecationWarning, stacklevel=2)
                 self.border_mode = self.pad_mode
             if self.pad_cval is not None:
+                warn("pad_cval is deprecated, use fill instead", DeprecationWarning, stacklevel=2)
                 self.fill = self.pad_cval
             if self.pad_cval_mask is not None:
+                warn("pad_cval_mask is deprecated, use fill_mask instead", DeprecationWarning, stacklevel=2)
                 self.fill_mask = self.pad_cval_mask
 
             return self
@@ -664,7 +689,7 @@ class CropNonEmptyMaskIfExists(BaseCrop):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -778,14 +803,7 @@ class CropNonEmptyMaskIfExists(BaseCrop):
 
 
 class BaseRandomSizedCropInitSchema(BaseTransformInitSchema):
-    size: tuple[int, int]
-
-    @field_validator("size")
-    @classmethod
-    def check_size(cls, value: tuple[int, int]) -> tuple[int, int]:
-        if any(x <= 0 for x in value):
-            raise ValueError("All elements of 'size' must be positive integers.")
-        return value
+    size: Annotated[tuple[int, int], AfterValidator(check_range_bounds(1, None))]
 
 
 class _BaseRandomSizedCrop(DualTransform):
@@ -877,7 +895,7 @@ class RandomSizedCrop(_BaseRandomSizedCrop):
         p (float): Probability of applying the transform. Default: 1.0
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -916,33 +934,27 @@ class RandomSizedCrop(_BaseRandomSizedCrop):
         # taken from a random location in the original image and then resized.
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         interpolation: InterpolationType
         mask_interpolation: InterpolationType
         min_max_height: OnePlusIntRangeType
         w2h_ratio: Annotated[float, Field(gt=0)]
-        width: int | None = Field(
-            None,
-            deprecated=(
-                "Initializing with 'size' as an integer and a separate 'width' is deprecated. "
-                "Please use a tuple (height, width) for the 'size' argument."
-            ),
-        )
-        height: int | None = Field(
-            None,
-            deprecated=(
-                "Initializing with 'height' and 'width' is deprecated. "
-                "Please use a tuple (height, width) for the 'size' argument."
-            ),
-        )
+        width: int | None
+        height: int | None
         size: ScaleIntType | None
 
         @model_validator(mode="after")
         def process(self) -> Self:
             if isinstance(self.size, int):
                 if isinstance(self.width, int):
+                    warn(
+                        "Initializing with 'size' as an integer and a separate 'width', `height` are deprecated. "
+                        "Please use a tuple (height, width) for the 'size' argument.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
                     self.size = (self.size, self.width)
                 else:
                     msg = "If size is an integer, width as integer must be specified."
@@ -1025,7 +1037,7 @@ class RandomResizedCrop(_BaseRandomSizedCrop):
         p (float): Probability of applying the transform. Default: 1.0
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1062,19 +1074,17 @@ class RandomResizedCrop(_BaseRandomSizedCrop):
         # and the crop's aspect ratio between 3:4 and 4:3.
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
-        scale: Annotated[tuple[float, float], AfterValidator(check_01), AfterValidator(nondecreasing)]
-        ratio: Annotated[tuple[float, float], AfterValidator(check_0plus), AfterValidator(nondecreasing)]
-        width: int | None = Field(
-            None,
-            deprecated="Initializing with 'height' and 'width' is deprecated. Use size instead.",
-        )
-        height: int | None = Field(
-            None,
-            deprecated="Initializing with 'height' and 'width' is deprecated. Use size instead.",
-        )
+        scale: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, 1)), AfterValidator(nondecreasing)]
+        ratio: Annotated[
+            tuple[float, float],
+            AfterValidator(check_range_bounds(0, None)),
+            AfterValidator(nondecreasing),
+        ]
+        width: int | None
+        height: int | None
         size: ScaleIntType | None
         interpolation: InterpolationType
         mask_interpolation: InterpolationType
@@ -1083,6 +1093,12 @@ class RandomResizedCrop(_BaseRandomSizedCrop):
         def process(self) -> Self:
             if isinstance(self.size, int):
                 if isinstance(self.width, int):
+                    warn(
+                        "Initializing with 'size' as an integer and a separate 'width', `height` are deprecated. "
+                        "Please use a tuple (height, width) for the 'size' argument.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
                     self.size = (self.size, self.width)
                 else:
                     msg = "If size is an integer, width as integer must be specified."
@@ -1191,7 +1207,7 @@ class RandomCropNearBBox(BaseCrop):
         p (float): probability of applying the transform. Default: 1.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1203,7 +1219,7 @@ class RandomCropNearBBox(BaseCrop):
 
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         max_part_shift: ZeroOneRangeType
@@ -1282,7 +1298,7 @@ class BBoxSafeRandomCrop(BaseCrop):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1305,7 +1321,7 @@ class BBoxSafeRandomCrop(BaseCrop):
         >>> transformed_bboxes = transformed['bboxes']
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         erosion_rate: float = Field(
@@ -1394,7 +1410,7 @@ class RandomSizedBBoxSafeCrop(BBoxSafeRandomCrop):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1432,7 +1448,7 @@ class RandomSizedBBoxSafeCrop(BBoxSafeRandomCrop):
         # with their coordinates adjusted to the new image size.
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         height: Annotated[int, Field(ge=1)]
@@ -1554,7 +1570,7 @@ class CropAndPad(DualTransform):
             Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1578,14 +1594,14 @@ class CropAndPad(DualTransform):
         >>> transformed_keypoints = transformed['keypoints']
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         px: PxType | None
         percent: PercentType | None
-        pad_mode: BorderModeType | None = Field(deprecated="pad_mode is deprecated, use border_mode instead")
-        pad_cval: ColorType | None = Field(deprecated="pad_cval is deprecated, use fill instead")
-        pad_cval_mask: ColorType | None = Field(deprecated="pad_cval_mask is deprecated, use fill_mask instead")
+        pad_mode: BorderModeType | None
+        pad_cval: ColorType | None
+        pad_cval_mask: ColorType | None
         keep_size: bool
         sample_independently: bool
         interpolation: InterpolationType
@@ -1603,10 +1619,13 @@ class CropAndPad(DualTransform):
                 msg = "Only px or percent may be set!"
                 raise ValueError(msg)
             if self.pad_mode is not None:
+                warn("pad_mode is deprecated, use border_mode instead", DeprecationWarning, stacklevel=2)
                 self.border_mode = self.pad_mode
             if self.pad_cval is not None:
+                warn("pad_cval is deprecated, use fill instead", DeprecationWarning, stacklevel=2)
                 self.fill = self.pad_cval
             if self.pad_cval_mask is not None:
+                warn("pad_cval_mask is deprecated, use fill_mask instead", DeprecationWarning, stacklevel=2)
                 self.fill_mask = self.pad_cval_mask
 
             return self
@@ -1877,7 +1896,7 @@ class RandomCropFromBorders(BaseCrop):
         p (float): Probability of applying the transform. Default: 1.0
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1906,7 +1925,7 @@ class RandomCropFromBorders(BaseCrop):
         # and 10% from the bottom. The image size will be reduced accordingly.
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         crop_left: float = Field(

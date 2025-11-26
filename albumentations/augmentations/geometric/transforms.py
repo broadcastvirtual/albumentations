@@ -28,14 +28,14 @@ from albumentations.core.pydantic import (
     InterpolationType,
     NonNegativeFloatRangeType,
     SymmetricRangeType,
-    check_01,
-    check_1plus,
+    check_range_bounds,
 )
 from albumentations.core.transforms_interface import (
     BaseTransformInitSchema,
     DualTransform,
 )
 from albumentations.core.types import (
+    ALL_TARGETS,
     BIG_INTEGER,
     ColorType,
     D4Type,
@@ -43,7 +43,6 @@ from albumentations.core.types import (
     ScaleFloatType,
     ScaleIntType,
     ScaleType,
-    Targets,
     d4_group_elements,
 )
 from albumentations.core.utils import to_tuple
@@ -91,7 +90,7 @@ class BaseDistortion(DualTransform):
         p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -117,7 +116,7 @@ class BaseDistortion(DualTransform):
                 return super().get_transform_init_args_names() + ("custom_param1", "custom_param2")
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         interpolation: InterpolationType
@@ -230,7 +229,7 @@ class ElasticTransform(BaseDistortion):
         p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -358,7 +357,7 @@ class Perspective(DualTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, keypoints, bboxes
+        image, mask, keypoints, bboxes, volume, mask3d
 
     Image types:
         uint8, float32
@@ -384,7 +383,7 @@ class Perspective(DualTransform):
         >>> transformed_image = result['image']
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.KEYPOINTS, Targets.BBOXES)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         scale: NonNegativeFloatRangeType
@@ -654,7 +653,7 @@ class Affine(DualTransform):
         p (float): probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, keypoints, bboxes
+        image, mask, keypoints, bboxes, volume, mask3d
 
     Image types:
         uint8, float32
@@ -664,7 +663,7 @@ class Affine(DualTransform):
 
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         scale: ScaleFloatType | fgeometric.XYFloatScale
@@ -675,18 +674,9 @@ class Affine(DualTransform):
         interpolation: InterpolationType
         mask_interpolation: InterpolationType
 
-        cval: ColorType | None = Field(
-            default=None,
-            deprecated="Deprecated use fill instead",
-        )
-        cval_mask: ColorType | None = Field(
-            default=None,
-            deprecated="Deprecated use fill_mask instead",
-        )
-        mode: BorderModeType | None = Field(
-            default=None,
-            deprecated="Deprecated use border_mode instead",
-        )
+        cval: ColorType | None
+        cval_mask: ColorType | None
+        mode: BorderModeType | None
 
         fill: ColorType
         fill_mask: ColorType
@@ -762,10 +752,13 @@ class Affine(DualTransform):
         def validate_fill_types(self) -> Self:
             if self.cval is not None:
                 self.fill = self.cval
+                warn("cval is deprecated, use fill instead", DeprecationWarning, stacklevel=2)
             if self.cval_mask is not None:
                 self.fill_mask = self.cval_mask
+                warn("cval_mask is deprecated, use fill_mask instead", DeprecationWarning, stacklevel=2)
             if self.mode is not None:
                 self.border_mode = self.mode
+                warn("mode is deprecated, use border_mode instead", DeprecationWarning, stacklevel=2)
             return self
 
     def __init__(
@@ -1048,14 +1041,14 @@ class ShiftScaleRotate(Affine):
         p (float): probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, keypoints, bboxes
+        image, mask, keypoints, bboxes, volume, mask3d
 
     Image types:
         uint8, float32
 
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.KEYPOINTS, Targets.BBOXES)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         shift_limit: SymmetricRangeType = (-0.0625, 0.0625)
@@ -1206,7 +1199,7 @@ class PiecewiseAffine(BaseDistortion):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, keypoints, bboxes
+        image, mask, keypoints, bboxes, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1332,7 +1325,7 @@ class VerticalFlip(DualTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1372,7 +1365,7 @@ class VerticalFlip(DualTransform):
 
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
         return vflip(img)
@@ -1381,7 +1374,7 @@ class VerticalFlip(DualTransform):
         return fgeometric.bboxes_vflip(bboxes)
 
     def apply_to_keypoints(self, keypoints: np.ndarray, **params: Any) -> np.ndarray:
-        return fgeometric.keypoints_vflip(keypoints, params["rows"])
+        return fgeometric.keypoints_vflip(keypoints, params["shape"][0])
 
     def get_transform_init_args_names(self) -> tuple[()]:
         return ()
@@ -1394,14 +1387,14 @@ class HorizontalFlip(DualTransform):
         p (float): probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
 
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
         return hflip(img)
@@ -1410,7 +1403,7 @@ class HorizontalFlip(DualTransform):
         return fgeometric.bboxes_hflip(bboxes)
 
     def apply_to_keypoints(self, keypoints: np.ndarray, **params: Any) -> np.ndarray:
-        return fgeometric.keypoints_hflip(keypoints, params["cols"])
+        return fgeometric.keypoints_hflip(keypoints, params["shape"][1])
 
     def get_transform_init_args_names(self) -> tuple[()]:
         return ()
@@ -1419,7 +1412,7 @@ class HorizontalFlip(DualTransform):
 class Flip(DualTransform):
     """Deprecated. Consider using HorizontalFlip, VerticalFlip, RandomRotate90 or D4."""
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     def __init__(self, always_apply: bool | None = None, p: float = 0.5):
         super().__init__(p=p, always_apply=always_apply)
@@ -1461,7 +1454,7 @@ class Transpose(DualTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1501,7 +1494,7 @@ class Transpose(DualTransform):
 
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
         return fgeometric.transpose(img)
@@ -1548,7 +1541,7 @@ class OpticalDistortion(BaseDistortion):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1674,7 +1667,7 @@ class GridDistortion(BaseDistortion):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1805,7 +1798,7 @@ class D4(DualTransform):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1831,7 +1824,7 @@ class D4(DualTransform):
         # The resulting image will be one of the 8 possible D4 transformations of the input
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         pass
@@ -1895,7 +1888,7 @@ class GridElasticDeform(DualTransform):
         p (float): Probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -1910,10 +1903,10 @@ class GridElasticDeform(DualTransform):
         and other domains where elastic deformations can simulate realistic variations.
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
-        num_grid_xy: Annotated[tuple[int, int], AfterValidator(check_1plus)]
+        num_grid_xy: Annotated[tuple[int, int], AfterValidator(check_range_bounds(1, None))]
         magnitude: int = Field(gt=0)
         interpolation: InterpolationType
         mask_interpolation: InterpolationType
@@ -2037,7 +2030,7 @@ class RandomGridShuffle(DualTransform):
             Default: 0.5
 
     Targets:
-        image, mask, keypoints, bboxes
+        image, mask, keypoints, bboxes, volume, mask3d
 
     Image types:
         uint8, float32
@@ -2086,9 +2079,9 @@ class RandomGridShuffle(DualTransform):
     """
 
     class InitSchema(BaseTransformInitSchema):
-        grid: Annotated[tuple[int, int], AfterValidator(check_1plus)]
+        grid: Annotated[tuple[int, int], AfterValidator(check_range_bounds(1, None))]
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.KEYPOINTS, Targets.BBOXES)
+    _targets = ALL_TARGETS
 
     def __init__(
         self,
@@ -2177,7 +2170,7 @@ class Pad(DualTransform):
         p (float): probability of applying the transform. Default: 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -2186,7 +2179,7 @@ class Pad(DualTransform):
         - https://pytorch.org/vision/main/generated/torchvision.transforms.v2.Pad.html
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(BaseTransformInitSchema):
         padding: int | tuple[int, int] | tuple[int, int, int, int]
@@ -2356,7 +2349,7 @@ class PadIfNeeded(Pad):
         p (float): Probability of applying the transform. Default is 1.0.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -2365,7 +2358,7 @@ class PadIfNeeded(Pad):
         - Either `min_height` or `pad_height_divisor` must be set, but not both.
         - Either `min_width` or `pad_width_divisor` must be set, but not both.
         - If `border_mode` is set to `cv2.BORDER_CONSTANT`, `value` must be provided.
-        - The transform will maintain consistency across all targets (image, mask, bboxes, keypoints).
+        - The transform will maintain consistency across all targets (image, mask, bboxes, keypoints, volume).
         - For bounding boxes, the coordinates will be adjusted to account for the padding.
         - For keypoints, their positions will be shifted according to the padding.
 
@@ -2388,10 +2381,8 @@ class PadIfNeeded(Pad):
         pad_width_divisor: int | None = Field(ge=1)
         position: PositionType
         border_mode: BorderModeType
-        value: ColorType | None = Field(deprecated="Deprecated. Use 'fill' instead.")
-        mask_value: ColorType | None = Field(
-            deprecated="Deprecated. Use 'fill_mask' instead.",
-        )
+        value: ColorType | None
+        mask_value: ColorType | None
 
         fill: ColorType
         fill_mask: ColorType
@@ -2410,9 +2401,11 @@ class PadIfNeeded(Pad):
                 raise ValueError(msg)
 
             if self.mask_value is not None:
+                warn("mask_value is deprecated, use fill_mask instead", DeprecationWarning, stacklevel=2)
                 self.fill_mask = self.mask_value
 
             if self.value is not None:
+                warn("value is deprecated, use fill instead", DeprecationWarning, stacklevel=2)
                 self.fill = self.value
 
             return self
@@ -2530,7 +2523,7 @@ class ThinPlateSpline(BaseDistortion):
         p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
-        image, mask, keypoints, bboxes
+        image, mask, keypoints, bboxes, volume, mask3d
 
     Image types:
         uint8, float32
@@ -2576,7 +2569,7 @@ class ThinPlateSpline(BaseDistortion):
     """
 
     class InitSchema(BaseDistortion.InitSchema):
-        scale_range: Annotated[tuple[float, float], AfterValidator(check_01)]
+        scale_range: Annotated[tuple[float, float], AfterValidator(check_range_bounds(0, 1))]
         num_control_points: int = Field(ge=2)
 
     def __init__(

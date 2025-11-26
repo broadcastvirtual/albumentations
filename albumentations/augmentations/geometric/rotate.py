@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import math
 from typing import Any, cast
+from warnings import warn
 
 import cv2
 import numpy as np
-from pydantic import Field, model_validator
+from pydantic import model_validator
 from typing_extensions import Literal, Self
 
 from albumentations.augmentations.crops import functional as fcrops
@@ -20,9 +21,9 @@ from albumentations.core.transforms_interface import (
     DualTransform,
 )
 from albumentations.core.types import (
+    ALL_TARGETS,
     ColorType,
     ScaleFloatType,
-    Targets,
 )
 
 from . import functional as fgeometric
@@ -39,14 +40,14 @@ class RandomRotate90(DualTransform):
         p: probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
 
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     def apply(self, img: np.ndarray, factor: int, **params: Any) -> np.ndarray:
         return fgeometric.rot90(img, factor)
@@ -111,7 +112,7 @@ class Rotate(DualTransform):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -147,7 +148,7 @@ class Rotate(DualTransform):
         # rotated_image will be the input image rotated by a random angle between -45 and 45 degrees
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(RotateInitSchema):
         rotate_method: Literal["largest_box", "ellipse"]
@@ -156,20 +157,16 @@ class Rotate(DualTransform):
         fill: ColorType
         fill_mask: ColorType
 
-        value: ColorType | None = Field(
-            default=None,
-            deprecated="Deprecated use fill instead",
-        )
-        mask_value: ColorType | None = Field(
-            default=None,
-            deprecated="Deprecated use fill_mask instead",
-        )
+        value: ColorType | None
+        mask_value: ColorType | None
 
         @model_validator(mode="after")
         def validate_value(self) -> Self:
             if self.value is not None:
+                warn("value is deprecated, use fill instead", DeprecationWarning, stacklevel=2)
                 self.fill = self.value
             if self.mask_value is not None:
+                warn("mask_value is deprecated, use fill_mask instead", DeprecationWarning, stacklevel=2)
                 self.fill_mask = self.mask_value
             return self
 
@@ -413,7 +410,7 @@ class SafeRotate(Affine):
         p (float): Probability of applying the transform. Default: 0.5.
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -453,7 +450,7 @@ class SafeRotate(Affine):
         # scaled to fit within the original 100x100 frame
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
+    _targets = ALL_TARGETS
 
     class InitSchema(RotateInitSchema):
         rotate_method: Literal["largest_box", "ellipse"]

@@ -23,7 +23,7 @@ from tests.conftest import (
     RECTANGULAR_UINT8_IMAGE,
 )
 
-from .utils import get_dual_transforms, get_image_only_transforms, get_transforms
+from .utils import get_2d_transforms, get_dual_transforms, get_image_only_transforms, get_transforms
 
 
 def test_transpose_both_image_and_mask():
@@ -157,7 +157,7 @@ def __test_multiprocessing_support_proc(args):
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
@@ -334,7 +334,7 @@ def test_lambda_transform():
         return fgeometric.bboxes_vflip(bboxes)
 
     def vflip_keypoints(keypoints, **kwargs):
-        return fgeometric.keypoints_vflip(keypoints, kwargs["rows"])
+        return fgeometric.keypoints_vflip(keypoints, kwargs["shape"][0])
 
     aug = A.Lambda(
         image=negate_image,
@@ -1061,7 +1061,7 @@ def test_safe_rotate(angle: float, targets: dict, expected: dict):
 @pytest.mark.parametrize(
     "aug_cls",
     [
-        (lambda rotate: A.Affine(rotate=rotate, p=1, mode=cv2.BORDER_CONSTANT, cval=0)),
+        (lambda rotate: A.Affine(rotate=rotate, p=1, border_mode=cv2.BORDER_CONSTANT, fill=0)),
         (
             lambda rotate: A.ShiftScaleRotate(
                 shift_limit=(0, 0),
@@ -1380,8 +1380,8 @@ def test_image_compression_invalid_input(params):
         ),
         # Boundary values
         ({"num_holes_range": (2, 3)}, {"num_holes_range": (2, 3)}),
-        ({"hole_height_range": (0.1, 0.1)}, {"hole_height_range": (0.1, 0.1)}),
-        ({"hole_width_range": (0.1, 0.1)}, {"hole_width_range": (0.1, 0.1)}),
+        ({"hole_height_range": (1, 12)}, {"hole_height_range": (1, 12)}),
+        ({"hole_width_range": (1, 12)}, {"hole_width_range": (1, 12)}),
         # Random fill value
         ({"fill": "random"}, {"fill": "random"}),
         ({"fill": (255, 255, 255)}, {"fill": (255, 255, 255)}),
@@ -1414,7 +1414,7 @@ def test_coarse_dropout_invalid_input(params):
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
@@ -1503,13 +1503,15 @@ def test_change_image(augmentation_cls, params):
         mask[:20, :20] = 1
         data["mask"] = mask
 
+    transformed = aug(**data)
+
     np.testing.assert_array_equal(image, original_image)
-    assert not np.array_equal(aug(**data)["image"], image)
+    assert not np.array_equal(transformed["image"], image)
 
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             A.XYMasking: {
                 "num_masks_x": (1, 3),
@@ -1788,7 +1790,7 @@ def test_random_snow_invalid_input(params):
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
@@ -1885,7 +1887,7 @@ def test_dual_transforms_methods(augmentation_cls, params):
     ],
 )
 @pytest.mark.parametrize(
-    "pad_cval",
+    "fill",
     [
         0,
         (0, 255),
@@ -1907,10 +1909,11 @@ def test_dual_transforms_methods(augmentation_cls, params):
     ],
 )
 @pytest.mark.parametrize("image", IMAGES)
-def test_crop_and_pad(px, percent, pad_cval, keep_size, sample_independently, image):
-    pad_cval_mask = 255 if isinstance(pad_cval, list) else pad_cval
+def test_crop_and_pad(px, percent, fill, keep_size, sample_independently, image):
+    fill_mask = 255 if isinstance(fill, list) else fill
+
     interpolation = cv2.INTER_LINEAR
-    pad_mode = cv2.BORDER_CONSTANT
+    border_mode = cv2.BORDER_CONSTANT
     if (px is None) == (percent is None):
         # Skip the test case where both px and percent are None or both are not None
         return
@@ -1920,9 +1923,9 @@ def test_crop_and_pad(px, percent, pad_cval, keep_size, sample_independently, im
             A.CropAndPad(
                 px=px,
                 percent=percent,
-                pad_mode=pad_mode,
-                pad_cval=pad_cval,
-                pad_cval_mask=pad_cval_mask,
+                border_mode=border_mode,
+                fill=fill,
+                fill_mask=fill_mask,
                 keep_size=keep_size,
                 sample_independently=sample_independently,
                 interpolation=interpolation,
@@ -1963,8 +1966,8 @@ def test_crop_and_pad_percent(percent, expected_shape):
             A.CropAndPad(
                 px=None,
                 percent=percent,
-                pad_mode=cv2.BORDER_CONSTANT,
-                pad_cval=0,
+                border_mode=cv2.BORDER_CONSTANT,
+                fill=0,
                 keep_size=False,
             )
         ],
@@ -1994,8 +1997,8 @@ def test_crop_and_pad_px_pixel_values(px, expected_shape):
             A.CropAndPad(
                 px=px,
                 percent=None,
-                pad_mode=cv2.BORDER_CONSTANT,
-                pad_cval=0,
+                border_mode=cv2.BORDER_CONSTANT,
+                fill=0,
                 keep_size=False,
             )
         ],
@@ -2159,7 +2162,7 @@ def test_random_sun_flare_invalid_input(params):
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
@@ -2197,6 +2200,10 @@ def test_random_sun_flare_invalid_input(params):
                 "read_fn": lambda x: x,
             },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
+            A.PadIfNeeded3D: {"min_zyx": (300, 200, 400), "pad_divisor_zyx": (10, 10, 10), "position": "center", "fill": 10, "fill_mask": 20},
+            A.Pad3D: {"padding": 10},
+            A.RandomCrop3D: {"size": (2, 30, 30), "pad_if_needed": True},
+            A.CenterCrop3D: {"size": (2, 30, 30), "pad_if_needed": True},
         },
         except_augmentations={
             A.RandomCropNearBBox,
@@ -2389,7 +2396,7 @@ def test_mask_dropout_bboxes(remove_invisible, expected_keypoints):
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             A.Crop: {"y_min": 5, "y_max": 95, "x_min": 7, "x_max": 93},
             A.CenterCrop: {"height": 90, "width": 95},

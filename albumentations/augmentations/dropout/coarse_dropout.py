@@ -8,7 +8,7 @@ from pydantic import AfterValidator, Field, model_validator
 from typing_extensions import Self
 
 from albumentations.augmentations.dropout.transforms import BaseDropout
-from albumentations.core.pydantic import check_0plus, check_1plus, nondecreasing
+from albumentations.core.pydantic import check_range_bounds, nondecreasing
 from albumentations.core.types import ColorType, DropoutFillValue, Number, ScalarType
 
 __all__ = ["CoarseDropout", "Erasing"]
@@ -40,12 +40,12 @@ class CoarseDropout(BaseDropout):
             - 'inpaint_telea': uses OpenCV Telea inpainting method
             - 'inpaint_ns': uses OpenCV Navier-Stokes inpainting method
             Default: 0
-        mask_fill_value (ColorType | None): Fill value for dropout regions in the mask.
+        fill_mask (ColorType | None): Fill value for dropout regions in the mask.
             If None, mask regions corresponding to image dropouts are unchanged. Default: None
         p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -92,15 +92,27 @@ class CoarseDropout(BaseDropout):
     class InitSchema(BaseDropout.InitSchema):
         min_holes: int | None = Field(ge=0)
         max_holes: int | None = Field(ge=0)
-        num_holes_range: Annotated[tuple[int, int], AfterValidator(check_1plus), AfterValidator(nondecreasing)]
+        num_holes_range: Annotated[
+            tuple[int, int],
+            AfterValidator(check_range_bounds(1, None)),
+            AfterValidator(nondecreasing),
+        ]
 
         min_height: ScalarType | None = Field(ge=0)
         max_height: ScalarType | None = Field(ge=0)
-        hole_height_range: tuple[ScalarType, ScalarType]
+        hole_height_range: Annotated[
+            tuple[ScalarType, ScalarType],
+            AfterValidator(nondecreasing),
+            AfterValidator(check_range_bounds(1, None)),
+        ]
 
         min_width: ScalarType | None = Field(ge=0)
         max_width: ScalarType | None = Field(ge=0)
-        hole_width_range: tuple[ScalarType, ScalarType]
+        hole_width_range: Annotated[
+            tuple[ScalarType, ScalarType],
+            AfterValidator(nondecreasing),
+            AfterValidator(check_range_bounds(1, None)),
+        ]
 
         @staticmethod
         def update_range(
@@ -254,7 +266,7 @@ class Erasing(BaseDropout):
         p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
-        image, mask, bboxes, keypoints
+        image, mask, bboxes, keypoints, volume, mask3d
 
     Image types:
         uint8, float32
@@ -289,8 +301,16 @@ class Erasing(BaseDropout):
     """
 
     class InitSchema(BaseDropout.InitSchema):
-        scale: Annotated[tuple[float, float], AfterValidator(nondecreasing), AfterValidator(check_0plus)]
-        ratio: Annotated[tuple[float, float], AfterValidator(nondecreasing), AfterValidator(check_0plus)]
+        scale: Annotated[
+            tuple[float, float],
+            AfterValidator(nondecreasing),
+            AfterValidator(check_range_bounds(0, None)),
+        ]
+        ratio: Annotated[
+            tuple[float, float],
+            AfterValidator(nondecreasing),
+            AfterValidator(check_range_bounds(0, None)),
+        ]
 
     def __init__(
         self,

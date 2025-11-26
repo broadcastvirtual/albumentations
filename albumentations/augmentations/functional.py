@@ -39,7 +39,6 @@ from albumentations.augmentations.utils import (
 )
 from albumentations.core.bbox_utils import bboxes_from_masks, masks_from_bboxes
 from albumentations.core.types import (
-    EIGHT,
     MONO_CHANNEL_DIMENSIONS,
     NUM_MULTI_CHANNEL_DIMENSIONS,
     NUM_RGB_CHANNELS,
@@ -167,23 +166,44 @@ def solarize(img: np.ndarray, threshold: float) -> np.ndarray:
 
 @uint8_io
 @clipped
-def posterize(img: np.ndarray, bits: Literal[1, 2, 3, 4, 5, 6, 7, 8]) -> np.ndarray:
-    """Reduce the number of bits for each color channel.
+def posterize(img: np.ndarray, bits: Literal[1, 2, 3, 4, 5, 6, 7] | list[Literal[1, 2, 3, 4, 5, 6, 7]]) -> np.ndarray:
+    """Reduce the number of bits for each color channel by keeping only the highest N bits.
+
+    This transform performs bit-depth reduction by masking out lower bits, effectively
+    reducing the number of possible values per channel. This creates a posterization
+    effect where similar colors are merged together.
 
     Args:
-        img: image to posterize.
-        bits: number of high bits. Must be in range [1, 8]
+        img: Input image. Can be single or multi-channel.
+        bits: Number of high bits to keep. Must be in range [1, 7].
+            Can be either:
+            - A single value to apply the same bit reduction to all channels
+            - A list of values to apply different bit reduction per channel.
+              Length of list must match number of channels in image.
 
     Returns:
-        Image with reduced color channels.
+        np.ndarray: Image with reduced bit depth. Has same shape and dtype as input.
 
+    Note:
+        - The transform keeps the N highest bits and sets all other bits to 0
+        - For example, if bits=3:
+            - Original value: 11010110 (214)
+            - Keep 3 bits:   11000000 (192)
+        - The number of unique colors per channel will be 2^bits
+        - Higher bits values = more colors = more subtle effect
+        - Lower bits values = fewer colors = more dramatic posterization
+
+    Examples:
+        >>> import numpy as np
+        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> # Same posterization for all channels
+        >>> result = posterize(image, bits=3)
+        >>> # Different posterization per channel
+        >>> result = posterize(image, bits=[3, 4, 5])  # RGB channels
     """
     bits_array = np.uint8(bits)
 
     if not bits_array.shape or len(bits_array) == 1:
-        if bits_array == EIGHT:
-            return img
-
         lut = np.arange(0, 256, dtype=np.uint8)
         mask = ~np.uint8(2 ** (8 - bits_array) - 1)
         lut &= mask
@@ -192,14 +212,11 @@ def posterize(img: np.ndarray, bits: Literal[1, 2, 3, 4, 5, 6, 7, 8]) -> np.ndar
 
     result_img = np.empty_like(img)
     for i, channel_bits in enumerate(bits_array):
-        if channel_bits == EIGHT:
-            result_img[..., i] = img[..., i].copy()
-        else:
-            lut = np.arange(0, 256, dtype=np.uint8)
-            mask = ~np.uint8(2 ** (8 - channel_bits) - 1)
-            lut &= mask
+        lut = np.arange(0, 256, dtype=np.uint8)
+        mask = ~np.uint8(2 ** (8 - channel_bits) - 1)
+        lut &= mask
 
-            result_img[..., i] = sz_lut(img[..., i], lut, inplace=True)
+        result_img[..., i] = sz_lut(img[..., i], lut, inplace=True)
 
     return result_img
 
@@ -489,7 +506,7 @@ def image_compression(
         return cv2.imdecode(encoded_img, cv2.IMREAD_UNCHANGED)
 
     # For 2,4 or more channels, we need to handle alpha/extra channels separately
-    if num_channels == 2:  # noqa: PLR2004
+    if num_channels == 2:
         # For 2 channels, pad to 3 channels and take only first 2 after compression
         padded = np.pad(img, ((0, 0), (0, 0), (0, 1)), mode="constant")
         _, encoded_bgr = cv2.imencode(image_type, padded, (int(quality_flag), quality))
@@ -508,7 +525,7 @@ def image_compression(
             channel = img[..., i]
             _, encoded = cv2.imencode(image_type, channel, (int(quality_flag), quality))
             decoded = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
-            if len(decoded.shape) == 2:  # noqa: PLR2004
+            if len(decoded.shape) == 2:
                 decoded = decoded[..., np.newaxis]
             extra_channels.append(decoded)
 
@@ -605,7 +622,7 @@ def generate_snow_textures(
     snow_texture = cv2.GaussianBlur(snow_texture, (0, 0), sigmaX=1, sigmaY=1)
 
     # Generate sparkle mask
-    sparkle_mask = random_generator.random(img_shape[:2]) > 0.99  # noqa: PLR2004
+    sparkle_mask = random_generator.random(img_shape[:2]) > 0.99
 
     return snow_texture, sparkle_mask
 
@@ -908,7 +925,12 @@ def add_sun_flare_overlay(
     overlay = img.copy()
     output = img.copy()
 
+    weighted_brightness = 0.0
+    total_radius_length = 0.0
+
     for alpha, (x, y), rad3, (r_color, g_color, b_color) in circles:
+        weighted_brightness += alpha * rad3
+        total_radius_length += rad3
         cv2.circle(overlay, (x, y), rad3, (r_color, g_color, b_color), -1)
         output = add_weighted(overlay, alpha, output, 1 - alpha)
 
@@ -916,7 +938,13 @@ def add_sun_flare_overlay(
 
     overlay = output.copy()
     num_times = src_radius // 10
-    alpha = np.linspace(0.0, 1, num=num_times)
+
+    # max_alpha is calculated using weighted_brightness and total_radii_length times 5
+    # meaning the higher the alpha with larger area, the brighter the bright spot will be
+    # for list of alphas in range [0.05, 0.2], the max_alpha should below 1
+    max_alpha = weighted_brightness / total_radius_length * 5
+    alpha = np.linspace(0.0, min(max_alpha, 1.0), num=num_times)
+
     rad = np.linspace(1, src_radius, num=num_times)
 
     for i in range(num_times):
@@ -2692,10 +2720,10 @@ def apply_corner_illumination(
     # Adjust coordinates based on corner
     if corner == 1:  # top-right
         x = width - 1 - x
-    elif corner == 2:  # bottom-right  # noqa: PLR2004
+    elif corner == 2:  # bottom-right
         x = width - 1 - x
         y = height - 1 - y
-    elif corner == 3:  # bottom-left  # noqa: PLR2004
+    elif corner == 3:  # bottom-left
         y = height - 1 - y
 
     # Calculate normalized distance

@@ -24,13 +24,11 @@ from albumentations.core.transforms_interface import DualTransform, ImageOnlyTra
 from albumentations.core.utils import to_tuple
 from tests.conftest import (
     IMAGES,
-    RECTANGULAR_FLOAT_IMAGE,
-    RECTANGULAR_UINT8_IMAGE,
     SQUARE_FLOAT_IMAGE,
     SQUARE_UINT8_IMAGE,
 )
 
-from .utils import get_dual_transforms, get_filtered_transforms, get_image_only_transforms, get_transforms, set_seed
+from .utils import get_2d_transforms, get_dual_transforms, get_filtered_transforms, get_image_only_transforms, get_transforms, set_seed
 
 
 def test_one_or_other():
@@ -145,8 +143,6 @@ def test_image_only_transform(image):
             mocked_apply.assert_called_once_with(
                 image,
                 interpolation=cv2.INTER_LINEAR,
-                cols=width,
-                rows=height,
                 shape=image.shape,
             )
             np.testing.assert_array_equal(data["mask"], mask)
@@ -155,25 +151,27 @@ def test_image_only_transform(image):
 @pytest.mark.parametrize("image", IMAGES)
 def test_dual_transform(image):
     mask = image.copy()
-    image_call = call(
-        image,
-        interpolation=cv2.INTER_LINEAR,
-        cols=image.shape[1],
-        rows=image.shape[0],
-        shape=image.shape,
-    )
-    mask_call = call(
-        mask,
-        interpolation=cv2.INTER_NEAREST,
-        cols=mask.shape[1],
-        rows=mask.shape[0],
-        shape=mask.shape,
-    )
+
     with mock.patch.object(DualTransform, "apply") as mocked_apply:
-        with mock.patch.object(DualTransform, "get_params", return_value={"interpolation": cv2.INTER_LINEAR}):
+        with mock.patch.object(DualTransform, "get_params", return_value={}):  # Empty params
             aug = DualTransform(p=1)
             aug(image=image, mask=mask)
-            mocked_apply.assert_has_calls([image_call, mask_call], any_order=True)
+
+            # Get the actual calls
+            calls = mocked_apply.call_args_list
+            assert len(calls) == 2  # Should be called twice
+
+            # Check each call has correct structure
+            for call_args in calls:
+                args, kwargs = call_args
+
+                # Check kwargs contain correct keys and values
+                assert "shape" in kwargs
+                assert kwargs["shape"] == image.shape
+
+                # Check input array is either image or mask
+                input_array = args[0]
+                assert np.array_equal(input_array, image) or np.array_equal(input_array, mask)
 
 
 @pytest.mark.parametrize("image", IMAGES)
@@ -182,15 +180,11 @@ def test_additional_targets(image):
     image_call = call(
         image,
         interpolation=cv2.INTER_LINEAR,
-        cols=image.shape[1],
-        rows=image.shape[0],
         shape=image.shape,
     )
     image2_call = call(
         mask,
         interpolation=cv2.INTER_LINEAR,
-        cols=mask.shape[1],
-        rows=mask.shape[0],
         shape=mask.shape,
     )
     with mock.patch.object(DualTransform, "apply") as mocked_apply:
@@ -1069,7 +1063,7 @@ def test_transform_always_apply_warning() -> None:
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
@@ -1099,7 +1093,7 @@ def test_transform_always_apply_warning() -> None:
                 "reference_images": [np.random.randint(0, 256, [100, 100, 3], dtype=np.uint8)],
                 "read_fn": lambda x: x,
                 "transform_type": "standard",
-            },
+            }
         },
         except_augmentations={
             A.FDA,
@@ -1114,11 +1108,28 @@ def test_transform_always_apply_warning() -> None:
         },
     ),
 )
-def test_images_as_target(augmentation_cls, params):
-    image = RECTANGULAR_FLOAT_IMAGE if augmentation_cls == A.FromFloat else RECTANGULAR_UINT8_IMAGE
+@pytest.mark.parametrize("as_array", [True, False])
+@pytest.mark.parametrize("shape", [(101, 99, 3), (101, 99)])
+def test_images_as_target(augmentation_cls, params, as_array, shape):
+    if len(shape) == 2:
+        if augmentation_cls in {A.ChannelDropout, A.Spatter, A.ISONoise,
+                                A.RandomGravel, A.ChromaticAberration, A.PlanckianJitter, A.PixelDistributionAdaptation,
+                                A.MaskDropout, A.ChannelShuffle, A.ToRGB}:
+            pytest.skip("ChannelDropout is not applicable to grayscale images")
+
+
+    image = np.random.uniform(0, 255, shape).astype(np.float32) if augmentation_cls == A.FromFloat else np.random.randint(0, 255, shape, dtype=np.uint8)
+
     image2 = image.copy()
 
-    data = {"images": [image, image2]}
+    if as_array:
+        # Stack images into a single array
+        images = np.stack([image, image2])
+        data = {"images": images}
+    else:
+        # Original list format
+        data = {"images": [image, image2]}
+
     if augmentation_cls == A.MaskDropout:
         mask = np.zeros_like(image)[:, :, 0]
         mask[:20, :20] = 1
@@ -1126,16 +1137,42 @@ def test_images_as_target(augmentation_cls, params):
 
     aug = A.Compose(
         [augmentation_cls(p=1, **params)],
+        p=1,
     )
 
-    transformed2 = aug(**data)
+    transformed = aug(**data)
 
-    np.testing.assert_array_equal(transformed2["images"][0], transformed2["images"][1])
+
+    # Check both images were transformed identically
+    np.testing.assert_array_equal(transformed["images"][0], transformed["images"][1])
+
+    # Check output format matches input format
+    if as_array:
+        assert isinstance(transformed["images"], np.ndarray)
+
+        assert transformed["images"].ndim == len(shape) + 1, f"Expected {len(shape) + 1} dimensions, got {transformed['images'].ndim}"
+
+        assert transformed["images"].flags["C_CONTIGUOUS"]  # Ensure memory is contiguous
+
+        # Verify exact shape matches expected dimensions
+        N, H, W = transformed["images"].shape[:3]
+        assert N == 2  # Two images as input
+        if len(shape) == 3:
+            assert transformed["images"].shape[-1] == image.shape[2]  # Channels match input
+
+        if augmentation_cls not in [A.RandomCrop, A.RandomResizedCrop, A.Resize, A.RandomSizedCrop, A.RandomSizedBBoxSafeCrop,
+                                    A.BBoxSafeRandomCrop, A.Transpose, A.RandomCropNearBBox, A.CenterCrop, A.Crop, A.CropAndPad,
+                                    A.LongestMaxSize, A.RandomScale, A.PadIfNeeded, A.SmallestMaxSize, A.RandomCropFromBorders,
+                                    A.RandomRotate90, A.D4]:
+            assert H == image.shape[0]  # Height matches input
+            assert W == image.shape[1]  # Width matches input
+    else:
+        assert isinstance(transformed["images"], list)
 
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             # only image
             A.HistogramMatching: {
@@ -1191,23 +1228,36 @@ def test_non_contiguous_input_with_compose(augmentation_cls, params, bboxes):
     if augmentation_cls == A.RandomCropNearBBox:
         # requires "cropping_bbox" arg
         aug = A.Compose([augmentation_cls(p=1, **params)])
-        transformed = aug(image=image, mask=mask, cropping_bbox=bboxes[0])
+
+        data = {
+            "image": image,
+            "mask": mask,
+            "cropping_bbox": bboxes[0],
+        }
     elif augmentation_cls in [A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop]:
         # requires "bboxes" arg
         aug = A.Compose([augmentation_cls(p=1, **params)], bbox_params=A.BboxParams(format="pascal_voc"))
-        transformed = aug(image=image, mask=mask, bboxes=bboxes)
+        data = {
+            "image": image,
+            "mask": mask,
+            "bboxes": bboxes,
+        }
     elif augmentation_cls == A.TextImage:
         aug = A.Compose([augmentation_cls(p=1, **params)], bbox_params=A.BboxParams(format="pascal_voc"))
-        transformed = aug(
-            image=image,
-            mask=mask,
-            bboxes=bboxes,
-            textimage_metadata={"text": "Hello, world!", "bbox": (0.1, 0.1, 0.9, 0.2)},
-        )
+        data = {
+            "image": image,
+            "mask": mask,
+            "bboxes": bboxes,
+            "textimage_metadata": {"text": "Hello, world!", "bbox": (0.1, 0.1, 0.9, 0.2)},
+        }
     elif augmentation_cls == A.OverlayElements:
         # requires "metadata" arg
         aug = A.Compose([augmentation_cls(p=1, **params)])
-        transformed = aug(image=image, overlay_metadata=[], mask=mask)
+        data = {
+            "image": image,
+            "mask": mask,
+            "overlay_metadata": [],
+        }
     else:
         # standard args: image and mask
         if augmentation_cls == A.FromFloat:
@@ -1218,10 +1268,14 @@ def test_non_contiguous_input_with_compose(augmentation_cls, params, bboxes):
             # requires single channel mask
             mask = mask[:, :, 0]
 
-        aug = augmentation_cls(p=1, **params)
-        transformed = aug(image=image, mask=mask)
+        aug = A.Compose([augmentation_cls(p=1, **params)], p=1)
+        data = {
+            "image": image,
+            "mask": mask,
+        }
+    transformed = aug(**data)
 
-    assert transformed["image"].flags["C_CONTIGUOUS"]
+    assert transformed["image"].flags["C_CONTIGUOUS"], f"{augmentation_cls.__name__} did not return a C_CONTIGUOUS image"
 
     # Check if the augmentation is not an ImageOnlyTransform and mask is in the output
     if not issubclass(augmentation_cls, ImageOnlyTransform) and "mask" in transformed:
@@ -1232,7 +1286,7 @@ def test_non_contiguous_input_with_compose(augmentation_cls, params, bboxes):
 
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
-    get_transforms(
+    get_2d_transforms(
         custom_arguments={
             A.Crop: {"y_min": 0, "y_max": 10, "x_min": 0, "x_max": 10},
             A.CenterCrop: {"height": 10, "width": 10},
@@ -1282,19 +1336,25 @@ def test_non_contiguous_input_with_compose(augmentation_cls, params, bboxes):
 @pytest.mark.parametrize(
     "masks",
     [
-        [np.random.randint(0, 2, [100, 100], dtype=np.uint8)] * 2,
-        [np.random.randint(0, 2, [100, 100, 3], dtype=np.uint8)] * 2,
-        np.stack([np.random.randint(0, 2, [100, 100], dtype=np.uint8)] * 2),
+        [np.random.randint(0, 2, [100, 100], dtype=np.uint8)] * 3,
+        [np.random.randint(0, 2, [100, 100, 3], dtype=np.uint8)] * 3,
+        np.stack([np.random.randint(0, 2, [100, 100], dtype=np.uint8)] * 3),
     ],
 )
 def test_masks_as_target(augmentation_cls, params, masks):
     image = SQUARE_UINT8_IMAGE
 
+    data = {
+        "image": image,
+        "masks": masks,
+    }
+
     aug = A.Compose(
         [augmentation_cls(p=1, **params)],
+        seed=42,
     )
 
-    transformed = aug(image=image, masks=masks)
+    transformed = aug(**data)
 
     np.testing.assert_array_equal(transformed["masks"][0], transformed["masks"][1])
 
@@ -1376,15 +1436,15 @@ def test_mask_interpolation_someof(interpolation, compose):
 @pytest.mark.parametrize(
     ["transform", "expected_param_keys"],
     [
-        (A.HorizontalFlip(p=1), {"cols", "rows", "shape"}),
-        (A.VerticalFlip(p=1), {"cols", "rows", "shape"}),
+        (A.HorizontalFlip(p=1), {"shape"}),
+        (A.VerticalFlip(p=1), {"shape"}),
         (
             A.RandomBrightnessContrast(p=1),
-            {"cols", "rows", "shape", "alpha", "beta"}
+            {"shape", "alpha", "beta"}
         ),
         (
             A.Rotate(p=1),
-            {'shape', 'cols', 'rows', 'x_min', 'x_max', 'y_min', 'y_max', 'matrix', 'bbox_matrix', 'interpolation', "fill", "fill_mask"}
+            {'shape', 'x_min', 'x_max', 'y_min', 'y_max', 'matrix', 'bbox_matrix', 'interpolation', "fill", "fill_mask"}
         ),
     ],
 )

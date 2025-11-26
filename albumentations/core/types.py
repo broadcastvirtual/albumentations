@@ -47,8 +47,14 @@ class Targets(Enum):
     MASK = "Mask"
     BBOXES = "BBoxes"
     KEYPOINTS = "Keypoints"
+    VOLUME = "Volume"
+    MASK3D = "Mask3D"
 
 
+ALL_TARGETS = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS, Targets.VOLUME, Targets.MASK3D)
+
+
+NUM_VOLUME_DIMENSIONS = 4
 NUM_MULTI_CHANNEL_DIMENSIONS = 3
 MONO_CHANNEL_DIMENSIONS = 2
 NUM_RGB_CHANNELS = 3
@@ -57,6 +63,7 @@ PAIR = 2
 TWO = 2
 THREE = 3
 FOUR = 4
+SEVEN = 7
 EIGHT = 8
 THREE_SIXTY = 360
 

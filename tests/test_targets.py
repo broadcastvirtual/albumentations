@@ -4,13 +4,13 @@ import numpy as np
 import pytest
 
 import albumentations as A
-from albumentations.core.types import Targets
+from albumentations.core.types import ALL_TARGETS, Targets
 
 from .utils import get_dual_transforms, get_image_only_transforms
 
 
 def get_targets_from_methods(cls):
-    targets = {Targets.IMAGE, Targets.MASK}
+    targets = {Targets.IMAGE, Targets.MASK, Targets.VOLUME, Targets.MASK3D}
 
     has_bboxes_method = any(
         hasattr(cls, attr) and getattr(cls, attr) is not getattr(A.DualTransform, attr, None)
@@ -31,20 +31,18 @@ def get_targets_from_methods(cls):
 
 def extract_targets_from_docstring(cls):
     # Access the class's docstring
-    docstring = cls.__doc__
-    if not docstring:
+    if not (docstring := cls.__doc__):
         return []  # Return an empty list if there's no docstring
 
     # Regular expression to match the 'Targets:' section in the docstring
     targets_pattern = r"Targets:\s*([^\n]+)"
 
-    # Search for the pattern in the docstring
-    matches = re.search(targets_pattern, docstring)
-    if matches:
+    # Search for the pattern in the docstring and extract targets if found
+    if matches := re.search(targets_pattern, docstring):
         # Extract the targets string and split it by commas or spaces
-        targets_str = matches.group(1)
-        targets = re.split(r"[,\s]+", targets_str)  # Split by comma or whitespace
+        targets = re.split(r"[,\s]+", matches[1])  # Using subscript notation instead of group()
         return [target.strip() for target in targets if target.strip()]  # Remove any extra whitespace
+
     return []  # Return an empty list if the 'Targets:' section isn't found
 
 
@@ -58,6 +56,8 @@ str2target = {
     "mask": Targets.MASK,
     "bboxes": Targets.BBOXES,
     "keypoints": Targets.KEYPOINTS,
+    "volume": Targets.VOLUME,
+    "mask3d": Targets.MASK3D,
 }
 
 
@@ -87,8 +87,7 @@ str2target = {
 )
 def test_image_only(augmentation_cls, params):
     aug = augmentation_cls(p=1, **params)
-
-    assert aug._targets == (Targets.IMAGE)
+    assert aug._targets == (Targets.IMAGE, Targets.VOLUME)
 
 
 @pytest.mark.parametrize(
@@ -118,7 +117,7 @@ def test_image_only(augmentation_cls, params):
 )
 def test_dual(augmentation_cls, params):
     aug = augmentation_cls(p=1, **params)
-    assert set(aug._targets) == set(DUAL_TARGETS.get(augmentation_cls, {Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS}))
+    assert set(aug._targets) == set(DUAL_TARGETS.get(augmentation_cls, ALL_TARGETS))
     assert set(aug._targets) <= get_targets_from_methods(augmentation_cls)
 
     targets_from_docstring = {str2target[target] for target in extract_targets_from_docstring(augmentation_cls)}

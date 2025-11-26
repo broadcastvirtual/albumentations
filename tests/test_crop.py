@@ -81,7 +81,7 @@ def test_crop_near_bbox(image, bboxes, keypoints):
 
     aug(image=image, bboxes=bboxes, target_bbox=[0, 5, 10, 20], keypoints=keypoints)
 
-    target_keys = {"image", "images", "bboxes", "labels", "mask", "masks", "keypoints", bbox_key}
+    target_keys = {"image", "images", "bboxes", "labels", "mask", "masks", "keypoints", "volume", "volumes", "mask3d", "masks3d", bbox_key}
 
     assert aug._available_keys == target_keys
 
@@ -167,8 +167,8 @@ def test_pad_position_equivalence(
         crop_cls(
             **crop_params,
             pad_if_needed=True,
-            pad_mode=pad_mode,
-            pad_cval=0,
+            border_mode=pad_mode,
+            fill=0,
             pad_position=pad_position,
         )
     ], keypoint_params=A.KeypointParams(format="xyas"), bbox_params=A.BboxParams(format="pascal_voc"))
@@ -179,7 +179,7 @@ def test_pad_position_equivalence(
             min_height=crop_params["height"],
             min_width=crop_params["width"],
             border_mode=pad_mode,
-            value=0,
+            fill=0,
             position=pad_position,
         ),
         crop_cls(
@@ -211,3 +211,27 @@ def test_pad_position_equivalence(
         result2["keypoints"],
         err_msg=f"Keypoints don't match for position {pad_position}"
     )
+
+def test_base_crop_and_pad_fill():
+    # tests whether BaseCropAndPad usues correct values for constant borders
+    c = A.CenterCrop(4, 4, pad_if_needed=True, fill=100, fill_mask=200)
+    c1 = A.CenterCrop(4, 4, pad_if_needed=True, fill=201)
+
+    im = np.zeros((2, 6, 3)).astype(np.float32)
+    msk = np.zeros((2, 6)).astype(np.uint8)
+
+    out = c(image=im, mask=msk)
+    out1 = c1(image=im, mask=msk)
+
+    expected_img = np.ones((4, 4, 3)).astype(np.float32)
+    expected_img[1:3, ...] = 0
+
+    expected_msk = np.ones((4, 4)).astype(np.uint8)
+    expected_msk[1:3, ...] = 0
+
+    assert np.all(out["image"] == expected_img * 100)
+    assert np.all(out["mask"] == expected_msk * 200)
+
+
+    assert np.all(out1["image"] == expected_img * 201)
+    assert np.all(out1["mask"] == expected_msk * 0)  # 0 is the default for fill_mask

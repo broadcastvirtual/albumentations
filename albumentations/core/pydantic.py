@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Annotated, overload
+from typing import Annotated, TypeVar, overload
 
 import cv2
 from pydantic import Field
@@ -97,80 +97,93 @@ def convert_to_1plus_range(value: ScaleType) -> tuple[float, float]:
     return to_tuple(value, low=1)
 
 
-def check_1plus(value: tuple[Number, Number]) -> tuple[Number, Number]:
-    if any(x < 1 for x in value):
-        raise ValueError(f"All values should be >= 1, got {value} instead")
-    return value
-
-
-def check_0plus(value: tuple[Number, Number]) -> tuple[Number, Number]:
-    if any(x < 0 for x in value):
-        raise ValueError(f"All values should be >= 0, got {value} instead")
-    return value
-
-
-OnePlusFloatRangeType = Annotated[ScaleType, AfterValidator(convert_to_1plus_range), AfterValidator(check_1plus)]
-OnePlusIntRangeType = Annotated[
-    ScaleType,
-    AfterValidator(convert_to_1plus_range),
-    AfterValidator(check_1plus),
-    AfterValidator(float2int),
-]
-
-OnePlusIntNonDecreasingRangeType = Annotated[
-    tuple[Number, Number],
-    AfterValidator(check_1plus),
-    AfterValidator(nondecreasing),
-    AfterValidator(float2int),
-]
-
-
 def convert_to_0plus_range(value: ScaleType) -> tuple[float, float]:
     return to_tuple(value, low=0)
-
-
-def check_01(value: tuple[Number, Number]) -> tuple[Number, Number]:
-    if not all(0.0 <= x <= 1.0 for x in value):
-        raise ValueError(f"All values should be in [0, 1], got {value} instead")
-    return value
-
-
-ZeroOneRangeType = Annotated[
-    ScaleType,
-    AfterValidator(convert_to_0plus_range),
-    AfterValidator(check_01),
-    AfterValidator(nondecreasing),
-]
 
 
 def repeat_if_scalar(value: ScaleType) -> tuple[float, float]:
     return (value, value) if isinstance(value, (int, float)) else value
 
 
+T = TypeVar("T", int, float)
+
+
 def check_range_bounds(
     min_val: Number,
     max_val: Number | None = None,
-) -> Callable[[tuple[Number, Number]], tuple[Number, Number]]:
-    """Validates that both values in a tuple are within specified bounds.
+    min_inclusive: bool = True,
+    max_inclusive: bool = True,
+) -> Callable[[tuple[T, ...] | None], tuple[T, ...] | None]:
+    """Validates that all values in a tuple are within specified bounds.
 
     Args:
-        min_val: Minimum allowed value (inclusive)
-        max_val: Maximum allowed value (inclusive). If None, only lower bound is checked.
+        min_val: Minimum allowed value
+        max_val: Maximum allowed value. If None, only lower bound is checked.
+        min_inclusive: If True, min_val is inclusive (>=). If False, exclusive (>).
+        max_inclusive: If True, max_val is inclusive (<=). If False, exclusive (<).
 
     Returns:
-        Validator function that checks if both values in tuple are within bounds.
-        If max_val is None, only checks that values are >= min_val.
+        Validator function that checks if all values in tuple are within bounds.
+        Returns None if input is None.
 
     Raises:
         ValueError: If any value in tuple is outside the allowed range
+
+    Examples:
+        >>> validator = check_range_bounds(0, 1)  # For [0, 1] range
+        >>> validator((0.1, 0.5))  # Valid 2D
+        (0.1, 0.5)
+        >>> validator((0.1, 0.5, 0.7))  # Valid 3D
+        (0.1, 0.5, 0.7)
+        >>> validator((1.1, 0.5))  # Raises ValueError - outside range
+        >>> validator = check_range_bounds(0, 1, max_inclusive=False)  # For [0, 1) range
+        >>> validator((0, 1))  # Raises ValueError - 1 not included
     """
 
-    def validator(value: tuple[Number, Number]) -> tuple[Number, Number]:
+    def validator(value: tuple[T, ...] | None) -> tuple[T, ...] | None:
+        if value is None:
+            return None
+
+        min_op = (lambda x, y: x >= y) if min_inclusive else (lambda x, y: x > y)
+        max_op = (lambda x, y: x <= y) if max_inclusive else (lambda x, y: x < y)
+
         if max_val is None:
-            if not (value[0] >= min_val and value[1] >= min_val):
-                raise ValueError(f"All values in {value} must be >= {min_val}")
-        elif not (min_val <= value[0] <= max_val and min_val <= value[1] <= max_val):
-            raise ValueError(f"All values in {value} must be in range [{min_val}, {max_val}]")
+            if not all(min_op(x, min_val) for x in value):
+                op_symbol = ">=" if min_inclusive else ">"
+                raise ValueError(f"All values in {value} must be {op_symbol} {min_val}")
+        else:
+            min_symbol = ">=" if min_inclusive else ">"
+            max_symbol = "<=" if max_inclusive else "<"
+            if not all(min_op(x, min_val) and max_op(x, max_val) for x in value):
+                raise ValueError(f"All values in {value} must be {min_symbol} {min_val} and {max_symbol} {max_val}")
         return value
 
     return validator
+
+
+ZeroOneRangeType = Annotated[
+    ScaleType,
+    AfterValidator(convert_to_0plus_range),
+    AfterValidator(check_range_bounds(0, 1)),
+    AfterValidator(nondecreasing),
+]
+
+
+OnePlusFloatRangeType = Annotated[
+    ScaleType,
+    AfterValidator(convert_to_1plus_range),
+    AfterValidator(check_range_bounds(1, None)),
+]
+OnePlusIntRangeType = Annotated[
+    ScaleType,
+    AfterValidator(convert_to_1plus_range),
+    AfterValidator(check_range_bounds(1, None)),
+    AfterValidator(float2int),
+]
+
+OnePlusIntNonDecreasingRangeType = Annotated[
+    tuple[Number, Number],
+    AfterValidator(check_range_bounds(1, None)),
+    AfterValidator(nondecreasing),
+    AfterValidator(float2int),
+]
