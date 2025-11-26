@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import abc
 from copy import deepcopy
+from typing import Literal
 
 import cv2
 import numpy as np
-from albucore.functions import add_weighted
-from albucore.utils import clip, clipped, preserve_channel_dim
+from albucore.functions import add_weighted, from_float, to_float
+from albucore.utils import clip, clipped, get_num_channels, preserve_channel_dim
 from skimage.exposure import match_histograms
 from typing_extensions import Protocol
 
 import albumentations.augmentations.functional as fmain
-from albumentations.augmentations.functional import center
+from albumentations.augmentations.utils import PCA
 from albumentations.core.types import MONO_CHANNEL_DIMENSIONS, NUM_MULTI_CHANNEL_DIMENSIONS
 
 __all__ = [
@@ -104,61 +105,6 @@ class StandardScaler(BaseScaler):
         return (x * self.scale) + self.mean
 
 
-class PCA:
-    def __init__(self, n_components: int | None = None) -> None:
-        if n_components is not None and n_components <= 0:
-            raise ValueError("Number of components must be greater than zero.")
-        self.n_components = n_components
-        self.mean: np.ndarray | None = None
-        self.components_: np.ndarray | None = None
-        self.explained_variance_: np.ndarray | None = None
-
-    def fit(self, x: np.ndarray) -> None:
-        x = x.astype(np.float64)
-        n_samples, n_features = x.shape
-
-        # Determine the number of components if not set
-        if self.n_components is None:
-            self.n_components = min(n_samples, n_features)
-
-        self.mean, eigenvectors, eigenvalues = cv2.PCACompute2(x, mean=None, maxComponents=self.n_components)
-        self.components_ = eigenvectors
-        self.explained_variance_ = eigenvalues.flatten()
-
-    def transform(self, x: np.ndarray) -> np.ndarray:
-        if self.components_ is None:
-            raise ValueError(
-                "This PCA instance is not fitted yet. "
-                "Call 'fit' with appropriate arguments before using this estimator.",
-            )
-        x = x.astype(np.float64)
-        return cv2.PCAProject(x, self.mean, self.components_)
-
-    def fit_transform(self, x: np.ndarray) -> np.ndarray:
-        self.fit(x)
-        return self.transform(x)
-
-    def inverse_transform(self, x: np.ndarray) -> np.ndarray:
-        if self.components_ is None:
-            raise ValueError(
-                "This PCA instance is not fitted yet. "
-                "Call 'fit' with appropriate arguments before using this estimator.",
-            )
-        return cv2.PCABackProject(x, self.mean, self.components_)
-
-    def explained_variance_ratio(self) -> np.ndarray:
-        if self.explained_variance_ is None:
-            raise ValueError(
-                "This PCA instance is not fitted yet. "
-                "Call 'fit' with appropriate arguments before using this method.",
-            )
-        total_variance = np.sum(self.explained_variance_)
-        return self.explained_variance_ / total_variance
-
-    def cumulative_explained_variance_ratio(self) -> np.ndarray:
-        return np.cumsum(self.explained_variance_ratio())
-
-
 class TransformerInterface(Protocol):
     @abc.abstractmethod
     def inverse_transform(self, x: np.ndarray) -> np.ndarray: ...
@@ -171,8 +117,6 @@ class TransformerInterface(Protocol):
 
 
 class DomainAdapter:
-    """Source: https://github.com/arsenyinfo/qudida by Arseny Kravchenko"""
-
     def __init__(
         self,
         transformer: TransformerInterface,
@@ -182,6 +126,7 @@ class DomainAdapter:
         self.color_in, self.color_out = color_conversions
         self.source_transformer = deepcopy(transformer)
         self.target_transformer = transformer
+        self.num_channels = get_num_channels(ref_img)
         self.target_transformer.fit(self.flatten(ref_img))
 
     def to_colorspace(self, img: np.ndarray) -> np.ndarray:
@@ -194,12 +139,14 @@ class DomainAdapter:
 
     def flatten(self, img: np.ndarray) -> np.ndarray:
         img = self.to_colorspace(img)
-        img = fmain.to_float(img)
-        return img.reshape(-1, 3)
+        img = to_float(img)
+        return img.reshape(-1, self.num_channels)
 
     def reconstruct(self, pixels: np.ndarray, height: int, width: int) -> np.ndarray:
         pixels = (np.clip(pixels, 0, 1) * 255).astype("uint8")
-        return self.from_colorspace(pixels.reshape(height, width, 3))
+        if self.num_channels == 1:
+            return self.from_colorspace(pixels.reshape(height, width))
+        return self.from_colorspace(pixels.reshape(height, width, self.num_channels))
 
     @staticmethod
     def _pca_sign(x: np.ndarray) -> np.ndarray:
@@ -210,7 +157,6 @@ class DomainAdapter:
         pixels = self.flatten(image)
         self.source_transformer.fit(pixels)
 
-        # dirty hack to make sure colors are not inverted
         if (
             hasattr(self.target_transformer, "components_")
             and hasattr(self.source_transformer, "components_")
@@ -228,20 +174,47 @@ class DomainAdapter:
 def adapt_pixel_distribution(
     img: np.ndarray,
     ref: np.ndarray,
-    transform_type: str = "pca",
-    weight: float = 0.5,
+    transform_type: Literal["pca", "standard", "minmax"],
+    weight: float,
 ) -> np.ndarray:
+    if img.dtype != ref.dtype:
+        raise ValueError("Input image and reference image must have the same dtype.")
+    img_num_channels = get_num_channels(img)
+    ref_num_channels = get_num_channels(ref)
+
+    if img_num_channels != ref_num_channels:
+        raise ValueError("Input image and reference image must have the same number of channels.")
+
+    if img_num_channels == 1:
+        img = np.squeeze(img)
+        ref = np.squeeze(ref)
+
+    if img.shape != ref.shape:
+        ref = cv2.resize(ref, dsize=img.shape[:2], interpolation=cv2.INTER_AREA)
+
+    original_dtype = img.dtype
+
+    if original_dtype == np.float32:
+        img = from_float(img, np.uint8)
+        ref = from_float(ref, np.uint8)
+
     transformer = {"pca": PCA, "standard": StandardScaler, "minmax": MinMaxScaler}[transform_type]()
     adapter = DomainAdapter(transformer=transformer, ref_img=ref)
-    result = adapter(img).astype(np.float32)
-    return img.astype(np.float32) * (1 - weight) + result * weight
+    transformed = adapter(img).astype(np.float32)
+
+    result = img.astype(np.float32) * (1 - weight) + transformed * weight
+
+    return result if original_dtype == np.uint8 else to_float(result)
 
 
 def low_freq_mutate(amp_src: np.ndarray, amp_trg: np.ndarray, beta: float) -> np.ndarray:
-    height, width = amp_src.shape[:2]
-    border = int(np.floor(min(height, width) * beta))
+    image_shape = amp_src.shape[:2]
 
-    center_x, center_y = center(width, height)
+    border = int(np.floor(min(image_shape) * beta))
+
+    center_x, center_y = fmain.center(image_shape)
+
+    height, width = image_shape
 
     h1, h2 = max(0, int(center_y - border)), min(int(center_y + border), height)
     w1, w2 = max(0, int(center_x - border)), min(int(center_x + border), width)
@@ -252,6 +225,57 @@ def low_freq_mutate(amp_src: np.ndarray, amp_trg: np.ndarray, beta: float) -> np
 @clipped
 @preserve_channel_dim
 def fourier_domain_adaptation(img: np.ndarray, target_img: np.ndarray, beta: float) -> np.ndarray:
+    """Apply Fourier Domain Adaptation to the input image using a target image.
+
+    This function performs domain adaptation in the frequency domain by modifying the amplitude
+    spectrum of the source image based on the target image's amplitude spectrum. It preserves
+    the phase information of the source image, which helps maintain its content while adapting
+    its style to match the target image.
+
+    Args:
+        img (np.ndarray): The source image to be adapted. Can be grayscale or RGB.
+        target_img (np.ndarray): The target image used as a reference for adaptation.
+            Should have the same dimensions as the source image.
+        beta (float): The adaptation strength, typically in the range [0, 1].
+            Higher values result in stronger adaptation towards the target image's style.
+
+    Returns:
+        np.ndarray: The adapted image with the same shape and type as the input image.
+
+    Raises:
+        ValueError: If the source and target images have different shapes.
+
+    Note:
+        - Both input images are converted to float32 for processing.
+        - The function handles both grayscale (2D) and color (3D) images.
+        - For grayscale images, an extra dimension is added to facilitate uniform processing.
+        - The adaptation is performed channel-wise for color images.
+        - The output is clipped to the valid range and preserves the original number of channels.
+
+    The adaptation process involves the following steps for each channel:
+    1. Compute the 2D Fourier Transform of both source and target images.
+    2. Shift the zero frequency component to the center of the spectrum.
+    3. Extract amplitude and phase information from the source image's spectrum.
+    4. Mutate the source amplitude using the target amplitude and the beta parameter.
+    5. Combine the mutated amplitude with the original phase.
+    6. Perform the inverse Fourier Transform to obtain the adapted channel.
+
+    The `low_freq_mutate` function (not shown here) is responsible for the actual
+    amplitude mutation, focusing on low-frequency components which carry style information.
+
+    Example:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> source_img = np.random.rand(100, 100, 3).astype(np.float32)
+        >>> target_img = np.random.rand(100, 100, 3).astype(np.float32)
+        >>> adapted_img = A.fourier_domain_adaptation(source_img, target_img, beta=0.5)
+        >>> assert adapted_img.shape == source_img.shape
+
+    References:
+        - "FDA: Fourier Domain Adaptation for Semantic Segmentation"
+          (Yang and Soatto, 2020, CVPR)
+          https://openaccess.thecvf.com/content_CVPR_2020/papers/Yang_FDA_Fourier_Domain_Adaptation_for_Semantic_Segmentation_CVPR_2020_paper.pdf
+    """
     src_img = img.astype(np.float32)
     trg_img = target_img.astype(np.float32)
 
@@ -279,7 +303,6 @@ def fourier_domain_adaptation(img: np.ndarray, target_img: np.ndarray, beta: flo
         amp_trg = np.abs(fft_trg_shifted)
 
         # Mutate the amplitude part of the source with the target
-
         mutated_amp = low_freq_mutate(amp_src.copy(), amp_trg, beta)
 
         # Combine the mutated amplitude with the original phase

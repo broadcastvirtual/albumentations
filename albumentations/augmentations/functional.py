@@ -7,7 +7,16 @@ from warnings import warn
 import cv2
 import numpy as np
 import skimage
-from albucore.functions import add, add_array, add_weighted, multiply, multiply_add
+from albucore.functions import (
+    add,
+    add_array,
+    add_weighted,
+    from_float,
+    multiply,
+    multiply_add,
+    normalize_per_image,
+    to_float,
+)
 from albucore.utils import (
     MAX_VALUES_BY_DTYPE,
     clip,
@@ -22,17 +31,17 @@ from typing_extensions import Literal
 
 from albumentations import random_utils
 from albumentations.augmentations.utils import (
-    non_rgb_warning,
+    PCA,
+    non_rgb_error,
 )
 from albumentations.core.types import (
     EIGHT,
     MONO_CHANNEL_DIMENSIONS,
     NUM_MULTI_CHANNEL_DIMENSIONS,
+    NUM_RGB_CHANNELS,
     ColorType,
     ImageMode,
-    NumericType,
     PlanckianJitterMode,
-    SizeType,
     SpatterMode,
 )
 
@@ -56,7 +65,6 @@ __all__ = [
     "downscale",
     "equalize",
     "fancy_pca",
-    "from_float",
     "gamma_transform",
     "image_compression",
     "invert",
@@ -69,9 +77,7 @@ __all__ = [
     "solarize",
     "superpixels",
     "swap_tiles_on_image",
-    "to_float",
     "to_gray",
-    "gray_to_rgb",
     "unsharp_mask",
     "split_uniform_grid",
     "chromatic_aberration",
@@ -145,10 +151,7 @@ def shift_hsv(img: np.ndarray, hue_shift: np.ndarray, sat_shift: np.ndarray, val
     else:
         img = _shift_hsv_non_uint8(img, hue_shift, sat_shift, val_shift)
 
-    if is_gray:
-        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-
-    return img
+    return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if is_gray else img
 
 
 def solarize(img: np.ndarray, threshold: int = 128) -> np.ndarray:
@@ -283,10 +286,6 @@ def _equalize_cv(img: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
 
 
 def _check_preconditions(img: np.ndarray, mask: np.ndarray | None, by_channels: bool) -> None:
-    if img.dtype != np.uint8:
-        msg = "Image must have uint8 channel type"
-        raise TypeError(msg)
-
     if mask is not None:
         if is_rgb_image(mask) and is_grayscale_image(img):
             raise ValueError(f"Wrong mask shape. Image shape: {img.shape}. Mask shape: {mask.shape}")
@@ -315,6 +314,48 @@ def equalize(
     mode: ImageMode = "cv",
     by_channels: bool = True,
 ) -> np.ndarray:
+    """Apply histogram equalization to the input image.
+
+    This function enhances the contrast of the input image by equalizing its histogram.
+    It supports both grayscale and color images, and can operate on individual channels
+    or on the luminance channel of the image.
+
+    Args:
+        img (np.ndarray): Input image. Can be grayscale (2D array) or RGB (3D array).
+        mask (np.ndarray | None): Optional mask to apply the equalization selectively.
+            If provided, must have the same shape as the input image. Default: None.
+        mode (ImageMode): The backend to use for equalization. Can be either "cv" for
+            OpenCV or "pil" for Pillow-style equalization. Default: "cv".
+        by_channels (bool): If True, applies equalization to each channel independently.
+            If False, converts the image to YCrCb color space and equalizes only the
+            luminance channel. Only applicable to color images. Default: True.
+
+    Returns:
+        np.ndarray: Equalized image. The output has the same dtype as the input.
+
+    Raises:
+        ValueError: If the input image or mask have invalid shapes or types.
+
+    Note:
+        - If the input image is not uint8, it will be temporarily converted to uint8
+          for processing and then converted back to its original dtype.
+        - For color images, when by_channels=False, the image is converted to YCrCb
+          color space, equalized on the Y channel, and then converted back to RGB.
+        - The function preserves the original number of channels in the image.
+
+    Example:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> equalized = A.equalize(image, mode="cv", by_channels=True)
+        >>> assert equalized.shape == image.shape
+        >>> assert equalized.dtype == image.dtype
+    """
+    original_dtype = img.dtype
+
+    if original_dtype != np.uint8:
+        img = from_float(img, dtype=np.uint8)
+
     _check_preconditions(img, mask, by_channels)
 
     function = _equalize_pil if mode == "pil" else _equalize_cv
@@ -328,11 +369,11 @@ def equalize(
         return cv2.cvtColor(result_img, cv2.COLOR_YCrCb2RGB)
 
     result_img = np.empty_like(img)
-    for i in range(3):
+    for i in range(NUM_RGB_CHANNELS):
         _mask = _handle_mask(mask, i)
         result_img[..., i] = function(img[..., i], _mask)
 
-    return result_img
+    return to_float(result_img, max_value=255) if original_dtype == np.float32 else result_img
 
 
 @preserve_channel_dim
@@ -354,7 +395,7 @@ def move_tone_curve(
     input_dtype = img.dtype
     needs_float = False
 
-    if input_dtype in [np.float32, np.float64, np.float16]:
+    if input_dtype == np.float32:
         img = from_float(img, dtype=np.uint8)
         needs_float = True
 
@@ -386,19 +427,56 @@ def linear_transformation_rgb(img: np.ndarray, transformation_matrix: np.ndarray
 
 
 @preserve_channel_dim
-def clahe(img: np.ndarray, clip_limit: float = 2.0, tile_grid_size: tuple[int, int] = (8, 8)) -> np.ndarray:
-    if img.dtype != np.uint8:
-        msg = "clahe supports only uint8 inputs"
-        raise TypeError(msg)
+def clahe(img: np.ndarray, clip_limit: float, tile_grid_size: tuple[int, int]) -> np.ndarray:
+    """Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to the input image.
 
-    clahe_mat = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=[int(x) for x in tile_grid_size])
+    This function enhances the contrast of the input image using CLAHE. For color images,
+    it converts the image to the LAB color space, applies CLAHE to the L channel, and then
+    converts the image back to RGB.
+
+    Args:
+        img (np.ndarray): Input image. Can be grayscale (2D array) or RGB (3D array).
+        clip_limit (float): Threshold for contrast limiting. Higher values give more contrast.
+        tile_grid_size (tuple[int, int]): Size of grid for histogram equalization.
+            Width and height of the grid.
+
+    Returns:
+        np.ndarray: Image with CLAHE applied. The output has the same dtype as the input.
+
+    Note:
+        - If the input image is float32, it's temporarily converted to uint8 for processing
+          and then converted back to float32.
+        - For color images, CLAHE is applied only to the luminance channel in the LAB color space.
+
+    Raises:
+        ValueError: If the input image is not 2D or 3D.
+
+    Example:
+        >>> import numpy as np
+        >>> img = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> result = clahe(img, clip_limit=2.0, tile_grid_size=(8, 8))
+        >>> assert result.shape == img.shape
+        >>> assert result.dtype == img.dtype
+    """
+    img = img.copy()
+    original_dtype = img.dtype
+
+    if img.dtype == np.float32:
+        img = from_float(img, dtype=np.uint8)
+
+    clahe_mat = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
 
     if is_grayscale_image(img):
-        return clahe_mat.apply(img)
+        result = clahe_mat.apply(img)
+        return to_float(result, max_value=255) if original_dtype == np.float32 else result
 
     img = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+
     img[:, :, 0] = clahe_mat.apply(img[:, :, 0])
-    return cv2.cvtColor(img, cv2.COLOR_LAB2RGB)
+
+    result = cv2.cvtColor(img, cv2.COLOR_LAB2RGB)
+
+    return to_float(result, max_value=255) if original_dtype == np.float32 else result
 
 
 @preserve_channel_dim
@@ -456,7 +534,7 @@ def add_snow(img: np.ndarray, snow_point: float, brightness_coeff: float) -> np.
         https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
 
     """
-    non_rgb_warning(img)
+    non_rgb_error(img)
 
     input_dtype = img.dtype
     needs_float = False
@@ -512,7 +590,7 @@ def add_rain(
     Reference:
         https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
     """
-    non_rgb_warning(img)
+    non_rgb_error(img)
 
     input_dtype = img.dtype
     needs_float = False
@@ -564,7 +642,7 @@ def add_fog(img: np.ndarray, fog_coef: float, alpha_coef: float, haze_list: list
     Reference:
         https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
     """
-    non_rgb_warning(img)
+    non_rgb_error(img)
 
     input_dtype = img.dtype
     needs_float = False
@@ -620,7 +698,7 @@ def add_sun_flare(
     Reference:
         https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
     """
-    non_rgb_warning(img)
+    non_rgb_error(img)
 
     input_dtype = img.dtype
     needs_float = False
@@ -714,7 +792,7 @@ def add_gravel(img: np.ndarray, gravels: list[Any]) -> np.ndarray:
     Reference:
         https://github.com/UjjwalSaxena/Automold--Road-Augmentation-Library
     """
-    non_rgb_warning(img)
+    non_rgb_error(img)
     input_dtype = img.dtype
     needs_float = False
 
@@ -782,19 +860,18 @@ def iso_noise(
         color_shift (float): The amount of color shift to apply. Default is 0.05.
         intensity (float): Multiplication factor for noise values. Values of ~0.5 produce a noticeable,
                            yet acceptable level of noise. Default is 0.5.
-        random_state (Optional[np.random.RandomState]): If specified, this will be random state used
+        random_state (np.random.RandomState | None): If specified, this will be random state used
             for noise generation.
 
     Returns:
         np.ndarray: The noised image.
 
-    Raises:
-        TypeError: If the input image's dtype is not RGB.
-    """
-    if not is_rgb_image(image):
-        msg = "Image must be RGB"
-        raise TypeError(msg)
+    Image types:
+        uint8, float32
 
+    Number of channels:
+        3
+    """
     input_dtype = image.dtype
     factor = 1
 
@@ -818,13 +895,243 @@ def iso_noise(
     return cv2.cvtColor(hls, cv2.COLOR_HLS2RGB) * factor
 
 
-def to_gray(img: np.ndarray) -> np.ndarray:
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+def to_gray_weighted_average(img: np.ndarray) -> np.ndarray:
+    """Convert an RGB image to grayscale using the weighted average method.
+
+    This function uses OpenCV's cvtColor function with COLOR_RGB2GRAY conversion,
+    which applies the following formula:
+    Y = 0.299*R + 0.587*G + 0.114*B
+
+    Args:
+        img (np.ndarray): Input RGB image as a numpy array.
+
+    Returns:
+        np.ndarray: Grayscale image as a 2D numpy array.
+
+    Image types:
+        uint8, float32
+
+    Number of channels:
+        3
+    """
+    return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
 
-def gray_to_rgb(img: np.ndarray) -> np.ndarray:
-    return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+@clipped
+def to_gray_from_lab(img: np.ndarray) -> np.ndarray:
+    """Convert an RGB image to grayscale using the L channel from the LAB color space.
+
+    This function converts the RGB image to the LAB color space and extracts the L channel.
+    The LAB color space is designed to approximate human vision, where L represents lightness.
+
+    Key aspects of this method:
+    1. The L channel represents the lightness of each pixel, ranging from 0 (black) to 100 (white).
+    2. It's more perceptually uniform than RGB, meaning equal changes in L values correspond to
+       roughly equal changes in perceived lightness.
+    3. The L channel is independent of the color information (A and B channels), making it
+       suitable for grayscale conversion.
+
+    This method can be particularly useful when you want a grayscale image that closely
+    matches human perception of lightness, potentially preserving more perceived contrast
+    than simple RGB-based methods.
+
+    Args:
+        img (np.ndarray): Input RGB image as a numpy array.
+
+    Returns:
+        np.ndarray: Grayscale image as a 2D numpy array, representing the L (lightness) channel.
+                    Values are scaled to match the input image's data type range.
+
+    Image types:
+        uint8, float32
+
+    Number of channels:
+        3
+    """
+    dtype = img.dtype
+    img_uint8 = from_float(img, dtype=np.uint8) if dtype == np.float32 else img
+    result = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2LAB)[..., 0]
+
+    return to_float(result) if dtype == np.float32 else result
+
+
+@clipped
+def to_gray_desaturation(img: np.ndarray) -> np.ndarray:
+    """Convert an image to grayscale using the desaturation method.
+
+    Args:
+        img (np.ndarray): Input image as a numpy array.
+
+    Returns:
+        np.ndarray: Grayscale image as a 2D numpy array.
+
+    Image types:
+        uint8, float32
+
+    Number of channels:
+        any
+    """
+    float_image = img.astype(np.float32)
+    return (np.max(float_image, axis=-1) + np.min(float_image, axis=-1)) / 2
+
+
+def to_gray_average(img: np.ndarray) -> np.ndarray:
+    """Convert an image to grayscale using the average method.
+
+    This function computes the arithmetic mean across all channels for each pixel,
+    resulting in a grayscale representation of the image.
+
+    Key aspects of this method:
+    1. It treats all channels equally, regardless of their perceptual importance.
+    2. Works with any number of channels, making it versatile for various image types.
+    3. Simple and fast to compute, but may not accurately represent perceived brightness.
+    4. For RGB images, the formula is: Gray = (R + G + B) / 3
+
+    Note: This method may produce different results compared to weighted methods
+    (like RGB weighted average) which account for human perception of color brightness.
+    It may also produce unexpected results for images with alpha channels or
+    non-color data in additional channels.
+
+    Args:
+        img (np.ndarray): Input image as a numpy array. Can be any number of channels.
+
+    Returns:
+        np.ndarray: Grayscale image as a 2D numpy array. The output data type
+                    matches the input data type.
+
+    Image types:
+        uint8, float32
+
+    Number of channels:
+        any
+    """
+    return np.mean(img, axis=-1).astype(img.dtype)
+
+
+def to_gray_max(img: np.ndarray) -> np.ndarray:
+    """Convert an image to grayscale using the maximum channel value method.
+
+    This function takes the maximum value across all channels for each pixel,
+    resulting in a grayscale image that preserves the brightest parts of the original image.
+
+    Key aspects of this method:
+    1. Works with any number of channels, making it versatile for various image types.
+    2. For 3-channel (e.g., RGB) images, this method is equivalent to extracting the V (Value)
+       channel from the HSV color space.
+    3. Preserves the brightest parts of the image but may lose some color contrast information.
+    4. Simple and fast to compute.
+
+    Note:
+    - This method tends to produce brighter grayscale images compared to other conversion methods,
+      as it always selects the highest intensity value from the channels.
+    - For RGB images, it may not accurately represent perceived brightness as it doesn't
+      account for human color perception.
+
+    Args:
+        img (np.ndarray): Input image as a numpy array. Can be any number of channels.
+
+    Returns:
+        np.ndarray: Grayscale image as a 2D numpy array. The output data type
+                    matches the input data type.
+
+    Image types:
+        uint8, float32
+
+    Number of channels:
+        any
+    """
+    return np.max(img, axis=-1)
+
+
+@clipped
+def to_gray_pca(img: np.ndarray) -> np.ndarray:
+    """Convert an image to grayscale using Principal Component Analysis (PCA).
+
+    This function applies PCA to reduce a multi-channel image to a single channel,
+    effectively creating a grayscale representation that captures the maximum variance
+    in the color data.
+
+    Args:
+        img (np.ndarray): Input image as a numpy array with shape (height, width, channels).
+
+    Returns:
+        np.ndarray: Grayscale image as a 2D numpy array with shape (height, width).
+                    If input is uint8, output is uint8 in range [0, 255].
+                    If input is float32, output is float32 in range [0, 1].
+
+    Note:
+        This method can potentially preserve more information from the original image
+        compared to standard weighted average methods, as it accounts for the
+        correlations between color channels.
+
+    Image types:
+        uint8, float32
+
+    Number of channels:
+        any
+    """
+    dtype = img.dtype
+    # Reshape the image to a 2D array of pixels
+    pixels = img.reshape(-1, img.shape[2])
+
+    # Perform PCA
+    pca = PCA(n_components=1)
+    pca_result = pca.fit_transform(pixels)
+
+    # Reshape back to image dimensions and scale to 0-255
+    grayscale = pca_result.reshape(img.shape[:2])
+    grayscale = normalize_per_image(grayscale, "min_max")
+
+    return from_float(grayscale, dtype=np.uint8) if dtype == np.uint8 else grayscale
+
+
+def to_gray(
+    img: np.ndarray,
+    num_output_channels: int,
+    method: Literal["weighted_average", "from_lab", "desaturation", "average", "max", "pca"],
+) -> np.ndarray:
+    if method == "weighted_average":
+        result = to_gray_weighted_average(img)
+    elif method == "from_lab":
+        result = to_gray_from_lab(img)
+    elif method == "desaturation":
+        result = to_gray_desaturation(img)
+    elif method == "average":
+        result = to_gray_average(img)
+    elif method == "max":
+        result = to_gray_max(img)
+    elif method == "pca":
+        result = to_gray_pca(img)
+    else:
+        raise ValueError(f"Unsupported method: {method}")
+
+    return grayscale_to_multichannel(result, num_output_channels)
+
+
+def grayscale_to_multichannel(grayscale_image: np.ndarray, num_output_channels: int = 3) -> np.ndarray:
+    """Convert a grayscale image to a multi-channel image.
+
+    This function takes a 2D grayscale image or a 3D image with a single channel
+    and converts it to a multi-channel image by repeating the grayscale data
+    across the specified number of channels.
+
+    Args:
+        grayscale_image (np.ndarray): Input grayscale image. Can be 2D (height, width)
+                                      or 3D (height, width, 1).
+        num_output_channels (int, optional): Number of channels in the output image. Defaults to 3.
+
+    Returns:
+        np.ndarray: Multi-channel image with shape (height, width, num_channels).
+
+    Raises:
+        ValueError: If the input is not a 2D grayscale image or 3D with shape (height, width, 1).
+
+    Note:
+        If the input is already a multi-channel image with the desired number of channels,
+        it will be returned unchanged.
+    """
+    grayscale_image = grayscale_image.copy().squeeze()
+    return np.stack([grayscale_image] * num_output_channels, axis=-1)
 
 
 @preserve_channel_dim
@@ -839,34 +1146,14 @@ def downscale(
     need_cast = (
         up_interpolation != cv2.INTER_NEAREST or down_interpolation != cv2.INTER_NEAREST
     ) and img.dtype == np.uint8
+
     if need_cast:
         img = to_float(img)
+
     downscaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=down_interpolation)
     upscaled = cv2.resize(downscaled, (width, height), interpolation=up_interpolation)
-    if need_cast:
-        return from_float(np.clip(upscaled, 0, 1), dtype=np.dtype("uint8"))
-    return upscaled
 
-
-def to_float(img: np.ndarray, max_value: float | None = None) -> np.ndarray:
-    if max_value is None:
-        if img.dtype not in MAX_VALUES_BY_DTYPE:
-            raise RuntimeError(f"Unsupported dtype {img.dtype}. Specify 'max_value' manually.")
-        max_value = MAX_VALUES_BY_DTYPE[img.dtype]
-
-    return (img / max_value).astype(np.float32)
-
-
-def from_float(img: np.ndarray, dtype: np.dtype, max_value: float | None = None) -> np.ndarray:
-    if max_value is None:
-        if dtype not in MAX_VALUES_BY_DTYPE:
-            msg = (
-                f"Can't infer the maximum value for dtype {dtype}. "
-                "You need to specify the maximum value manually by passing the max_value argument."
-            )
-            raise RuntimeError(msg)
-        max_value = MAX_VALUES_BY_DTYPE[dtype]
-    return (img * max_value).astype(dtype)
+    return from_float(upscaled, dtype=np.uint8) if need_cast else upscaled
 
 
 def noop(input_obj: Any, **params: Any) -> Any:
@@ -936,67 +1223,82 @@ def mask_from_bbox(img: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarr
 
 
 @clipped
-def fancy_pca(img: np.ndarray, alpha: float = 0.1) -> np.ndarray:
-    """Perform 'Fancy PCA' augmentation
+@preserve_channel_dim
+def fancy_pca(img: np.ndarray, alpha_vector: np.ndarray) -> np.ndarray:
+    """Perform 'Fancy PCA' augmentation on an image with any number of channels.
 
     Args:
-        img: numpy array with (h, w, rgb) shape, as ints between 0-255
-        alpha: how much to perturb/scale the eigen vectors and values
-                the paper used std=0.1
+        img (np.ndarray): Input image
+        alpha_vector (np.ndarray): Vector of scale factors for each principal component.
+                                   Should have the same length as the number of channels in the image.
 
     Returns:
-        numpy image-like array as uint8 range(0, 255)
+        np.ndarray: Augmented image of the same shape, type, and range as the input.
+
+    Image types:
+        uint8, float32
+
+    Number of channels:
+        any
+
+    Note:
+        - This function generalizes the Fancy PCA augmentation to work with any number of channels.
+        - It preserves the original range of the image ([0, 255] for uint8, [0, 1] for float32).
+        - For single-channel images, the augmentation is applied as a simple scaling of pixel intensity variation.
+        - For multi-channel images, PCA is performed on the entire image, treating each pixel
+          as a point in N-dimensional space (where N is the number of channels).
+        - The augmentation preserves the correlation between channels while adding controlled noise.
+        - Computation time may increase significantly for images with a large number of channels.
 
     Reference:
-        http://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks.pdf
+        Krizhevsky, A., Sutskever, I., & Hinton, G. E. (2012).
+        ImageNet classification with deep convolutional neural networks.
+        In Advances in neural information processing systems (pp. 1097-1105).
     """
-    if not is_rgb_image(img) or img.dtype != np.uint8:
-        msg = "Image must be RGB image in uint8 format."
-        raise TypeError(msg)
+    orig_shape = img.shape
+    orig_dtype = img.dtype
+    num_channels = get_num_channels(img)
 
-    orig_img = img.astype(float).copy()
+    # Convert to float32 and scale to [0, 1] if necessary
+    if orig_dtype == np.uint8:
+        img = to_float(img)
 
-    img = to_float(img)  # rescale to 0 to 1 range
+    # Reshape image to 2D array of pixels
+    img_reshaped = img.reshape(-1, num_channels)
 
-    # flatten image to columns of RGB
-    img_rs = img.reshape(-1, 3)
-    # img_rs shape (640000, 3)
+    # Center the pixel values
+    img_mean = np.mean(img_reshaped, axis=0)
+    img_centered = img_reshaped - img_mean
 
-    # center mean
-    img_centered = img_rs - np.mean(img_rs, axis=0)
+    if num_channels == 1:
+        # For grayscale images, apply a simple scaling
+        std_dev = np.std(img_centered)
+        noise = alpha_vector[0] * std_dev * img_centered
+    else:
+        # Compute covariance matrix
+        img_cov = np.cov(img_centered, rowvar=False)
 
-    # paper says 3x3 covariance matrix
-    img_cov = np.cov(img_centered, rowvar=False)
+        # Compute eigenvectors & eigenvalues of the covariance matrix
+        eig_vals, eig_vecs = np.linalg.eigh(img_cov)
 
-    # eigen values and eigen vectors
-    eig_vals, eig_vecs = np.linalg.eigh(img_cov)
+        # Sort eigenvectors by eigenvalues in descending order
+        sort_perm = eig_vals[::-1].argsort()
+        eig_vals = eig_vals[sort_perm]
+        eig_vecs = eig_vecs[:, sort_perm]
 
-    # sort values and vector
-    sort_perm = eig_vals[::-1].argsort()
-    eig_vals[::-1].sort()
-    eig_vecs = eig_vecs[:, sort_perm]
+        # Create noise vector
+        noise = np.dot(np.dot(eig_vecs, np.diag(alpha_vector * eig_vals)), img_centered.T).T
 
-    # > get [p1, p2, p3]
-    m1 = np.column_stack(eig_vecs)
+    # Add noise to the image
+    img_pca = img_reshaped + noise
 
-    # get 3x1 matrix of eigen values multiplied by random variable draw from normal
-    # distribution with mean of 0 and standard deviation of 0.1
-    m2 = np.zeros((3, 1))
-    # according to the paper alpha should only be draw once per augmentation (not once per channel)
-    # > alpha = np.random.normal(0, alpha_std)
+    # Reshape back to original shape
+    img_pca = img_pca.reshape(orig_shape)
 
-    # broad cast to speed things up
-    m2[:, 0] = alpha * eig_vals[:]
+    # Clip values to [0, 1] range
+    img_pca = np.clip(img_pca, 0, 1)
 
-    # this is the vector that we're going to add to each pixel in a moment
-    add_vect = np.array(m1) @ np.array(m2)
-
-    for idx in range(3):  # RGB
-        orig_img[..., idx] += add_vect[idx] * 255
-
-    # for image processing it was found that working with float 0.0 to 1.0
-    # was easier than integers between 0-255
-    return orig_img
+    return from_float(img_pca, dtype=orig_dtype) if orig_dtype == np.uint8 else img_pca
 
 
 @preserve_channel_dim
@@ -1149,10 +1451,9 @@ def unsharp_mask(
     blur_fn = maybe_process_in_chunks(cv2.GaussianBlur, ksize=(ksize, ksize), sigmaX=sigma)
 
     input_dtype = image.dtype
+
     if input_dtype == np.uint8:
         image = to_float(image)
-    elif input_dtype not in (np.uint8, np.float32):
-        raise ValueError(f"Unexpected dtype {input_dtype} for UnsharpMask augmentation")
 
     blur = blur_fn(image)
     residual = image - blur
@@ -1168,7 +1469,7 @@ def unsharp_mask(
     soft_mask = blur_fn(mask)
     output = add(multiply(sharp, soft_mask), multiply(image, 1 - soft_mask))
 
-    return from_float(output, dtype=input_dtype)
+    return from_float(output, dtype=input_dtype) if input_dtype == np.uint8 else output
 
 
 @preserve_channel_dim
@@ -1189,7 +1490,7 @@ def spatter(
     rain: np.ndarray | None,
     mode: SpatterMode,
 ) -> np.ndarray:
-    non_rgb_warning(img)
+    non_rgb_error(img)
 
     dtype = img.dtype
 
@@ -1341,8 +1642,6 @@ def chromatic_aberration(
     secondary_distortion_blue: float,
     interpolation: int,
 ) -> np.ndarray:
-    non_rgb_warning(img)
-
     height, width = img.shape[:2]
 
     # Build camera matrix
@@ -1421,29 +1720,29 @@ def morphology(img: np.ndarray, kernel: np.ndarray, operation: str) -> np.ndarra
     raise ValueError(f"Unsupported operation: {operation}")
 
 
-def center(width: NumericType, height: NumericType) -> tuple[float, float]:
+def center(image_shape: tuple[int, int]) -> tuple[float, float]:
     """Calculate the center coordinates if image. Used by images, masks and keypoints.
 
     Args:
-        width (NumericType): The width of the rectangle.
-        height (NumericType): The height of the rectangle.
+        image_shape (tuple[int, int]): The shape of the image.
 
     Returns:
         tuple[float, float]: The center coordinates.
     """
+    height, width = image_shape[:2]
     return width / 2 - 0.5, height / 2 - 0.5
 
 
-def center_bbox(width: NumericType, height: NumericType) -> tuple[float, float]:
+def center_bbox(image_shape: tuple[int, int]) -> tuple[float, float]:
     """Calculate the center coordinates for of image for bounding boxes.
 
     Args:
-        width (NumericType): The width of the rectangle.
-        height (NumericType): The height of the rectangle.
+        image_shape (tuple[int, int]): The shape of the image.
 
     Returns:
         tuple[float, float]: The center coordinates.
     """
+    height, width = image_shape[:2]
     return width / 2, height / 2
 
 
@@ -1526,7 +1825,7 @@ def planckian_jitter(img: np.ndarray, temperature: int, mode: PlanckianJitterMod
 
 
 def generate_approx_gaussian_noise(
-    shape: SizeType,
+    shape: tuple[int, ...],
     mean: float = 0,
     sigma: float = 1,
     scale: float = 0.25,
@@ -1548,3 +1847,77 @@ def generate_approx_gaussian_noise(
 @clipped
 def add_noise(img: np.ndarray, noise: np.ndarray) -> np.ndarray:
     return add_array(img, noise)
+
+
+def swap_tiles_on_keypoints(
+    keypoints: np.ndarray,
+    tiles: np.ndarray,
+    mapping: np.ndarray,
+) -> np.ndarray:
+    """Swap the positions of keypoints based on a tile mapping.
+
+    This function takes a set of keypoints and repositions them according to a mapping of tile swaps.
+    Keypoints are moved from their original tiles to new positions in the swapped tiles.
+
+    Args:
+        keypoints (np.ndarray): A 2D numpy array of shape (N, 2) where N is the number of keypoints.
+                                Each row represents a keypoint's (x, y) coordinates.
+        tiles (np.ndarray): A 2D numpy array of shape (M, 4) where M is the number of tiles.
+                            Each row represents a tile's (start_y, start_x, end_y, end_x) coordinates.
+        mapping (np.ndarray): A 1D numpy array of shape (M,) where M is the number of tiles.
+                              Each element i contains the index of the tile that tile i should be swapped with.
+
+    Returns:
+        np.ndarray: A 2D numpy array of the same shape as the input keypoints, containing the new positions
+                    of the keypoints after the tile swap.
+
+    Raises:
+        RuntimeWarning: If any keypoint is not found within any tile.
+
+    Notes:
+        - Keypoints that do not fall within any tile will remain unchanged.
+        - The function assumes that the tiles do not overlap and cover the entire image space.
+    """
+    if not keypoints.size:
+        return keypoints
+
+    # Broadcast keypoints and tiles for vectorized comparison
+    kp_x = keypoints[:, 0][:, np.newaxis]  # Shape: (num_keypoints, 1)
+    kp_y = keypoints[:, 1][:, np.newaxis]  # Shape: (num_keypoints, 1)
+
+    start_y, start_x, end_y, end_x = tiles.T  # Each shape: (num_tiles,)
+
+    # Check if each keypoint is inside each tile
+    in_tile = (kp_y >= start_y) & (kp_y < end_y) & (kp_x >= start_x) & (kp_x < end_x)
+
+    # Find which tile each keypoint belongs to
+    tile_indices = np.argmax(in_tile, axis=1)
+
+    # Check if any keypoint is not in any tile
+    not_in_any_tile = ~np.any(in_tile, axis=1)
+    if np.any(not_in_any_tile):
+        warn(
+            "Some keypoints are not in any tile. They will be returned unchanged. This is unexpected and should be "
+            "investigated.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # Get the new tile indices
+    new_tile_indices = np.array(mapping)[tile_indices]
+
+    # Calculate the offsets
+    old_start_x = tiles[tile_indices, 1]
+    old_start_y = tiles[tile_indices, 0]
+    new_start_x = tiles[new_tile_indices, 1]
+    new_start_y = tiles[new_tile_indices, 0]
+
+    # Apply the transformation
+    new_keypoints = keypoints.copy()
+    new_keypoints[:, 0] = (keypoints[:, 0] - old_start_x) + new_start_x
+    new_keypoints[:, 1] = (keypoints[:, 1] - old_start_y) + new_start_y
+
+    # Keep original coordinates for keypoints not in any tile
+    new_keypoints[not_in_any_tile] = keypoints[not_in_any_tile]
+
+    return new_keypoints

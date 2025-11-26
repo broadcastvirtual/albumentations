@@ -43,7 +43,7 @@ def process_blur_limit(value: ScaleIntType, info: ValidationInfo, min_value: flo
 
 
 class BlurInitSchema(BaseTransformInitSchema):
-    blur_limit: ScaleIntType = Field(default=(3, 7), description="Maximum kernel size for blurring the input image.")
+    blur_limit: ScaleIntType
 
     @field_validator("blur_limit")
     @classmethod
@@ -52,12 +52,30 @@ class BlurInitSchema(BaseTransformInitSchema):
 
 
 class Blur(ImageOnlyTransform):
-    """Blur the input image using a random-sized kernel.
+    """Apply uniform box blur to the input image using a randomly sized square kernel.
+
+    This transform uses OpenCV's cv2.blur function, which performs a simple box filter blur.
+    The size of the blur kernel is randomly selected for each application, allowing for
+    varying degrees of blur intensity.
 
     Args:
-        blur_limit: maximum kernel size for blurring the input image.
-            Should be in range [3, inf). Default: (3, 7).
-        p: probability of applying the transform. Default: 0.5.
+        blur_limit (tuple[int, int] | int): Controls the range of the blur kernel size.
+            - If a single int is provided, the kernel size will be randomly chosen
+              between 3 and that value.
+            - If a tuple of two ints is provided, it defines the inclusive range
+              of possible kernel sizes.
+            The kernel size must be odd and greater than or equal to 3.
+            Larger kernel sizes produce stronger blur effects.
+            Default: (3, 7)
+
+        p (float): Probability of applying the transform. Default: 0.5
+
+    Notes:
+        - The blur kernel is always square (same width and height).
+        - Only odd kernel sizes are used to ensure the blur has a clear center pixel.
+        - Box blur is faster than Gaussian blur but may produce less natural results.
+        - This blur method averages all pixels under the kernel area, which can
+          reduce noise but also reduce image detail.
 
     Targets:
         image
@@ -65,13 +83,20 @@ class Blur(ImageOnlyTransform):
     Image types:
         uint8, float32
 
+    Example:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> transform = A.Blur(blur_limit=(3, 7), p=1.0)
+        >>> result = transform(image=image)
+        >>> blurred_image = result["image"]
     """
 
     class InitSchema(BlurInitSchema):
         pass
 
-    def __init__(self, blur_limit: ScaleIntType = 7, p: float = 0.5, always_apply: bool | None = None):
-        super().__init__(p, always_apply)
+    def __init__(self, blur_limit: ScaleIntType = (3, 7), p: float = 0.5, always_apply: bool | None = None):
+        super().__init__(p=p, always_apply=always_apply)
         self.blur_limit = cast(Tuple[int, int], blur_limit)
 
     def apply(self, img: np.ndarray, kernel: int, **params: Any) -> np.ndarray:
@@ -87,12 +112,24 @@ class Blur(ImageOnlyTransform):
 class MotionBlur(Blur):
     """Apply motion blur to the input image using a random-sized kernel.
 
+    This transform simulates the effect of camera or object motion during image capture,
+    creating a directional blur. It uses a line-shaped kernel with random orientation
+    to achieve this effect.
+
     Args:
-        blur_limit (int): maximum kernel size for blurring the input image.
-            Should be in range [3, inf). Default: (3, 7).
-        allow_shifted (bool): if set to true creates non shifted kernels only,
-            otherwise creates randomly shifted kernels. Default: True.
-        p (float): probability of applying the transform. Default: 0.5.
+        blur_limit (int | tuple[int, int]): Maximum kernel size for blurring the input image.
+            Should be in range [3, inf).
+            - If a single int is provided, the kernel size will be randomly chosen
+              between 3 and that value.
+            - If a tuple of two ints is provided, it defines the inclusive range
+              of possible kernel sizes.
+            Default: (3, 7)
+
+        allow_shifted (bool): If set to True, allows the motion blur kernel to be
+            randomly shifted from the center. If False, the kernel will always be
+            centered. Default: True
+
+        p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
         image
@@ -100,17 +137,37 @@ class MotionBlur(Blur):
     Image types:
         uint8, float32
 
+    Number of channels:
+        Any
+
+    Note:
+        - The blur kernel is always a straight line, simulating linear motion.
+        - The angle of the motion blur is randomly chosen for each application.
+        - Larger kernel sizes result in more pronounced motion blur effects.
+        - When `allow_shifted` is True, the blur effect can appear more natural and varied,
+          as it simulates motion that isn't perfectly centered in the frame.
+        - This transform is particularly useful for:
+          * Simulating camera shake or motion blur in action scenes
+          * Data augmentation for object detection or tracking tasks
+          * Creating more challenging inputs for image stabilization algorithms
+
+    Example:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> transform = A.MotionBlur(blur_limit=7, allow_shifted=True, p=0.5)
+        >>> result = transform(image=image)
+        >>> motion_blurred_image = result["image"]
+
+    References:
+        - Motion blur: https://en.wikipedia.org/wiki/Motion_blur
+        - OpenCV filter2D (used internally):
+          https://docs.opencv.org/master/d4/d86/group__imgproc__filter.html#ga27c049795ce870216ddfb366086b5a04
     """
 
     class InitSchema(BaseTransformInitSchema):
-        allow_shifted: bool = Field(
-            default=True,
-            description="If set to true creates non-shifted kernels only, otherwise creates randomly shifted kernels.",
-        )
-        blur_limit: ScaleIntType = Field(
-            default=(3, 7),
-            description="Maximum kernel size for blurring the input image.",
-        )
+        allow_shifted: bool
+        blur_limit: ScaleIntType
 
         @model_validator(mode="after")
         def process_blur(self) -> Self:
@@ -178,12 +235,22 @@ class MotionBlur(Blur):
 
 
 class MedianBlur(Blur):
-    """Blur the input image using a median filter with a random aperture linear size.
+    """Apply median blur to the input image.
+
+    This transform uses a median filter to blur the input image. Median filtering is particularly
+    effective at removing salt-and-pepper noise while preserving edges, making it a popular choice
+    for noise reduction in image processing.
 
     Args:
-        blur_limit (int): maximum aperture linear size for blurring the input image.
-            Must be odd and in range [3, inf). Default: (3, 7).
-        p (float): probability of applying the transform. Default: 0.5.
+        blur_limit (int | tuple[int, int]): Maximum aperture linear size for blurring the input image.
+            Must be odd and in the range [3, inf).
+            - If a single int is provided, the kernel size will be randomly chosen
+              between 3 and that value.
+            - If a tuple of two ints is provided, it defines the inclusive range
+              of possible kernel sizes.
+            Default: (3, 7)
+
+        p (float): Probability of applying the transform. Default: 0.5
 
     Targets:
         image
@@ -191,28 +258,71 @@ class MedianBlur(Blur):
     Image types:
         uint8, float32
 
+    Number of channels:
+        Any
+
+    Note:
+        - The kernel size (aperture linear size) must always be odd and greater than 1.
+        - Unlike mean blur or Gaussian blur, median blur uses the median of all pixels under
+          the kernel area, making it more robust to outliers.
+        - This transform is particularly useful for:
+          * Removing salt-and-pepper noise
+          * Preserving edges while smoothing images
+          * Pre-processing images for edge detection algorithms
+        - For color images, the median is calculated independently for each channel.
+        - Larger kernel sizes result in stronger blurring effects but may also remove
+          fine details from the image.
+
+    Example:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> transform = A.MedianBlur(blur_limit=(3, 7), p=0.5)
+        >>> result = transform(image=image)
+        >>> blurred_image = result["image"]
+
+    References:
+        - Median filter: https://en.wikipedia.org/wiki/Median_filter
+        - OpenCV medianBlur: https://docs.opencv.org/master/d4/d86/group__imgproc__filter.html#ga564869aa33e58769b4469101aac458f9
     """
 
     def __init__(self, blur_limit: ScaleIntType = 7, p: float = 0.5, always_apply: bool | None = None):
-        super().__init__(blur_limit, p, always_apply)
+        super().__init__(blur_limit=blur_limit, p=p, always_apply=always_apply)
 
     def apply(self, img: np.ndarray, kernel: int, **params: Any) -> np.ndarray:
         return fblur.median_blur(img, kernel)
 
 
 class GaussianBlur(ImageOnlyTransform):
-    """Blur the input image using a Gaussian filter with a random kernel size.
+    """Apply Gaussian blur to the input image using a randomly sized kernel.
+
+    This transform blurs the input image using a Gaussian filter with a random kernel size
+    and sigma value. Gaussian blur is a widely used image processing technique that reduces
+    image noise and detail, creating a smoothing effect.
 
     Args:
-        blur_limit (int, (int, int)): maximum Gaussian kernel size for blurring the input image.
-            Must be zero or odd and in range [0, inf). If set to 0 it will be computed from sigma
-            as `round(sigma * (3 if img.dtype == np.uint8 else 4) * 2 + 1) + 1`.
-            If set single value `blur_limit` will be in range (0, blur_limit).
-            Default: (3, 7).
-        sigma_limit (float, (float, float)): Gaussian kernel standard deviation. Must be in range [0, inf).
-            If set single value `sigma_limit` will be in range (0, sigma_limit).
-            If set to 0 sigma will be computed as `sigma = 0.3*((ksize-1)*0.5 - 1) + 0.8`. Default: 0.
-        p (float): probability of applying the transform. Default: 0.5.
+        blur_limit (tuple[int, int] | int): Controls the range of the Gaussian kernel size.
+            - If a single int is provided, the kernel size will be randomly chosen
+              between 0 and that value.
+            - If a tuple of two ints is provided, it defines the inclusive range
+              of possible kernel sizes.
+            Must be zero or odd and in range [0, inf). If set to 0, it will be computed
+            from sigma as `round(sigma * (3 if img.dtype == np.uint8 else 4) * 2 + 1) + 1`.
+            Larger kernel sizes produce stronger blur effects.
+            Default: (3, 7)
+
+        sigma_limit (tuple[float, float] | float): Range for the Gaussian kernel standard
+            deviation (sigma). Must be in range [0, inf).
+            - If a single float is provided, sigma will be randomly chosen
+              between 0 and that value.
+            - If a tuple of two floats is provided, it defines the inclusive range
+              of possible sigma values.
+            If set to 0, sigma will be computed as `sigma = 0.3*((ksize-1)*0.5 - 1) + 0.8`.
+            Larger sigma values produce stronger blur effects.
+            Default: 0
+
+        p (float): Probability of applying the transform. Should be in the range [0, 1].
+            Default: 0.5
 
     Targets:
         image
@@ -220,10 +330,27 @@ class GaussianBlur(ImageOnlyTransform):
     Image types:
         uint8, float32
 
+    Number of channels:
+        Any
+
+    Note:
+        - The relationship between kernel size and sigma affects the blur strength:
+          larger kernel sizes allow for stronger blurring effects.
+        - When both blur_limit and sigma_limit are set to ranges starting from 0,
+          the blur_limit minimum is automatically set to 3 to ensure a valid kernel size.
+        - For uint8 images, the computation might be faster than for floating-point images.
+
+    Example:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> transform = A.GaussianBlur(blur_limit=(3, 7), sigma_limit=(0.1, 2), p=1)
+        >>> result = transform(image=image)
+        >>> blurred_image = result["image"]
     """
 
     class InitSchema(BlurInitSchema):
-        sigma_limit: NonNegativeFloatRangeType = 0
+        sigma_limit: NonNegativeFloatRangeType
 
         @field_validator("blur_limit")
         @classmethod
@@ -274,19 +401,37 @@ class GaussianBlur(ImageOnlyTransform):
         return {"ksize": ksize, "sigma": random.uniform(*self.sigma_limit)}
 
     def get_transform_init_args_names(self) -> tuple[str, str]:
-        return ("blur_limit", "sigma_limit")
+        return "blur_limit", "sigma_limit"
 
 
 class GlassBlur(ImageOnlyTransform):
-    """Apply glass noise to the input image.
+    """Apply a glass blur effect to the input image.
+
+    This transform simulates the effect of looking through textured glass by locally
+    shuffling pixels in the image. It creates a distorted, frosted glass-like appearance.
 
     Args:
-        sigma (float): standard deviation for Gaussian kernel.
-        max_delta (int): max distance between pixels which are swapped.
-        iterations (int): number of repeats.
-            Should be in range [1, inf). Default: (2).
-        mode (str): mode of computation: fast or exact. Default: "fast".
-        p (float): probability of applying the transform. Default: 0.5.
+        sigma (float): Standard deviation for the Gaussian kernel used in the process.
+            Higher values increase the blur effect. Must be non-negative.
+            Default: 0.7
+
+        max_delta (int): Maximum distance in pixels for shuffling.
+            Determines how far pixels can be moved. Larger values create more distortion.
+            Must be a positive integer.
+            Default: 4
+
+        iterations (int): Number of times to apply the glass blur effect.
+            More iterations create a stronger effect but increase computation time.
+            Must be a positive integer.
+            Default: 2
+
+        mode (Literal["fast", "exact"]): Mode of computation. Options are:
+            - "fast": Uses a faster but potentially less accurate method.
+            - "exact": Uses a slower but more precise method.
+            Default: "fast"
+
+        p (float): Probability of applying the transform. Should be in the range [0, 1].
+            Default: 0.5
 
     Targets:
         image
@@ -294,17 +439,38 @@ class GlassBlur(ImageOnlyTransform):
     Image types:
         uint8, float32
 
-    Reference:
-        https://arxiv.org/abs/1903.12261
-        https://github.com/hendrycks/robustness/blob/master/ImageNet-C/create_c/make_imagenet_c.py
+    Number of channels:
+        Any
 
+    Note:
+        - This transform is particularly effective for creating a 'looking through
+          glass' effect or simulating the view through a frosted window.
+        - The 'fast' mode is recommended for most use cases as it provides a good
+          balance between effect quality and computation speed.
+        - Increasing 'iterations' will strengthen the effect but also increase the
+          processing time linearly.
+
+    Example:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> transform = A.GlassBlur(sigma=0.7, max_delta=4, iterations=3, mode="fast", p=1)
+        >>> result = transform(image=image)
+        >>> glass_blurred_image = result["image"]
+
+    References:
+        - This implementation is based on the technique described in:
+          "ImageNet-trained CNNs are biased towards texture; increasing shape bias improves accuracy and robustness"
+          https://arxiv.org/abs/1903.12261
+        - Original implementation:
+          https://github.com/hendrycks/robustness/blob/master/ImageNet-C/create_c/make_imagenet_c.py
     """
 
     class InitSchema(BaseTransformInitSchema):
-        sigma: float = Field(default=0.7, ge=0, description="Standard deviation for the Gaussian kernel.")
-        max_delta: int = Field(default=4, ge=1, description="Maximum distance between pixels that are swapped.")
-        iterations: int = Field(default=2, ge=1, description="Number of times the glass noise effect is applied.")
-        mode: Literal["fast", "exact"] = "fast"
+        sigma: float = Field(ge=0)
+        max_delta: int = Field(ge=1)
+        iterations: int = Field(ge=1)
+        mode: Literal["fast", "exact"]
 
     def __init__(
         self,
@@ -322,10 +488,6 @@ class GlassBlur(ImageOnlyTransform):
         self.mode = mode
 
     def apply(self, img: np.ndarray, *args: Any, dxy: np.ndarray, **params: Any) -> np.ndarray:
-        if dxy is None:
-            msg = "dxy is None"
-            raise ValueError(msg)
-
         return fblur.glass_blur(img, self.sigma, self.max_delta, self.iterations, dxy, self.mode)
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -340,61 +502,98 @@ class GlassBlur(ImageOnlyTransform):
         return {"dxy": dxy}
 
     def get_transform_init_args_names(self) -> tuple[str, str, str, str]:
-        return ("sigma", "max_delta", "iterations", "mode")
+        return "sigma", "max_delta", "iterations", "mode"
 
 
 class AdvancedBlur(ImageOnlyTransform):
-    """Blurs the input image using a Generalized Normal filter with randomly selected parameters.
+    """Applies a Generalized Gaussian blur to the input image with randomized parameters for advanced data augmentation.
 
-    This transform also adds multiplicative noise to the generated kernel before convolution,
-    affecting the image in a unique way that combines blurring and noise injection for enhanced
-    data augmentation.
+    This transform creates a custom blur kernel based on the Generalized Gaussian distribution,
+    which allows for a wide range of blur effects beyond standard Gaussian blur. It then applies
+    this kernel to the input image through convolution. The transform also incorporates noise
+    into the kernel, resulting in a unique combination of blurring and noise injection.
+
+    Key features of this augmentation:
+
+    1. Generalized Gaussian Kernel: Uses a generalized normal distribution to create kernels
+       that can range from box-like blurs to very peaked blurs, controlled by the beta parameter.
+
+    2. Anisotropic Blurring: Allows for different blur strengths in horizontal and vertical
+       directions (controlled by sigma_x and sigma_y), and rotation of the kernel.
+
+    3. Kernel Noise: Adds multiplicative noise to the kernel before applying it to the image,
+       creating more diverse and realistic blur effects.
+
+    Implementation Details:
+        The kernel is generated using a 2D Generalized Gaussian function. The process involves:
+        1. Creating a 2D grid based on the kernel size
+        2. Applying rotation to this grid
+        3. Calculating the kernel values using the Generalized Gaussian formula
+        4. Adding multiplicative noise to the kernel
+        5. Normalizing the kernel
+
+        The resulting kernel is then applied to the image using convolution.
 
     Args:
-        blur_limit (ScaleIntType, optional): Maximum Gaussian kernel size for blurring the input image.
-            Must be zero or odd and in range [0, inf). If set to 0, it will be computed from sigma
-            as `round(sigma * (3 if img.dtype == np.uint8 else 4) * 2 + 1) + 1`.
-            If a single value is provided, `blur_limit` will be in the range (0, blur_limit).
-            Defaults to (3, 7).
-        sigma_x_limit ScaleFloatType: Gaussian kernel standard deviation for the X dimension.
-            Must be in range [0, inf). If a single value is provided, `sigma_x_limit` will be in the range
-            (0, sigma_limit). If set to 0, sigma will be computed as `sigma = 0.3*((ksize-1)*0.5 - 1) + 0.8`.
-            Defaults to (0.2, 1.0).
-        sigma_y_limit ScaleFloatType: Gaussian kernel standard deviation for the Y dimension.
-            Must follow the same rules as `sigma_x_limit`.
-            Defaults to (0.2, 1.0).
-        rotate_limit (ScaleIntType, optional): Range from which a random angle used to rotate the Gaussian kernel
-            is picked. If limit is a single int, an angle is picked from (-rotate_limit, rotate_limit).
-            Defaults to (-90, 90).
-        beta_limit (ScaleFloatType, optional): Distribution shape parameter. 1 represents the normal distribution.
-            Values below 1.0 make distribution tails heavier than normal, and values above 1.0 make it
-            lighter than normal.
-            Defaults to (0.5, 8.0).
-        noise_limit (ScaleFloatType, optional): Multiplicative factor that controls the strength of kernel noise.
-            Must be positive and preferably centered around 1.0. If a single value is provided,
-            `noise_limit` will be in the range (0, noise_limit).
-            Defaults to (0.75, 1.25).
-        p (float, optional): Probability of applying the transform.
-            Defaults to 0.5.
+        blur_limit (tuple[int, int] | int, optional): Controls the size of the blur kernel. If a single int
+            is provided, the kernel size will be randomly chosen between 3 and that value.
+            Must be odd and ≥ 3. Larger values create stronger blur effects.
+            Default: (3, 7)
+
+        sigma_x_limit (tuple[float, float] | float): Controls the spread of the blur in the x direction.
+            Higher values increase blur strength.
+            If a single float is provided, the range will be (0, limit).
+            Default: (0.2, 1.0)
+
+        sigma_y_limit (tuple[float, float] | float): Controls the spread of the blur in the y direction.
+            Higher values increase blur strength.
+            If a single float is provided, the range will be (0, limit).
+            Default: (0.2, 1.0)
+
+        rotate_limit (tuple[int, int] | int): Range of angles (in degrees) for rotating the kernel.
+            This rotation allows for diagonal blur directions. If limit is a single int, an angle is picked
+            from (-rotate_limit, rotate_limit).
+            Default: (-90, 90)
+
+        beta_limit (tuple[float, float] | float): Shape parameter of the Generalized Gaussian distribution.
+            - beta = 1 gives a standard Gaussian distribution
+            - beta < 1 creates heavier tails, resulting in more uniform, box-like blur
+            - beta > 1 creates lighter tails, resulting in more peaked, focused blur
+            Default: (0.5, 8.0)
+
+        noise_limit (tuple[float, float] | float): Controls the strength of multiplicative noise
+            applied to the kernel. Values around 1.0 keep the original kernel mostly intact,
+            while values further from 1.0 introduce more variation.
+            Default: (0.75, 1.25)
+
+        p (float): Probability of applying the transform. Default: 0.5
+
+    Notes:
+        - This transform is particularly useful for simulating complex, real-world blur effects
+          that go beyond simple Gaussian blur.
+        - The combination of blur and noise can help in creating more robust models by simulating
+          a wider range of image degradations.
+        - Extreme values, especially for beta and noise, may result in unrealistic effects and
+          should be used cautiously.
 
     Reference:
-        "Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data",
-        available at https://arxiv.org/abs/2107.10833
+        This transform is inspired by techniques described in:
+        "Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data"
+        https://arxiv.org/abs/2107.10833
 
     Targets:
         image
 
     Image types:
         uint8, float32
-
     """
 
     class InitSchema(BlurInitSchema):
-        sigma_x_limit: NonNegativeFloatRangeType = (0.2, 1.0)
-        sigma_y_limit: NonNegativeFloatRangeType = (0.2, 1.0)
-        beta_limit: NonNegativeFloatRangeType = (0.5, 8.0)
-        noise_limit: NonNegativeFloatRangeType = (0.75, 1.25)
-        rotate_limit: SymmetricRangeType = (-90, 90)
+        sigma_x_limit: NonNegativeFloatRangeType
+        sigma_y_limit: NonNegativeFloatRangeType
+        beta_limit: NonNegativeFloatRangeType
+        noise_limit: NonNegativeFloatRangeType
+        rotate_limit: SymmetricRangeType
 
         @field_validator("beta_limit")
         @classmethod
@@ -424,13 +623,13 @@ class AdvancedBlur(ImageOnlyTransform):
         sigma_y_limit: ScaleFloatType = (0.2, 1.0),
         sigmaX_limit: ScaleFloatType | None = None,  # noqa: N803
         sigmaY_limit: ScaleFloatType | None = None,  # noqa: N803
-        rotate_limit: ScaleIntType = 90,
+        rotate_limit: ScaleIntType = (-90, 90),
         beta_limit: ScaleFloatType = (0.5, 8.0),
         noise_limit: ScaleFloatType = (0.9, 1.1),
         always_apply: bool | None = None,
         p: float = 0.5,
     ):
-        super().__init__(p, always_apply)
+        super().__init__(p=p, always_apply=always_apply)
 
         if sigmaX_limit is not None:
             warnings.warn("sigmaX_limit is deprecated; use sigma_x_limit instead.", DeprecationWarning, stacklevel=2)
@@ -461,7 +660,7 @@ class AdvancedBlur(ImageOnlyTransform):
             random.uniform(self.beta_limit[0], 1) if random.random() < HALF else random.uniform(1, self.beta_limit[1])
         )
 
-        noise_matrix = random_utils.uniform(self.noise_limit[0], self.noise_limit[1], size=[ksize, ksize])
+        noise_matrix = random_utils.uniform(*self.noise_limit, size=(ksize, ksize))
 
         # Generate mesh grid centered at zero.
         ax = np.arange(-ksize // 2 + 1.0, ksize // 2 + 1.0)
@@ -495,28 +694,57 @@ class AdvancedBlur(ImageOnlyTransform):
 
 
 class Defocus(ImageOnlyTransform):
-    """Apply defocus transform.
+    """Apply defocus blur to the input image.
+
+    This transform simulates the effect of an out-of-focus camera by applying a defocus blur
+    to the image. It uses a combination of disc kernels and Gaussian blur to create a realistic
+    defocus effect.
 
     Args:
-        radius ((int, int) or int): range for radius of defocusing.
-            If limit is a single int, the range will be [1, limit]. Default: (3, 10).
-        alias_blur ((float, float) or float): range for alias_blur of defocusing (sigma of gaussian blur).
-            If limit is a single float, the range will be (0, limit). Default: (0.1, 0.5).
-        p (float): probability of applying the transform. Default: 0.5.
+        radius (tuple[int, int] | int): Range for the radius of the defocus blur.
+            If a single int is provided, the range will be [1, radius].
+            Larger values create a stronger blur effect.
+            Default: (3, 10)
+
+        alias_blur (tuple[float, float] | float): Range for the standard deviation of the Gaussian blur
+            applied after the main defocus blur. This helps to reduce aliasing artifacts.
+            If a single float is provided, the range will be (0, alias_blur).
+            Larger values create a smoother, more aliased effect.
+            Default: (0.1, 0.5)
+
+        p (float): Probability of applying the transform. Should be in the range [0, 1].
+            Default: 0.5
 
     Targets:
         image
 
     Image types:
-        unit8, float32
+        uint8, float32
 
-    Reference:
-        https://arxiv.org/abs/1903.12261
+    Note:
+        - The defocus effect is created using a disc kernel, which simulates the shape of a camera's aperture.
+        - The additional Gaussian blur (alias_blur) helps to soften the edges of the disc kernel, creating a
+          more natural-looking defocus effect.
+        - Larger radius values will create a stronger, more noticeable defocus effect.
+        - The alias_blur parameter can be used to fine-tune the appearance of the defocus, with larger values
+          creating a smoother, potentially more realistic effect.
+
+    Example:
+        >>> import numpy as np
+        >>> import albumentations as A
+        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> transform = A.Defocus(radius=(4, 8), alias_blur=(0.2, 0.4), always_apply=True)
+        >>> result = transform(image=image)
+        >>> defocused_image = result['image']
+
+    References:
+        - https://en.wikipedia.org/wiki/Defocus_aberration
+        - https://www.researchgate.net/publication/261311609_Realistic_Defocus_Blur_for_Multiplane_Computer-Generated_Holography
     """
 
     class InitSchema(BaseTransformInitSchema):
-        radius: OnePlusIntRangeType = (3, 10)
-        alias_blur: NonNegativeFloatRangeType = (0.1, 0.5)
+        radius: OnePlusIntRangeType
+        alias_blur: NonNegativeFloatRangeType
 
     def __init__(
         self,
@@ -534,8 +762,8 @@ class Defocus(ImageOnlyTransform):
 
     def get_params(self) -> dict[str, Any]:
         return {
-            "radius": random.randint(self.radius[0], self.radius[1]),
-            "alias_blur": random.uniform(self.alias_blur[0], self.alias_blur[1]),
+            "radius": random.randint(*self.radius),
+            "alias_blur": random.uniform(*self.alias_blur),
         }
 
     def get_transform_init_args_names(self) -> tuple[str, str]:

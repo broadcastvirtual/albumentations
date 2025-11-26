@@ -2,7 +2,6 @@
 import cv2
 
 import albumentations as A
-from albumentations.core.types import ImageCompressionType
 import numpy as np
 
 
@@ -12,7 +11,7 @@ AUGMENTATION_CLS_PARAMS = [
         {
             "quality_lower": 10,
             "quality_upper": 80,
-            "compression_type": ImageCompressionType.WEBP,
+            "compression_type": "webp",
         },
     ],
     [
@@ -236,7 +235,7 @@ AUGMENTATION_CLS_PARAMS = [
             "interpolation": cv2.INTER_CUBIC,
             "cval": 25,
             "cval_mask": 1,
-            "mode": cv2.BORDER_REFLECT,
+            "mode": cv2.BORDER_CONSTANT,
             "fit_output": True,
         },
     ],

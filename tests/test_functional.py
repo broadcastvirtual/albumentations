@@ -7,10 +7,11 @@ import skimage
 
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as fgeometric
-from albucore.utils import is_multispectral_image, MAX_VALUES_BY_DTYPE, get_num_channels
+from albucore.utils import is_multispectral_image, MAX_VALUES_BY_DTYPE, get_num_channels, clip
+from albucore.functions import to_float
 
 from albumentations.core.types import d4_group_elements
-from tests.conftest import IMAGES, RECTANGULAR_IMAGES, RECTANGULAR_UINT8_IMAGE, UINT8_IMAGES
+from tests.conftest import IMAGES, RECTANGULAR_FLOAT_IMAGE, RECTANGULAR_IMAGES, RECTANGULAR_UINT8_IMAGE, SQUARE_UINT8_IMAGE, UINT8_IMAGES
 from tests.utils import convert_2d_to_target_format, set_seed
 
 
@@ -226,90 +227,6 @@ def test_gamma_float_equal_uint8():
     assert (np.abs(img - img_f) <= 1).all()
 
 
-@pytest.mark.parametrize(
-    ["dtype", "expected_divider", "max_value"],
-    [
-        (np.uint8, 255, None),
-        (np.uint16, 65535, None),
-        (np.uint32, 4294967295, None),
-        (np.float32, 1.0, None),
-        (np.int16, None, 32767),  # Unsupported dtype with max_value provided
-    ],
-)
-def test_to_float(dtype, expected_divider, max_value):
-    img = np.ones((100, 100, 3), dtype=dtype)
-    if expected_divider is not None:
-        expected = (img.astype(np.float32) / expected_divider).astype(np.float32)
-    else:
-        # For unsupported dtype with max_value, use max_value for conversion
-        expected = (img.astype(np.float32) / max_value).astype(np.float32)
-
-    actual = F.to_float(img, max_value=max_value)
-    assert_almost_equal(actual, expected, decimal=6)
-    assert actual.dtype == np.float32, "Resulting dtype is not float32."
-
-
-@pytest.mark.parametrize("dtype", [np.int64])
-def test_to_float_raises_for_unsupported_dtype_without_max_value(dtype):
-    img = np.ones((100, 100, 3), dtype=dtype)
-    with pytest.raises(RuntimeError) as exc_info:
-        F.to_float(img)
-    assert "Unsupported dtype" in str(exc_info.value)
-
-
-@pytest.mark.parametrize("dtype", [np.int64])
-def test_to_float_with_max_value_for_unsupported_dtypes(dtype):
-    img = np.ones((100, 100, 3), dtype=dtype)
-    max_value = np.iinfo(dtype).max
-    expected = (img.astype(np.float32) / max_value).astype(np.float32)
-    actual = F.to_float(img, max_value=max_value)
-    assert_almost_equal(actual, expected, decimal=6)
-    assert actual.dtype == np.float32, "Resulting dtype is not float32."
-
-
-@pytest.mark.parametrize(
-    "dtype, multiplier, max_value",
-    [
-        (np.uint8, 255, None),
-        (np.uint16, 65535, None),
-        (np.uint32, 4294967295, None),
-        (np.uint32, 4294967295, 4294967295.0),  # Custom max_value equal to the default to test the parameter is used
-    ],
-)
-def test_from_float(dtype, multiplier, max_value):
-    img = RECTANGULAR_UINT8_IMAGE.astype(np.float32)  # Use random data for more robust testing
-    expected_multiplier = multiplier if max_value is None else max_value
-    expected = (img * expected_multiplier).astype(dtype)
-    actual = F.from_float(img, dtype=np.dtype(dtype), max_value=max_value)
-    assert_array_almost_equal_nulp(actual, expected)
-
-
-@pytest.mark.parametrize("dtype", [np.int64])
-def test_from_float_unsupported_dtype_without_max_value(dtype):
-    img = RECTANGULAR_UINT8_IMAGE.astype(np.float32)
-    with pytest.raises(RuntimeError) as exc_info:
-        F.from_float(img, dtype=dtype)
-    expected_part_of_message = "Can't infer the maximum value for dtype"
-    assert expected_part_of_message in str(exc_info.value), "Expected error message not found."
-
-
-@pytest.mark.parametrize(
-    "dtype, expected_dtype",
-    [
-        (np.uint8, np.uint8),
-        (np.uint16, np.uint16),
-        (np.uint32, np.uint32),
-    ],
-)
-def test_from_float_dtype_consistency(dtype, expected_dtype):
-    # The code snippet is generating a random 100x100x3 array of values between 0 and the maximum
-    # value allowed for the specified data type `dtype`. The `MAX_VALUES_BY_DTYPE` dictionary is used
-    # to determine the maximum value for the given data type.
-    img = np.random.rand(100, 100, 3) * MAX_VALUES_BY_DTYPE[dtype]
-    actual = F.from_float(img.astype(np.float32), dtype=dtype)
-    assert actual.dtype == expected_dtype, f"Expected dtype {expected_dtype} but got {actual.dtype}"
-
-
 @pytest.mark.parametrize("target", ["image", "mask"])
 def test_scale(target):
     img = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]], dtype=np.uint8)
@@ -330,13 +247,6 @@ def test_scale(target):
     img, expected = convert_2d_to_target_format([img, expected], target=target)
     scaled = fgeometric.scale(img, scale=2, interpolation=cv2.INTER_LINEAR)
     assert np.array_equal(scaled, expected)
-
-
-def test_to_from_float():
-    image = RECTANGULAR_UINT8_IMAGE
-    float_image = F.to_float(image)
-    uint8_image = F.from_float(float_image, dtype=np.uint8)
-    assert np.array_equal(image, uint8_image)
 
 
 @pytest.mark.parametrize("target", ["image", "mask"])
@@ -361,26 +271,13 @@ def test_smallest_max_size(target):
     assert np.array_equal(scaled, expected)
 
 
-def test_from_float_unknown_dtype():
-    img = np.ones((100, 100, 3), dtype=np.float32)
-    with pytest.raises(RuntimeError) as exc_info:
-        F.from_float(img, np.dtype(np.int16))
-    expected_message = (
-        "Can't infer the maximum value for dtype int16. You need to specify the maximum value manually by passing "
-        "the max_value argument"
-    )
-    actual_message = str(exc_info.value)
-    assert (
-        expected_message in actual_message or actual_message in expected_message
-    ), f"Expected part of the error message to be: '{expected_message}', got: '{actual_message}'"
-
 
 @pytest.mark.parametrize("target", ["image", "mask"])
 def test_resize_linear_interpolation(target):
     img = np.array([[1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3], [4, 4, 4, 4]], dtype=np.uint8)
     expected = np.array([[2, 2], [4, 4]], dtype=np.uint8)
     img, expected = convert_2d_to_target_format([img, expected], target=target)
-    resized_img = fgeometric.resize(img, 2, 2, interpolation=cv2.INTER_LINEAR)
+    resized_img = fgeometric.resize(img, (2, 2), interpolation=cv2.INTER_LINEAR)
     height, width = resized_img.shape[:2]
     assert height == 2
     assert width == 2
@@ -392,7 +289,7 @@ def test_resize_nearest_interpolation(target):
     img = np.array([[1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3], [4, 4, 4, 4]], dtype=np.uint8)
     expected = np.array([[1, 1], [3, 3]], dtype=np.uint8)
     img, expected = convert_2d_to_target_format([img, expected], target=target)
-    resized_img = fgeometric.resize(img, 2, 2, interpolation=cv2.INTER_NEAREST)
+    resized_img = fgeometric.resize(img, (2, 2), interpolation=cv2.INTER_NEAREST)
     height, width = resized_img.shape[:2]
     assert height == 2
     assert width == 2
@@ -403,7 +300,7 @@ def test_resize_nearest_interpolation(target):
 def test_resize_different_height_and_width(target):
     img = np.ones((100, 100), dtype=np.uint8)
     img = convert_2d_to_target_format([img], target=target)
-    resized_img = fgeometric.resize(img, height=20, width=30, interpolation=cv2.INTER_LINEAR)
+    resized_img = fgeometric.resize(img, (20, 30), interpolation=cv2.INTER_LINEAR)
     height, width = resized_img.shape[:2]
     assert height == 20
     assert width == 30
@@ -419,7 +316,7 @@ def test_resize_default_interpolation_float(target):
     )
     expected = np.array([[0.15, 0.15], [0.35, 0.35]], dtype=np.float32)
     img, expected = convert_2d_to_target_format([img, expected], target=target)
-    resized_img = fgeometric.resize(img, 2, 2, interpolation=cv2.INTER_LINEAR)
+    resized_img = fgeometric.resize(img, (2, 2), interpolation=cv2.INTER_LINEAR)
     height, width = resized_img.shape[:2]
     assert height == 2
     assert width == 2
@@ -433,71 +330,38 @@ def test_resize_nearest_interpolation_float(target):
     )
     expected = np.array([[0.1, 0.1], [0.3, 0.3]], dtype=np.float32)
     img, expected = convert_2d_to_target_format([img, expected], target=target)
-    resized_img = fgeometric.resize(img, 2, 2, interpolation=cv2.INTER_NEAREST)
+    resized_img = fgeometric.resize(img, (2, 2), interpolation=cv2.INTER_NEAREST)
     height, width = resized_img.shape[:2]
     assert height == 2
     assert width == 2
     assert np.array_equal(resized_img, expected)
 
 
-def test_bbox_vflip():
-    assert fgeometric.bbox_vflip((0.1, 0.2, 0.6, 0.5), 100, 200) == (0.1, 0.5, 0.6, 0.8)
-
-
-def test_bbox_hflip():
-    assert fgeometric.bbox_hflip((0.1, 0.2, 0.6, 0.5), 100, 200) == (0.4, 0.2, 0.9, 0.5)
-
-
-@pytest.mark.parametrize(
-    ["code", "func"],
-    [
-        [0, fgeometric.bbox_vflip],
-        [1, fgeometric.bbox_hflip],
-        [-1, lambda bbox, rows, cols: fgeometric.bbox_vflip(fgeometric.bbox_hflip(bbox, rows, cols), rows, cols)],
-    ],
-)
-def test_bbox_flip(code, func):
-    rows, cols = 100, 200
-    bbox = [0.1, 0.2, 0.6, 0.5]
-    assert fgeometric.bbox_flip(bbox, code, rows, cols) == func(bbox, rows, cols)
-
 
 @pytest.mark.parametrize("factor, expected_positions", [
-    (1, (199, 150)),  # Rotated 90 degrees CCW
+    (1, (299, 150)),  # Rotated 90 degrees CCW
     (2, (249, 199)),  # Rotated 180 degrees
     (3, (100, 249)),  # Rotated 270 degrees CCW
 ])
 def test_keypoint_image_rot90_match(factor, expected_positions):
-    rows, cols = 300, 400  # Non-square dimensions
-    img = np.zeros((rows, cols), dtype=int)
+    image_shape = (300, 400)  # Non-square dimensions
+    img = np.zeros(image_shape, dtype=np.uint8)
     # Placing the keypoint away from the center and edge: (150, 100)
-    keypoint = (150, 100, 0, 1)
-    img[keypoint[1], keypoint[0]] = 1
+    keypoints = np.array([[150, 100, 0, 1]])
+
+    img[keypoints[0][1], keypoints[0][0]] = 1
 
     # Rotate the image
     rotated_img = fgeometric.rot90(img, factor)
 
     # Rotate the keypoint
-    rotated_keypoint = fgeometric.keypoint_rot90(keypoint, factor, img.shape[0], img.shape[1])
+    rotated_keypoints = fgeometric.keypoints_rot90(keypoints, factor, img.shape)[0]
 
     # Assert that the rotated keypoint lands where expected
-    assert rotated_img[rotated_keypoint[1], rotated_keypoint[0]] == 1, \
+    assert rotated_img[int(rotated_keypoints[1]), int(rotated_keypoints[0])] == 1, \
         f"Key point after rotation factor {factor} is not at the expected position {expected_positions}, "\
-        f"but at {rotated_keypoint}"
+        f"but at {rotated_keypoints}"
 
-
-def test_bbox_rot90():
-    assert fgeometric.bbox_rot90((0.1, 0.2, 0.3, 0.4), 0, 100, 200) == (0.1, 0.2, 0.3, 0.4)
-    assert fgeometric.bbox_rot90((0.1, 0.2, 0.3, 0.4), 1, 100, 200) == (0.2, 0.7, 0.4, 0.9)
-    assert fgeometric.bbox_rot90((0.1, 0.2, 0.3, 0.4), 2, 100, 200) == (0.7, 0.6, 0.9, 0.8)
-    assert fgeometric.bbox_rot90((0.1, 0.2, 0.3, 0.4), 3, 100, 200) == (0.6, 0.1, 0.8, 0.3)
-
-
-def test_bbox_transpose():
-    assert np.allclose(fgeometric.bbox_transpose((0.7, 0.1, 0.8, 0.4), 100, 200), (0.1, 0.7, 0.4, 0.8))
-    rot90 = fgeometric.bbox_rot90((0.7, 0.1, 0.8, 0.4), 2, 100, 200)
-    reflected_anti_diagonal = fgeometric.bbox_transpose(rot90, 100, 200)
-    assert np.allclose(reflected_anti_diagonal, (0.6, 0.2, 0.9, 0.3))
 
 
 def test_fun_max_size():
@@ -638,32 +502,35 @@ def test_posterize_checks():
     assert str(exc_info.value) == "If bits is iterable image must be RGB"
 
 
-def test_equalize_checks():
-    img = np.random.randint(0, 255, [256, 256], dtype=np.uint8)
+@pytest.mark.parametrize(
+    "img_shape, img_dtype, mask_shape, by_channels, expected_error, expected_message",
+    [
+        (
+            (256, 256), np.uint8, (256, 256, 3), True,
+            ValueError, "Wrong mask shape. Image shape: (256, 256). Mask shape: (256, 256, 3)"
+        ),
+        (
+            (256, 256, 3), np.uint8, (256, 256, 3), False,
+            ValueError, "When by_channels=False only 1-channel mask supports. Mask shape: (256, 256, 3)"
+        ),
+    ]
+)
+def test_equalize_checks(img_shape, img_dtype, mask_shape, by_channels, expected_error, expected_message):
+    img = np.random.randint(0, 255, img_shape).astype(img_dtype) if img_dtype == np.uint8 else np.random.random(img_shape).astype(img_dtype)
+    mask = np.random.randint(0, 2, mask_shape).astype(bool)
 
-    mask = np.random.randint(0, 1, [256, 256, 3], dtype=bool)
-    with pytest.raises(ValueError) as exc_info:
-        F.equalize(img, mask=mask)
-    assert str(exc_info.value) == f"Wrong mask shape. Image shape: {img.shape}. Mask shape: {mask.shape}"
-
-    img = np.random.randint(0, 255, [256, 256, 3], dtype=np.uint8)
-    with pytest.raises(ValueError) as exc_info:
-        F.equalize(img, mask=mask, by_channels=False)
-    assert str(exc_info.value) == f"When by_channels=False only 1-channel mask supports. Mask shape: {mask.shape}"
-
-    img = np.random.random([256, 256, 3])
-    with pytest.raises(TypeError) as exc_info:
-        F.equalize(img, mask=mask, by_channels=False)
-    assert str(exc_info.value) == "Image must have uint8 channel type"
+    with pytest.raises(expected_error) as exc_info:
+        F.equalize(img, mask=mask, by_channels=by_channels)
+    assert str(exc_info.value) == expected_message
 
 
 def test_equalize_grayscale():
-    img = np.random.randint(0, 255, [256, 256], dtype=np.uint8)
+    img = np.random.randint(0, 255, (256, 256), dtype=np.uint8)
     assert np.all(cv2.equalizeHist(img) == F.equalize(img, mode="cv"))
 
 
 def test_equalize_rgb():
-    img = np.random.randint(0, 255, [256, 256, 3], dtype=np.uint8)
+    img = SQUARE_UINT8_IMAGE
 
     _img = img.copy()
     for i in range(3):
@@ -934,41 +801,6 @@ def test_d4_output_shape_with_factor(image, factor):
         assert result.shape == image.shape, "Output shape should match input shape"
 
 
-@pytest.mark.parametrize("bbox, group_member, rows, cols, expected", [
-    ((0.05, 0.1, 0.55, 0.6), 'e', 200, 200, (0.05, 0.1, 0.55, 0.6)),  # Identity
-    ((0.05, 0.1, 0.55, 0.6), 'r90', 200, 200, (0.1, 0.45, 0.6, 0.95)),  # Rotate 90 degrees CCW
-    ((0.05, 0.1, 0.55, 0.6), 'r180', 200, 200, (0.45, 0.4, 0.95, 0.9)),  # Rotate 180 degrees
-    ((0.05, 0.1, 0.55, 0.6), 'r270', 200, 200, (0.4, 0.05, 0.9, 0.55)),  # Rotate 270 degrees CCW
-    ((0.05, 0.1, 0.55, 0.6), 'v', 200, 200, (0.05, 0.4, 0.55, 0.9)),  # Vertical flip
-    ((0.05, 0.1, 0.55, 0.6), 't', 200, 200, (0.1, 0.05, 0.6, 0.55)),  # Transpose around main diagonal
-    ((0.05, 0.1, 0.55, 0.6), 'h', 200, 200, (0.45, 0.1, 0.95, 0.6)),  # Horizontal flip
-    ((0.05, 0.1, 0.55, 0.6), 'hvt', 200, 200, (1 - 0.6, 1 - 0.55, 1 - 0.1, 1 - 0.05)),  # Transpose around second diagonal
-])
-def test_bbox_d4(bbox, group_member, rows, cols, expected):
-    result = fgeometric.bbox_d4(bbox, group_member, rows, cols)
-    assert result == pytest.approx(expected, rel=1e-5), f"Failed for transformation {group_member} with bbox {bbox}"
-
-
-@pytest.mark.parametrize("keypoint, rows, cols", [
-    ((100, 150, 0, 1), 300, 400),  # Example keypoint with arbitrary angle and scale
-    ((200, 100, np.pi/4, 0.5), 300, 400),
-    ((50, 250, np.pi/2, 2), 300, 400),
-])
-def test_keypoint_vh_flip_equivalence(keypoint, rows, cols):
-
-    # Perform vertical and then horizontal flip
-    hflipped_keypoint = fgeometric.keypoint_hflip(keypoint, rows, cols)
-    vhflipped_keypoint = fgeometric.keypoint_vflip(hflipped_keypoint, rows, cols)
-
-    vflipped_keypoint = fgeometric.keypoint_vflip(keypoint, rows, cols)
-    hvflipped_keypoint = fgeometric.keypoint_hflip(vflipped_keypoint, rows, cols)
-
-    assert vhflipped_keypoint == pytest.approx(hvflipped_keypoint), \
-        "Sequential vflip + hflip not equivalent to hflip + vflip"
-    assert vhflipped_keypoint == pytest.approx(fgeometric.keypoint_rot90(keypoint, 2, rows, cols)), \
-        "rot180 not equivalent to vflip + hflip"
-
-
 base_matrix = np.array([[1, 2, 3],
                         [4, 5, 6],
                         [7, 8, 9]])
@@ -1058,7 +890,7 @@ def test_iso_noise(image, color_shift, intensity):
     image = RECTANGULAR_UINT8_IMAGE
 
     # Convert image to float and back
-    float_image = F.to_float(image)
+    float_image = to_float(image)
 
     # Generate noise using the same random state instance
     set_seed(42)
@@ -1069,4 +901,162 @@ def test_iso_noise(image, color_shift, intensity):
 
     result_float = F.from_float(result_float, dtype=np.uint8)  # Convert the float result back to uint8
 
-    assert np.array_equal(result_uint8, result_float)
+    np.testing.assert_allclose(result_uint8, result_float, rtol=1e-5, atol=1)
+
+
+@pytest.mark.parametrize(
+    "input_image, num_output_channels, expected_shape",
+    [
+        (np.zeros((10, 10), dtype=np.uint8), 3, (10, 10, 3)),
+        (np.zeros((10, 10, 1), dtype=np.uint8), 3, (10, 10, 3)),
+        (np.zeros((10, 10), dtype=np.float32), 4, (10, 10, 4)),
+        (np.zeros((10, 10, 1), dtype=np.float32), 2, (10, 10, 2)),
+    ]
+)
+def test_grayscale_to_multichannel(input_image, num_output_channels, expected_shape):
+    result = F.grayscale_to_multichannel(input_image, num_output_channels)
+    assert result.shape == expected_shape
+    assert np.all(result[..., 0] == result[..., 1])  # All channels should be identical
+
+
+def test_grayscale_to_multichannel_preserves_values():
+    input_image = np.random.randint(0, 256, (10, 10), dtype=np.uint8)
+    result = F.grayscale_to_multichannel(input_image, num_output_channels=3)
+    assert np.all(result[..., 0] == input_image)
+    assert np.all(result[..., 1] == input_image)
+    assert np.all(result[..., 2] == input_image)
+
+def test_grayscale_to_multichannel_default_channels():
+    input_image = np.zeros((10, 10), dtype=np.uint8)
+    result = F.grayscale_to_multichannel(input_image, num_output_channels=3)
+    assert result.shape == (10, 10, 3)
+
+
+def create_test_image(height, width, channels, dtype):
+    if dtype == np.uint8:
+        return np.random.randint(0, 256, (height, width, channels), dtype=dtype)
+    else:
+        return np.random.rand(height, width, channels).astype(dtype)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+def test_to_gray_weighted_average(dtype):
+    img = create_test_image(10, 10, 3, dtype)
+    result = F.to_gray_weighted_average(img)
+    expected = np.dot(img[..., :3], [0.299, 0.587, 0.114])
+    if dtype == np.uint8:
+        expected = expected.astype(np.uint8)
+    np.testing.assert_allclose(result, expected, rtol=1e-5, atol=1)
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+def test_to_gray_from_lab(dtype):
+    img = create_test_image(10, 10, 3, dtype)
+    result = F.to_gray_from_lab(img)
+    expected = clip(cv2.cvtColor(img, cv2.COLOR_RGB2LAB)[..., 0], dtype=dtype)
+    np.testing.assert_allclose(result, expected, rtol=1e-5, atol=1)
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+@pytest.mark.parametrize("channels", [3, 4, 5])
+def test_to_gray_desaturation(dtype, channels):
+    img = create_test_image(10, 10, channels, dtype)
+    result = F.to_gray_desaturation(img)
+    expected = (np.max(img.astype(np.float32), axis=-1) + np.min(img.astype(np.float32), axis=-1)) / 2
+    if dtype == np.uint8:
+        expected = expected.astype(np.uint8)
+    np.testing.assert_allclose(result, expected, rtol=1e-5, atol=1)
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+@pytest.mark.parametrize("channels", [3, 4, 5])
+def test_to_gray_average(dtype, channels):
+    img = create_test_image(10, 10, channels, dtype)
+    result = F.to_gray_average(img)
+    expected = np.mean(img, axis=-1)
+    if dtype == np.uint8:
+        expected = expected.astype(np.uint8)
+    np.testing.assert_allclose(result, expected, rtol=1e-5, atol=1)
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+@pytest.mark.parametrize("channels", [3, 4, 5])
+def test_to_gray_max(dtype, channels):
+    img = create_test_image(10, 10, channels, dtype)
+    result = F.to_gray_max(img)
+    expected = np.max(img, axis=-1)
+    np.testing.assert_allclose(result, expected, rtol=1e-5, atol=1)
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+@pytest.mark.parametrize("channels", [3, 4, 5])
+def test_to_gray_pca(dtype, channels):
+    img = create_test_image(10, 10, channels, dtype)
+    result = F.to_gray_pca(img)
+    assert result.shape == (10, 10)
+    assert result.dtype == dtype
+    if dtype == np.uint8:
+        assert result.min() >= 0 and result.max() <= 255
+    else:
+        assert result.min() >= 0 and result.max() <= 1
+
+@pytest.mark.parametrize("func", [
+    F.to_gray_weighted_average,
+    F.to_gray_from_lab,
+    F.to_gray_desaturation,
+    F.to_gray_average,
+    F.to_gray_max,
+    F.to_gray_pca,
+])
+def test_float32_uint8_consistency(func):
+    img_uint8 = create_test_image(10, 10, 3, np.uint8)
+    img_float32 = img_uint8.astype(np.float32) / 255.0
+
+    result_uint8 = func(img_uint8)
+    result_float32 = func(img_float32)
+
+    np.testing.assert_allclose(result_uint8 / 255.0, result_float32, rtol=1e-5, atol=1e-2)
+
+
+
+@pytest.mark.parametrize(
+    "shape, dtype, clip_limit, tile_grid_size",
+    [
+        ((100, 100), np.uint8, 2.0, (8, 8)),  # Grayscale uint8
+        ((100, 100, 3), np.uint8, 2.0, (8, 8)),  # RGB uint8
+        ((50, 50), np.float32, 3.0, (4, 4)),  # Grayscale float32
+        ((50, 50, 3), np.float32, 3.0, (4, 4)),  # RGB float32
+    ]
+)
+def test_clahe(shape, dtype, clip_limit, tile_grid_size):
+    if dtype == np.uint8:
+        img = np.random.randint(0, 256, shape, dtype=dtype)
+    else:
+        img = np.random.rand(*shape).astype(dtype)
+
+    result = F.clahe(img, clip_limit, tile_grid_size)
+
+    assert result.shape == img.shape
+    assert result.dtype == img.dtype
+    assert np.any(result != img)  # Ensure the image has changed
+
+
+@pytest.mark.parametrize("shape", [(100, 100, 3), (100, 100, 1), (100, 100, 5)])
+def test_fancy_pca_mean_preservation(shape):
+    image = np.random.rand(*shape).astype(np.float32)
+    alpha_vector = np.random.uniform(-0.1, 0.1, shape[-1])
+    result = F.fancy_pca(image, alpha_vector)
+    np.testing.assert_almost_equal(np.mean(image), np.mean(result), decimal=5)
+
+
+@pytest.mark.parametrize("shape, dtype", [
+    ((100, 100, 3), np.uint8),
+    ((100, 100, 3), np.float32),
+    ((100, 100, 1), np.uint8),
+    ((100, 100, 1), np.float32),
+    ((100, 100, 5), np.float32),
+])
+def test_fancy_pca_zero_alpha(shape, dtype):
+    image = np.random.randint(0, 256, shape).astype(dtype)
+    if dtype == np.float32:
+        image = image / 255.0
+
+    alpha_vector = np.zeros(shape[-1])
+    result = F.fancy_pca(image, alpha_vector)
+
+    np.testing.assert_array_equal(image, result)

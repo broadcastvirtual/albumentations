@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import functools
 from functools import wraps
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
 
 import cv2
+import numpy as np
 from albucore.utils import (
     is_grayscale_image,
     is_multispectral_image,
@@ -16,19 +18,18 @@ from albumentations.core.keypoints_utils import angle_to_2pi_range
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import numpy as np
-
-    from albumentations.core.types import KeypointInternalType
 
 __all__ = [
     "read_bgr_image",
     "read_rgb_image",
     "read_grayscale",
     "angle_2pi_range",
-    "non_rgb_warning",
+    "non_rgb_error",
 ]
 
 P = ParamSpec("P")
+T = TypeVar("T", bound=np.ndarray)
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 def read_bgr_image(path: str | Path) -> np.ndarray:
@@ -45,17 +46,49 @@ def read_grayscale(path: str | Path) -> np.ndarray:
 
 
 def angle_2pi_range(
-    func: Callable[Concatenate[KeypointInternalType, P], KeypointInternalType],
-) -> Callable[Concatenate[KeypointInternalType, P], KeypointInternalType]:
+    func: Callable[Concatenate[np.ndarray, P], np.ndarray],
+) -> Callable[Concatenate[np.ndarray, P], np.ndarray]:
     @wraps(func)
-    def wrapped_function(keypoint: KeypointInternalType, *args: P.args, **kwargs: P.kwargs) -> KeypointInternalType:
-        (x, y, a, s) = func(keypoint, *args, **kwargs)[:4]
-        return (x, y, angle_to_2pi_range(a), s)
+    def wrapped_function(keypoints: np.ndarray, *args: P.args, **kwargs: P.kwargs) -> np.ndarray:
+        result = func(keypoints, *args, **kwargs)
+        if len(result) > 0 and result.shape[1] > 2:  # noqa: PLR2004
+            result[:, 2] = angle_to_2pi_range(result[:, 2])
+        return result
 
     return wrapped_function
 
 
-def non_rgb_warning(image: np.ndarray) -> None:
+def non_rgb_error(image: np.ndarray) -> None:
+    """Check if the input image is RGB and raise a ValueError if it's not.
+
+    This function is used to ensure that certain transformations are only applied to
+    RGB images. It provides helpful error messages for grayscale and multi-spectral images.
+
+    Args:
+        image (np.ndarray): The input image to check. Expected to be a numpy array
+                            representing an image.
+
+    Raises:
+        ValueError: If the input image is not an RGB image (i.e., does not have exactly 3 channels).
+                    The error message includes specific instructions for grayscale images
+                    and a note about incompatibility with multi-spectral images.
+
+    Note:
+        - RGB images are expected to have exactly 3 channels.
+        - Grayscale images (1 channel) will trigger an error with conversion instructions.
+        - Multi-spectral images (more than 3 channels) will trigger an error stating incompatibility.
+
+    Example:
+        >>> import numpy as np
+        >>> rgb_image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        >>> non_rgb_error(rgb_image)  # No error raised
+        >>>
+        >>> grayscale_image = np.random.randint(0, 256, (100, 100), dtype=np.uint8)
+        >>> non_rgb_error(grayscale_image)  # Raises ValueError with conversion instructions
+        >>>
+        >>> multispectral_image = np.random.randint(0, 256, (100, 100, 5), dtype=np.uint8)
+        >>> non_rgb_error(multispectral_image)  # Raises ValueError stating incompatibility
+    """
     if not is_rgb_image(image):
         message = "This transformation expects 3-channel images"
         if is_grayscale_image(image):
@@ -82,3 +115,68 @@ def check_range(value: tuple[float, float], lower_bound: float, upper_bound: flo
         raise ValueError(f"All values in {name} must be within [{lower_bound}, {upper_bound}] for tuple inputs.")
     if not value[0] <= value[1]:
         raise ValueError(f"{name!s} tuple values must be ordered as (min, max). Got: {value}")
+
+
+class PCA:
+    def __init__(self, n_components: int | None = None) -> None:
+        if n_components is not None and n_components <= 0:
+            raise ValueError("Number of components must be greater than zero.")
+        self.n_components = n_components
+        self.mean: np.ndarray | None = None
+        self.components_: np.ndarray | None = None
+        self.explained_variance_: np.ndarray | None = None
+
+    def fit(self, x: np.ndarray) -> None:
+        x = x.astype(np.float64)
+        n_samples, n_features = x.shape
+
+        # Determine the number of components if not set
+        if self.n_components is None:
+            self.n_components = min(n_samples, n_features)
+
+        self.mean, eigenvectors, eigenvalues = cv2.PCACompute2(x, mean=None, maxComponents=self.n_components)
+        self.components_ = eigenvectors
+        self.explained_variance_ = eigenvalues.flatten()
+
+    def transform(self, x: np.ndarray) -> np.ndarray:
+        if self.components_ is None:
+            raise ValueError(
+                "This PCA instance is not fitted yet. "
+                "Call 'fit' with appropriate arguments before using this estimator.",
+            )
+        x = x.astype(np.float64)
+        return cv2.PCAProject(x, self.mean, self.components_)
+
+    def fit_transform(self, x: np.ndarray) -> np.ndarray:
+        self.fit(x)
+        return self.transform(x)
+
+    def inverse_transform(self, x: np.ndarray) -> np.ndarray:
+        if self.components_ is None:
+            raise ValueError(
+                "This PCA instance is not fitted yet. "
+                "Call 'fit' with appropriate arguments before using this estimator.",
+            )
+        return cv2.PCABackProject(x, self.mean, self.components_)
+
+    def explained_variance_ratio(self) -> np.ndarray:
+        if self.explained_variance_ is None:
+            raise ValueError(
+                "This PCA instance is not fitted yet. "
+                "Call 'fit' with appropriate arguments before using this method.",
+            )
+        total_variance = np.sum(self.explained_variance_)
+        return self.explained_variance_ / total_variance
+
+    def cumulative_explained_variance_ratio(self) -> np.ndarray:
+        return np.cumsum(self.explained_variance_ratio())
+
+
+def handle_empty_array(func: F) -> F:
+    @functools.wraps(func)
+    def wrapper(array: T, *args: Any, **kwargs: Any) -> Any:
+        if len(array) == 0:
+            return array
+        return func(array, *args, **kwargs)
+
+    return cast(F, wrapper)

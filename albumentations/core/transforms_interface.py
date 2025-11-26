@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from copy import deepcopy
-from typing import Any, Callable, Sequence, cast
+from typing import Any, Callable, Sequence
 from warnings import warn
 
 import cv2
@@ -14,11 +14,7 @@ from albumentations.core.validation import ValidatedTransformMeta
 
 from .serialization import Serializable, SerializableMeta, get_shortest_class_fullname
 from .types import (
-    BoxInternalType,
-    BoxType,
     ColorType,
-    KeypointInternalType,
-    KeypointType,
     Targets,
 )
 from .utils import format_args
@@ -98,7 +94,7 @@ class BasicTransform(Serializable, metaclass=CombinedMeta):
 
             return kwargs
 
-        if force_apply or (random.random() < self.p):
+        if self.should_apply(force_apply=force_apply):
             params = self.get_params()
             params = self.update_params_shape(params=params, data=kwargs)
 
@@ -122,6 +118,13 @@ class BasicTransform(Serializable, metaclass=CombinedMeta):
             return self.apply_with_params(params, **kwargs)
 
         return kwargs
+
+    def should_apply(self, force_apply: bool = False) -> bool:
+        if self.p <= 0.0:
+            return False
+        if self.p >= 1.0 or force_apply:
+            return True
+        return random.random() < self.p
 
     def apply_with_params(self, params: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Apply transforms with parameters."""
@@ -313,17 +316,14 @@ class DualTransform(BasicTransform):
             that the transform should be applied to and maps them to the corresponding methods.
 
     Methods:
-        apply_to_bbox(bbox: BoxInternalType, *args: Any, **params: Any) -> BoxInternalType:
-            Applies the transform to a single bounding box. Should be implemented in the subclass.
-
         apply_to_keypoint(keypoint: KeypointInternalType, *args: Any, **params: Any) -> KeypointInternalType:
             Applies the transform to a single keypoint. Should be implemented in the subclass.
 
-        apply_to_bboxes(bboxes: Sequence[BoxType], *args: Any, **params: Any) -> Sequence[BoxType]:
-            Applies the transform to a list of bounding boxes. Delegates to `apply_to_bbox` for each bounding box.
+        apply_to_bboxes(bboxes: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
+            Applies the transform to a numpy array of bounding boxes.
 
-        apply_to_keypoints(keypoints: Sequence[KeypointType], *args: Any, **params: Any) -> Sequence[KeypointType]:
-            Applies the transform to a list of keypoints. Delegates to `apply_to_keypoint` for each keypoint.
+        apply_to_keypoints(keypoints: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
+            Applies the transform to a numpy array of keypoints.
 
         apply_to_mask(mask: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
             Applies the transform specifically to a single mask.
@@ -349,35 +349,16 @@ class DualTransform(BasicTransform):
             "keypoints": self.apply_to_keypoints,
         }
 
-    def apply_to_bbox(self, bbox: BoxInternalType, *args: Any, **params: Any) -> BoxInternalType:
-        msg = f"Method apply_to_bbox is not implemented in class {self.__class__.__name__}"
-        raise NotImplementedError(msg)
-
-    def apply_to_keypoint(self, keypoint: KeypointInternalType, *args: Any, **params: Any) -> KeypointInternalType:
-        msg = f"Method apply_to_keypoint is not implemented in class {self.__class__.__name__}"
+    def apply_to_keypoints(self, keypoints: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
+        msg = f"Method apply_to_keypoints is not implemented in class {self.__class__.__name__}"
         raise NotImplementedError(msg)
 
     def apply_to_global_label(self, label: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
         msg = f"Method apply_to_global_label is not implemented in class {self.__class__.__name__}"
         raise NotImplementedError(msg)
 
-    def apply_to_bboxes(self, bboxes: Sequence[BoxType], *args: Any, **params: Any) -> Sequence[BoxType]:
-        return [
-            self.apply_to_bbox(cast(BoxInternalType, tuple(cast(BoxInternalType, bbox[:4]))), **params)
-            + tuple(bbox[4:])
-            for bbox in bboxes
-        ]
-
-    def apply_to_keypoints(
-        self,
-        keypoints: Sequence[KeypointType],
-        *args: Any,
-        **params: Any,
-    ) -> Sequence[KeypointType]:
-        return [
-            self.apply_to_keypoint(cast(KeypointInternalType, tuple(keypoint[:4])), **params) + tuple(keypoint[4:])
-            for keypoint in keypoints
-        ]
+    def apply_to_bboxes(self, bboxes: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
+        raise NotImplementedError(f"BBoxes not implemented for {self.__class__.__name__}")
 
     def apply_to_mask(self, mask: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
         return self.apply(mask, **{k: cv2.INTER_NEAREST if k == "interpolation" else v for k, v in params.items()})
@@ -408,11 +389,11 @@ class NoOp(DualTransform):
 
     _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS, Targets.GLOBAL_LABEL)
 
-    def apply_to_keypoint(self, keypoint: KeypointInternalType, **params: Any) -> KeypointInternalType:
-        return keypoint
+    def apply_to_keypoints(self, keypoints: np.ndarray, **params: Any) -> np.ndarray:
+        return keypoints
 
-    def apply_to_bbox(self, bbox: BoxInternalType, **params: Any) -> BoxInternalType:
-        return bbox
+    def apply_to_bboxes(self, bboxes: np.ndarray, **params: Any) -> np.ndarray:
+        return bboxes
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
         return img

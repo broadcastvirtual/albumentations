@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Callable, Sequence, Tuple, cast
+from typing import Any, Callable, Tuple, cast
 
 import numpy as np
-from pydantic import Field, model_validator
+from pydantic import model_validator
 from typing_extensions import Self
 
 from albumentations.core.pydantic import NonNegativeIntRangeType
 from albumentations.core.transforms_interface import BaseTransformInitSchema, DualTransform
-from albumentations.core.types import ColorType, KeypointType, ScaleIntType, Targets
+from albumentations.core.types import ColorType, ScaleIntType, Targets
 
-from .functional import cutout, keypoint_in_hole
+from .functional import cutout, filter_keypoints_in_holes
 
 __all__ = ["XYMasking"]
 
@@ -56,13 +56,13 @@ class XYMasking(DualTransform):
     _targets = (Targets.IMAGE, Targets.MASK, Targets.KEYPOINTS)
 
     class InitSchema(BaseTransformInitSchema):
-        num_masks_x: NonNegativeIntRangeType = 0
-        num_masks_y: NonNegativeIntRangeType = 0
-        mask_x_length: NonNegativeIntRangeType = 0
-        mask_y_length: NonNegativeIntRangeType = 0
+        num_masks_x: NonNegativeIntRangeType
+        num_masks_y: NonNegativeIntRangeType
+        mask_x_length: NonNegativeIntRangeType
+        mask_y_length: NonNegativeIntRangeType
 
-        fill_value: ColorType = Field(default=0, description="Value to fill image masks.")
-        mask_fill_value: ColorType = Field(default=0, description="Value to fill masks in the mask.")
+        fill_value: ColorType
+        mask_fill_value: ColorType
 
         @model_validator(mode="after")
         def check_mask_length(self) -> Self:
@@ -192,16 +192,12 @@ class XYMasking(DualTransform):
 
     def apply_to_keypoints(
         self,
-        keypoints: Sequence[KeypointType],
+        keypoints: np.ndarray,
         masks_x: list[tuple[int, int, int, int]],
         masks_y: list[tuple[int, int, int, int]],
         **params: Any,
-    ) -> list[KeypointType]:
-        return [
-            keypoint
-            for keypoint in keypoints
-            if not any(keypoint_in_hole(keypoint, hole) for hole in masks_x + masks_y)
-        ]
+    ) -> np.ndarray:
+        return filter_keypoints_in_holes(keypoints, np.array(masks_x + masks_y))
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return (

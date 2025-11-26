@@ -4,6 +4,11 @@ import sys
 import numpy as np
 import pytest
 
+from tests.utils import set_seed
+
+
+set_seed(42)
+
 @pytest.fixture
 def global_label():
     return np.array([1, 0, 0])
@@ -14,17 +19,17 @@ def mask():
 
 @pytest.fixture
 def bboxes():
-    return [[15, 12, 75, 30, 1], [55, 25, 90, 90, 2]]
+    return np.array([[15, 12, 75, 30, 1], [55, 25, 90, 90, 2]])
 
 
 @pytest.fixture
 def albumentations_bboxes():
-    return [[0.15, 0.12, 0.75, 0.30, 1], [0.55, 0.25, 0.90, 0.90, 2]]
+    return np.array([[0.15, 0.12, 0.75, 0.30, 1], [0.55, 0.25, 0.90, 0.90, 2]])
 
 
 @pytest.fixture
 def keypoints():
-    return [[30, 20, 40, 50, 1], [20, 30, 60, 80, 2]]
+    return np.array([[30, 20, 0, 50, 1], [20, 30, 60, 80, 2]], dtype=np.float32)
 
 @pytest.fixture
 def template():
@@ -51,8 +56,8 @@ def mp_pool():
 SQUARE_UINT8_IMAGE = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
 RECTANGULAR_UINT8_IMAGE = np.random.randint(low=0, high=256, size=(101, 99, 3), dtype=np.uint8)
 
-SQUARE_FLOAT_IMAGE = np.random.uniform(low=0.0, high=1.0, size=(100, 100, 3)).astype("float32")
-RECTANGULAR_FLOAT_IMAGE = np.random.uniform(low=0.0, high=1.0, size=(101, 99, 3)).astype("float32")
+SQUARE_FLOAT_IMAGE = np.random.uniform(low=0.0, high=1.0, size=(100, 100, 3)).astype(np.float32)
+RECTANGULAR_FLOAT_IMAGE = np.random.uniform(low=0.0, high=1.0, size=(101, 99, 3)).astype(np.float32)
 
 UINT8_IMAGES = [SQUARE_UINT8_IMAGE, RECTANGULAR_UINT8_IMAGE]
 

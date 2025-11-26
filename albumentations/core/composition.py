@@ -67,6 +67,36 @@ def get_transforms_dict(transforms: TransformsSeqType) -> dict[int, BasicTransfo
 
 
 class BaseCompose(Serializable):
+    """Base class for composing multiple transforms together.
+
+    This class serves as a foundation for creating compositions of transforms
+    in the Albumentations library. It provides basic functionality for
+    managing a sequence of transforms and applying them to data.
+
+    Attributes:
+        transforms (List[TransformType]): A list of transforms to be applied.
+        p (float): Probability of applying the compose. Should be in the range [0, 1].
+        replay_mode (bool): If True, the compose is in replay mode.
+        applied_in_replay (bool): Indicates if the compose was applied during replay.
+        _additional_targets (Dict[str, str]): Additional targets for transforms.
+        _available_keys (Set[str]): Set of available keys for data.
+        processors (Dict[str, Union[BboxProcessor, KeypointsProcessor]]): Processors for specific data types.
+
+    Args:
+        transforms (TransformsSeqType): A sequence of transforms to compose.
+        p (float): Probability of applying the compose.
+
+    Raises:
+        ValueError: If an invalid additional target is specified.
+
+    Note:
+        - Subclasses should implement the __call__ method to define how
+          the composition is applied to data.
+        - The class supports serialization and deserialization of transforms.
+        - It provides methods for adding targets, setting deterministic behavior,
+          and checking data validity post-transform.
+    """
+
     _transforms_dict: dict[int, BasicTransform] | None = None
     check_each_transform: tuple[DataProcessor, ...] | None = None
     main_compose: bool = True
@@ -185,7 +215,7 @@ class BaseCompose(Serializable):
 
     def check_data_post_transform(self, data: Any) -> dict[str, Any]:
         if self.check_each_transform:
-            rows, cols = get_shape(data["image"])
+            image_shape = get_shape(data["image"])
 
             for proc in self.check_each_transform:
                 for data_name in data:
@@ -193,7 +223,7 @@ class BaseCompose(Serializable):
                         data_name in self._additional_targets
                         and self._additional_targets[data_name] in proc.data_fields
                     ):
-                        data[data_name] = proc.filter(data[data_name], rows, cols)
+                        data[data_name] = proc.filter(data[data_name], image_shape)
         return data
 
 
@@ -382,7 +412,7 @@ class Compose(BaseCompose, HubMixin):
                     raise TypeError(f"{data_name} must be numpy array type")
                 shapes.append(data.shape[:2])
             if internal_data_name in CHECKED_MULTI and data is not None and len(data):
-                if not isinstance(data[0], np.ndarray):
+                if not isinstance(data, Sequence) or not isinstance(data[0], np.ndarray):
                     raise TypeError(f"{data_name} must be list of numpy arrays")
                 shapes.append(data[0].shape[:2])
             if internal_data_name in CHECK_BBOX_PARAM and self.processors.get("bboxes") is None:
