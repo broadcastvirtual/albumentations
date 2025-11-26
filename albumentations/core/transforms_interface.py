@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from copy import deepcopy
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Literal, Sequence
 from warnings import warn
 
 import cv2
@@ -16,12 +16,13 @@ from albumentations.core.validation import ValidatedTransformMeta
 
 from .serialization import Serializable, SerializableMeta, get_shortest_class_fullname
 from .types import (
+    NUM_MULTI_CHANNEL_DIMENSIONS,
     ColorType,
     Targets,
 )
 from .utils import format_args
 
-__all__ = ["BasicTransform", "DualTransform", "ImageOnlyTransform", "NoOp", "ReferenceBasedTransform"]
+__all__ = ["BasicTransform", "DualTransform", "ImageOnlyTransform", "NoOp"]
 
 
 class Interpolation:
@@ -49,7 +50,7 @@ class BasicTransform(Serializable, metaclass=CombinedMeta):
     ]  # mapping for targets (plus additional targets) and methods for which they depend
     call_backup = None
     interpolation: int
-    fill_value: ColorType
+    fill_value: ColorType | Literal["random"]
     mask_fill_value: ColorType | None
     # replay mode params
     deterministic: bool = False
@@ -317,30 +318,77 @@ class DualTransform(BasicTransform):
     such as masks, bounding boxes, and keypoints. This class ensures that when a transform is applied to an image,
     all associated entities are transformed accordingly to maintain consistency between the image and its annotations.
 
-    Properties:
-        targets (dict[str, Callable[..., Any]]): Defines the types of targets (e.g., image, mask, bboxes, keypoints)
-            that the transform should be applied to and maps them to the corresponding methods.
-
     Methods:
-        apply_to_keypoint(keypoint: KeypointInternalType, *args: Any, **params: Any) -> KeypointInternalType:
-            Applies the transform to a single keypoint. Should be implemented in the subclass.
+        apply(img: np.ndarray, **params: Any) -> np.ndarray:
+            Apply the transform to the image.
 
-        apply_to_bboxes(bboxes: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
-            Applies the transform to a numpy array of bounding boxes.
+            img: Input image of shape (H, W, C) or (H, W) for grayscale.
+            **params: Additional parameters specific to the transform.
 
-        apply_to_keypoints(keypoints: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
-            Applies the transform to a numpy array of keypoints.
+            Returns Transformed image of the same shape as input.
 
-        apply_to_mask(mask: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
-            Applies the transform specifically to a single mask.
+        apply_to_mask(mask: np.ndarray, **params: Any) -> np.ndarray:
+            Apply the transform to a mask or sequence of masks.
 
-        apply_to_masks(masks: Sequence[np.ndarray], **params: Any) -> list[np.ndarray]:
-            Applies the transform to a list of masks. Delegates to `apply_to_mask` for each mask.
+            mask: Input mask of shape (H, W), (H, W, C) for multi-channel masks,
+                    or a sequence of such arrays.
+            **params: Additional parameters specific to the transform.
+
+            Returns Transformed mask in the same format as input.
+
+        apply_to_masks(masks: np.ndarray | Sequence[np.ndarray], **params: Any) -> np.ndarray | list[np.ndarray]:
+            Apply the transform to multiple masks.
+
+            masks: Either a 3D array of shape (num_masks, H, W) or (H, W, num_masks),
+                    or a sequence of 2D/3D arrays each of shape (H, W) or (H, W, C).
+            **params: Additional parameters specific to the transform.
+            Returns Transformed masks in the same format as input.
+
+        apply_to_keypoints(keypoints: np.ndarray, **params: Any) -> np.ndarray:
+            Apply the transform to keypoints.
+
+            keypoints: Array of shape (N, 2+) where N is the number of keypoints.
+                **params: Additional parameters specific to the transform.
+            Returns Transformed keypoints array of shape (N, 2+).
+
+        apply_to_bboxes(bboxes: np.ndarray, **params: Any) -> np.ndarray:
+            Apply the transform to bounding boxes.
+
+            bboxes: Array of shape (N, 4+) where N is the number of bounding boxes,
+                    and each row is in the format [x_min, y_min, x_max, y_max].
+            **params: Additional parameters specific to the transform.
+
+            Returns Transformed bounding boxes array of shape (N, 4+).
 
     Note:
-        This class is intended to be subclassed and should not be used directly. Subclasses are expected to
-        implement the specific logic for each type of target (e.g., image, mask, bboxes, keypoints) in the
-        corresponding `apply_to_*` methods.
+        - All `apply_*` methods should maintain the input shape and format of the data.
+        - The `apply_to_mask` and `apply_to_masks` methods handle both single arrays and sequences of arrays.
+        - When applying transforms to masks, ensure that discrete values (e.g., class labels) are preserved.
+        - For keypoints and bounding boxes, the transformation should maintain their relative positions
+            with respect to the transformed image.
+        - The difference between `apply_to_mask` and `apply_to_masks` is mainly in how they handle 3D arrays:
+            `apply_to_mask` treats a 3D array as a multi-channel mask, while `apply_to_masks` treats it as
+            multiple single-channel masks.
+
+    Example:
+        class MyTransform(DualTransform):
+            def apply(self, img, **params):
+                # Transform the image
+                return transformed_img
+
+            def apply_to_mask(self, mask, **params):
+                # Transform the mask or sequence of masks
+                if isinstance(mask, Sequence):
+                    return [self._transform_single_mask(m, **params) for m in mask]
+                return self._transform_single_mask(mask, **params)
+
+            def apply_to_keypoints(self, keypoints, **params):
+                # Transform the keypoints
+                return transformed_keypoints
+
+            def apply_to_bboxes(self, bboxes, **params):
+                # Transform the bounding boxes
+                return transformed_bboxes
 
     """
 
@@ -359,21 +407,24 @@ class DualTransform(BasicTransform):
         msg = f"Method apply_to_keypoints is not implemented in class {self.__class__.__name__}"
         raise NotImplementedError(msg)
 
-    def apply_to_global_label(self, label: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
-        msg = f"Method apply_to_global_label is not implemented in class {self.__class__.__name__}"
-        raise NotImplementedError(msg)
-
     def apply_to_bboxes(self, bboxes: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
         raise NotImplementedError(f"BBoxes not implemented for {self.__class__.__name__}")
 
     def apply_to_mask(self, mask: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
         return self.apply(mask, **{k: cv2.INTER_NEAREST if k == "interpolation" else v for k, v in params.items()})
 
-    def apply_to_masks(self, masks: Sequence[np.ndarray], **params: Any) -> list[np.ndarray]:
-        return [self.apply_to_mask(mask, **params) for mask in masks]
+    def apply_to_masks(self, masks: np.ndarray | Sequence[np.ndarray], **params: Any) -> list[np.ndarray] | np.ndarray:
+        if isinstance(masks, np.ndarray):
+            if masks.ndim == NUM_MULTI_CHANNEL_DIMENSIONS:
+                # Transpose from (num_channels, height, width) to (height, width, num_channels)
+                masks = np.transpose(masks, (1, 2, 0))
+                masks = np.require(masks, requirements=["C_CONTIGUOUS"])
+                transformed_masks = self.apply_to_mask(masks, **params)
+                # Transpose back to (num_channels, height, width)
+                return np.require(np.transpose(transformed_masks, (2, 0, 1)), requirements=["C_CONTIGUOUS"])
 
-    def apply_to_global_labels(self, labels: Sequence[np.ndarray], **params: Any) -> list[np.ndarray]:
-        return [self.apply_to_global_label(label, **params) for label in labels]
+            return self.apply_to_mask(masks, **params)
+        return [self.apply_to_mask(mask, **params) for mask in masks]
 
 
 class ImageOnlyTransform(BasicTransform):
@@ -390,10 +441,10 @@ class NoOp(DualTransform):
     """Identity transform (does nothing).
 
     Targets:
-        image, mask, bboxes, keypoints, global_label
+        image, mask, bboxes, keypoints
     """
 
-    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS, Targets.GLOBAL_LABEL)
+    _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     def apply_to_keypoints(self, keypoints: np.ndarray, **params: Any) -> np.ndarray:
         return keypoints
@@ -407,20 +458,5 @@ class NoOp(DualTransform):
     def apply_to_mask(self, mask: np.ndarray, **params: Any) -> np.ndarray:
         return mask
 
-    def apply_to_global_label(self, label: np.ndarray, **params: Any) -> np.ndarray:
-        return label
-
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return ()
-
-
-class ReferenceBasedTransform(DualTransform):
-    @property
-    def targets(self) -> dict[str, Callable[..., Any]]:
-        return {
-            "global_label": self.apply_to_global_label,
-            "image": self.apply,
-            "mask": self.apply_to_mask,
-            "bboxes": self.apply_to_bboxes,
-            "keypoints": self.apply_to_keypoints,
-        }

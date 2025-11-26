@@ -10,8 +10,9 @@ from albucore import clipped, get_num_channels, hflip, maybe_process_in_chunks, 
 
 from albumentations import random_utils
 from albumentations.augmentations.utils import angle_2pi_range, handle_empty_array
-from albumentations.core.bbox_utils import bbox_from_mask, denormalize_bboxes, normalize_bboxes
+from albumentations.core.bbox_utils import bboxes_from_masks, denormalize_bboxes, masks_from_bboxes, normalize_bboxes
 from albumentations.core.types import (
+    MONO_CHANNEL_DIMENSIONS,
     NUM_KEYPOINTS_COLUMNS_IN_ALBUMENTATIONS,
     NUM_MULTI_CHANNEL_DIMENSIONS,
     REFLECT_BORDER_MODES,
@@ -21,13 +22,13 @@ from albumentations.core.types import (
 )
 
 __all__ = [
-    "optical_distortion",
-    "elastic_transform_keypoints",
-    "grid_distortion",
+    "distortion",
+    "distortion",
+    "distortion_keypoints",
+    "distortion_bboxes",
     "pad",
     "pad_with_params",
     "rotate",
-    "elastic_transform",
     "resize",
     "scale",
     "_func_max_size",
@@ -56,6 +57,7 @@ __all__ = [
     "keypoints_hflip",
     "center",
     "center_bbox",
+    "generate_grid",
 ]
 
 PAIR = 2
@@ -572,6 +574,9 @@ def perspective_keypoints(
     keep_size: bool,
 ) -> np.ndarray:
     keypoints = keypoints.copy().astype(np.float32)
+
+    height, width = image_shape[:2]
+
     x, y, angle, scale = keypoints[:, 0], keypoints[:, 1], keypoints[:, 2], keypoints[:, 3]
 
     # Reshape keypoints for perspective transform
@@ -579,6 +584,11 @@ def perspective_keypoints(
 
     # Apply perspective transform
     transformed_points = cv2.perspectiveTransform(keypoint_vector, matrix).squeeze()
+
+    # Unsqueeze if we have a single keypoint
+    if transformed_points.ndim == 1:
+        transformed_points = transformed_points[np.newaxis, :]
+
     x, y = transformed_points[:, 0], transformed_points[:, 1]
 
     # Update angles
@@ -602,7 +612,7 @@ def perspective_keypoints(
 
     # If there are additional columns, preserve them
     if keypoints.shape[1] > NUM_KEYPOINTS_COLUMNS_IN_ALBUMENTATIONS:
-        transformed_keypoints = np.column_stack(
+        return np.column_stack(
             [transformed_keypoints, keypoints[:, NUM_KEYPOINTS_COLUMNS_IN_ALBUMENTATIONS:]],
         )
 
@@ -1598,95 +1608,73 @@ def pad_with_params(
 
 
 @preserve_channel_dim
-def optical_distortion(
+def distortion(
     img: np.ndarray,
-    k: int,
-    dx: int,
-    dy: int,
+    map_x: np.ndarray,
+    map_y: np.ndarray,
     interpolation: int,
     border_mode: int,
     value: ColorType | None = None,
 ) -> np.ndarray:
-    """Barrel / pincushion distortion. Unconventional augment.
-
-    Reference:
-        |  https://stackoverflow.com/questions/6199636/formulas-for-barrel-pincushion-distortion
-        |  https://stackoverflow.com/questions/10364201/image-transformation-in-opencv
-        |  https://stackoverflow.com/questions/2477774/correcting-fisheye-distortion-programmatically
-        |  http://www.coldvision.io/2017/03/02/advanced-lane-finding-using-opencv/
-    """
-    height, width = img.shape[:2]
-
-    fx = width
-    fy = height
-
-    cx = width * 0.5 + dx
-    cy = height * 0.5 + dy
-
-    camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-
-    distortion = np.array([k, k, 0, 0, 0], dtype=np.float32)
-    map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, distortion, None, None, (width, height), cv2.CV_32FC1)
-    return cv2.remap(img, map1, map2, interpolation=interpolation, borderMode=border_mode, borderValue=value)
+    return cv2.remap(img, map_x, map_y, interpolation, borderMode=border_mode, borderValue=value)
 
 
-@preserve_channel_dim
-def grid_distortion(
-    img: np.ndarray,
-    num_steps: int,
-    xsteps: tuple[()],
-    ysteps: tuple[()],
-    interpolation: int,
-    border_mode: int,
-    value: ColorType | None = None,
+@handle_empty_array
+def distortion_keypoints(
+    keypoints: np.ndarray,
+    map_x: np.ndarray,
+    map_y: np.ndarray,
+    image_shape: tuple[int, int],
 ) -> np.ndarray:
-    height, width = img.shape[:2]
+    height, width = image_shape[:2]
 
-    x_step = width // num_steps
-    xx = np.zeros(width, np.float32)
-    prev = 0
-    for idx in range(num_steps + 1):
-        x = idx * x_step
-        start = int(x)
-        end = int(x) + x_step
-        if end > width:
-            end = width
-            cur = width
-        else:
-            cur = prev + x_step * xsteps[idx]
+    # Create inverse mappings
+    x_inv = np.arange(width).reshape(1, -1).repeat(height, axis=0)
+    y_inv = np.arange(height).reshape(-1, 1).repeat(width, axis=1)
 
-        xx[start:end] = np.linspace(prev, cur, end - start)
-        prev = cur
+    # Extract x and y coordinates
+    x, y = keypoints[:, 0], keypoints[:, 1]
 
-    y_step = height // num_steps
-    yy = np.zeros(height, np.float32)
-    prev = 0
-    for idx in range(num_steps + 1):
-        y = idx * y_step
-        start = int(y)
-        end = int(y) + y_step
-        if end > height:
-            end = height
-            cur = height
-        else:
-            cur = prev + y_step * ysteps[idx]
+    # Clip coordinates to image boundaries
+    x = np.clip(x, 0, width - 1)
+    y = np.clip(y, 0, height - 1)
 
-        yy[start:end] = np.linspace(prev, cur, end - start)
-        prev = cur
+    # Convert to integer indices
+    x_idx, y_idx = x.astype(int), y.astype(int)
 
-    map_x, map_y = np.meshgrid(xx, yy)
-    map_x = map_x.astype(np.float32)
-    map_y = map_y.astype(np.float32)
+    # Apply the inverse mapping
+    new_x = x_inv[y_idx, x_idx] + (x - map_x[y_idx, x_idx])
+    new_y = y_inv[y_idx, x_idx] + (y - map_y[y_idx, x_idx])
 
-    remap_fn = maybe_process_in_chunks(
-        cv2.remap,
-        map1=map_x,
-        map2=map_y,
-        interpolation=interpolation,
-        borderMode=border_mode,
-        borderValue=value,
-    )
-    return remap_fn(img)
+    # Clip the new coordinates to ensure they're within the image bounds
+    new_x = np.clip(new_x, 0, width - 1)
+    new_y = np.clip(new_y, 0, height - 1)
+
+    # Create the transformed keypoints array
+    return np.column_stack([new_x, new_y, keypoints[:, 2:]])
+
+
+@handle_empty_array
+def distortion_bboxes(
+    bboxes: np.ndarray,
+    map_x: np.ndarray,
+    map_y: np.ndarray,
+    image_shape: tuple[int, int],
+    border_mode: int,
+) -> np.ndarray:
+    result = bboxes.copy()
+
+    masks = np.transpose(masks_from_bboxes(bboxes, image_shape), (1, 2, 0))
+    transformed_masks = cv2.remap(masks, map_x, map_y, cv2.INTER_NEAREST, borderMode=border_mode, borderValue=0)
+
+    if transformed_masks.ndim == MONO_CHANNEL_DIMENSIONS:
+        transformed_masks = np.expand_dims(transformed_masks, axis=0)
+    else:
+        transformed_masks = np.transpose(transformed_masks, (2, 0, 1))
+
+    result[:, :4] = bboxes_from_masks(transformed_masks)
+
+    return result
 
 
 def generate_displacement_fields(
@@ -1712,63 +1700,6 @@ def generate_displacement_fields(
         dy *= alpha
 
     return dx, dy
-
-
-def elastic_transform_keypoints(
-    keypoints: np.ndarray,
-    displacement_fields: tuple[np.ndarray, np.ndarray],
-    image_shape: tuple[int, int],
-) -> np.ndarray:
-    height, width = image_shape[:2]
-    dx, dy = displacement_fields
-
-    transformed_keypoints = []
-    for kp in keypoints:
-        x, y = kp[:2]
-
-        # Ensure the keypoint is within the image bounds
-        x = np.clip(x, 0, width - 1)
-        y = np.clip(y, 0, height - 1)
-
-        # Get the displacement at the keypoint location
-        x_displacement = dx[int(y), int(x)]
-        y_displacement = dy[int(y), int(x)]
-
-        # Apply the displacement
-        new_x = x + x_displacement
-        new_y = y + y_displacement
-
-        # Add the transformed keypoint
-        transformed_keypoints.append([new_x, new_y, *list(kp[2:])])
-
-    return np.array(transformed_keypoints)
-
-
-@preserve_channel_dim
-def elastic_transform(
-    img: np.ndarray,
-    displacement_fields: tuple[np.ndarray, np.ndarray],
-    interpolation: int,
-    border_mode: int,
-    value: ColorType | None = None,
-) -> np.ndarray:
-    height, width = img.shape[:2]
-
-    dx, dy = displacement_fields
-
-    x, y = np.meshgrid(np.arange(width), np.arange(height))
-    map_x = np.float32(x + dx)
-    map_y = np.float32(y + dy)
-
-    remap_fn = maybe_process_in_chunks(
-        cv2.remap,
-        map1=map_x,
-        map2=map_y,
-        interpolation=interpolation,
-        borderMode=border_mode,
-        borderValue=value,
-    )
-    return remap_fn(img)
 
 
 @handle_empty_array
@@ -2050,53 +1981,69 @@ def distort_image(image: np.ndarray, generated_mesh: np.ndarray, interpolation: 
     return distorted_image
 
 
-def calculate_grid_dimensions(
+@handle_empty_array
+def bbox_distort_image(
+    bboxes: np.ndarray,
+    generated_mesh: np.ndarray,
     image_shape: tuple[int, int],
-    num_grid_xy: tuple[int, int],
 ) -> np.ndarray:
-    """Calculate the dimensions of a grid overlay on an image using vectorized operations.
+    bboxes = bboxes.copy()
+    # Create a mask for each bbox
+    masks = np.zeros((len(bboxes), *image_shape), dtype=np.uint8)
+    for i, (x_min, y_min, x_max, y_max) in enumerate(bboxes[:, :4].astype(int)):
+        masks[i, y_min:y_max, x_min:x_max] = 1
 
-    This function divides an image into a grid and calculates the dimensions
-    (x_min, y_min, x_max, y_max) for each cell in the grid without using loops.
+    transformed_masks = np.stack(
+        [distort_image(mask, generated_mesh, cv2.INTER_NEAREST) for mask in masks],
+    )
 
-    Args:
-        image_shape (tuple[int, int]): The shape of the image (height, width).
-        num_grid_xy (tuple[int, int]): The number of grid cells in (x, y) directions.
+    # Normalize the returned bboxes
+    bboxes[:, :4] = bboxes_from_masks(transformed_masks)
 
-    Returns:
-        np.ndarray: A 3D array of shape (grid_height, grid_width, 4) where each element
-                    is [x_min, y_min, x_max, y_max] for a grid cell.
+    return bboxes
 
-    Example:
-        >>> image_shape = (100, 150)
-        >>> num_grid_xy = (3, 2)
-        >>> dimensions = calculate_grid_dimensions(image_shape, num_grid_xy)
-        >>> print(dimensions.shape)
-        (2, 3, 4)
-        >>> print(dimensions[0, 0])  # First cell
-        [  0   0  50  50]
-    """
-    num_grid_yx = np.array(num_grid_xy[::-1])  # Reverse to match image_shape order
-    image_shape = np.array(image_shape)
 
-    square_shape = image_shape // num_grid_yx
-    last_square_shape = image_shape - (square_shape * (num_grid_yx - 1))
+@handle_empty_array
+def distort_image_keypoints(
+    keypoints: np.ndarray,
+    generated_mesh: np.ndarray,
+    image_shape: tuple[int, int],
+) -> np.ndarray:
+    distorted_keypoints = keypoints.copy()
+    height, width = image_shape[:2]
 
-    grid_width, grid_height = num_grid_xy
+    for mesh in generated_mesh:
+        x1, y1, x2, y2 = mesh[:4]  # Source rectangle
+        dst_quad = mesh[4:].reshape(4, 2)  # Destination quadrilateral
 
-    # Create meshgrid for row and column indices
-    col_indices, row_indices = np.meshgrid(np.arange(grid_width), np.arange(grid_height))
+        src_quad = np.array(
+            [
+                [x1, y1],  # Top-left
+                [x2, y1],  # Top-right
+                [x2, y2],  # Bottom-right
+                [x1, y2],  # Bottom-left
+            ],
+            dtype=np.float32,
+        )
 
-    # Calculate x_min and y_min
-    x_min = col_indices * square_shape[1]
-    y_min = row_indices * square_shape[0]
+        perspective_mat = cv2.getPerspectiveTransform(src_quad, dst_quad)
 
-    # Calculate x_max and y_max
-    x_max = np.where(col_indices == grid_width - 1, x_min + last_square_shape[1], x_min + square_shape[1])
-    y_max = np.where(row_indices == grid_height - 1, y_min + last_square_shape[0], y_min + square_shape[0])
+        mask = (keypoints[:, 0] >= x1) & (keypoints[:, 0] < x2) & (keypoints[:, 1] >= y1) & (keypoints[:, 1] < y2)
+        cell_keypoints = keypoints[mask]
 
-    # Stack the dimensions
-    return np.stack([x_min, y_min, x_max, y_max], axis=-1).astype(np.int16)
+        if len(cell_keypoints) > 0:
+            # Convert to float32 before applying the transformation
+            points_float32 = cell_keypoints[:, :2].astype(np.float32).reshape(-1, 1, 2)
+            transformed_points = cv2.perspectiveTransform(points_float32, perspective_mat).reshape(-1, 2)
+
+            # Update distorted keypoints
+            distorted_keypoints[mask, :2] = transformed_points
+
+    # Clip keypoints to image boundaries
+    distorted_keypoints[:, 0] = np.clip(distorted_keypoints[:, 0], 0, width - 1)
+    distorted_keypoints[:, 1] = np.clip(distorted_keypoints[:, 1], 0, height - 1)
+
+    return distorted_keypoints
 
 
 def generate_distorted_grid_polygons(
@@ -2474,110 +2421,6 @@ def compute_affine_warp_output_shape(
     return matrix, cast(Tuple[int, int], output_shape_tuple)
 
 
-@handle_empty_array
-def bboxes_optical_distortion(
-    bboxes: np.ndarray,
-    k: float,
-    dx: int,
-    dy: int,
-    border_mode: int,
-    image_shape: tuple[int, int],
-) -> np.ndarray:
-    height, width = image_shape[:2]
-
-    # Denormalize bboxes
-    bboxes_denorm = denormalize_bboxes(bboxes[:, :4], image_shape)
-
-    # Create masks for each bbox
-    masks = np.zeros((len(bboxes), height, width), dtype=np.uint8)
-    for i, (x_min, y_min, x_max, y_max) in enumerate(bboxes_denorm.astype(int)):
-        masks[i, y_min:y_max, x_min:x_max] = 1
-
-    # Apply optical distortion to all masks
-    distorted_masks = np.array(
-        [optical_distortion(mask, k, dx, dy, cv2.INTER_NEAREST, border_mode, -1) for mask in masks],
-    )
-
-    # Get bboxes from distorted masks
-    distorted_bboxes = np.array([bbox_from_mask(mask) for mask in distorted_masks])
-
-    # Normalize the distorted bboxes
-    normalized_bboxes = normalize_bboxes(distorted_bboxes, image_shape)
-
-    # Update the first 4 columns of the input array
-    bboxes[:, :4] = normalized_bboxes
-
-    return bboxes
-
-
-@handle_empty_array
-def bbox_elastic_transform(
-    bboxes: np.ndarray,
-    displacement_fields: tuple[np.ndarray, np.ndarray],
-    border_mode: int,
-    image_shape: tuple[int, int],
-) -> np.ndarray:
-    bboxes = bboxes.copy()
-    bboxes_denorm = denormalize_bboxes(bboxes, image_shape)
-    # Create a mask for each bbox
-    masks = np.zeros((len(bboxes), *image_shape), dtype=np.uint8)
-    for i, (x_min, y_min, x_max, y_max) in enumerate(bboxes_denorm[:, :4].astype(int)):
-        masks[i, y_min:y_max, x_min:x_max] = 1
-
-    transformed_masks = np.stack(
-        [elastic_transform(mask, displacement_fields, cv2.INTER_NEAREST, border_mode, -1) for mask in masks],
-    )
-
-    # Get bboxes from transformed masks
-    bboxes_returned = np.array([bbox_from_mask(mask) for mask in transformed_masks])
-
-    # Normalize the returned bboxes
-    bboxes[:, :4] = normalize_bboxes(bboxes_returned, image_shape)
-
-    return bboxes
-
-
-@handle_empty_array
-def bboxes_grid_distortion(
-    bboxes: np.ndarray,
-    stepsx: tuple[float, ...],
-    stepsy: tuple[float, ...],
-    num_steps: int,
-    border_mode: int,
-    image_shape: tuple[int, int],
-) -> np.ndarray:
-    bboxes_denorm = denormalize_bboxes(bboxes, image_shape)
-
-    # Create a mask for each bbox
-    masks = np.zeros((len(bboxes), *image_shape[:2]), dtype=np.uint8)
-
-    for i, bbox in enumerate(bboxes_denorm):
-        x_min, y_min, x_max, y_max = bbox[:4].astype(int)
-        masks[i, y_min:y_max, x_min:x_max] = 1
-
-    # Apply grid distortion to all masks
-    transformed_masks = np.stack(
-        [
-            grid_distortion(
-                mask,
-                num_steps,
-                stepsx,
-                stepsy,
-                cv2.INTER_NEAREST,
-                border_mode,
-                -1,
-            )
-            for mask in masks
-        ],
-    )
-
-    # Get bboxes from transformed masks
-    bboxes_returned = np.array([bbox_from_mask(mask) for mask in transformed_masks])
-
-    # Normalize the returned bboxes
-    return normalize_bboxes(bboxes_returned, image_shape)
-
-
 def center(image_shape: tuple[int, int]) -> tuple[float, float]:
     """Calculate the center coordinates if image. Used by images, masks and keypoints.
 
@@ -2602,3 +2445,261 @@ def center_bbox(image_shape: tuple[int, int]) -> tuple[float, float]:
     """
     height, width = image_shape[:2]
     return width / 2, height / 2
+
+
+def generate_grid(
+    image_shape: tuple[int, int],
+    steps_x: list[float],
+    steps_y: list[float],
+    num_steps: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate a distorted grid for image transformation based on given step sizes.
+
+    This function creates two 2D arrays (map_x and map_y) that represent a distorted version
+    of the original image grid. These arrays can be used with OpenCV's remap function to
+    apply grid distortion to an image.
+
+    Args:
+        image_shape (tuple[int, int]): The shape of the image as (height, width).
+        steps_x (list[float]): List of step sizes for the x-axis distortion. The length
+            should be num_steps + 1. Each value represents the relative step size for
+            a segment of the grid in the x direction.
+        steps_y (list[float]): List of step sizes for the y-axis distortion. The length
+            should be num_steps + 1. Each value represents the relative step size for
+            a segment of the grid in the y direction.
+        num_steps (int): The number of steps to divide each axis into. This determines
+            the granularity of the distortion grid.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: A tuple containing two 2D numpy arrays:
+            - map_x: A 2D array of float32 values representing the x-coordinates
+              of the distorted grid.
+            - map_y: A 2D array of float32 values representing the y-coordinates
+              of the distorted grid.
+
+    Note:
+        - The function generates a grid where each cell can be distorted independently.
+        - The distortion is controlled by the steps_x and steps_y parameters, which
+          determine how much each grid line is shifted.
+        - The resulting map_x and map_y can be used directly with cv2.remap() to
+          apply the distortion to an image.
+        - The distortion is applied smoothly across each grid cell using linear
+          interpolation.
+
+    Example:
+        >>> image_shape = (100, 100)
+        >>> steps_x = [1.1, 0.9, 1.0, 1.2, 0.95, 1.05]
+        >>> steps_y = [0.9, 1.1, 1.0, 1.1, 0.9, 1.0]
+        >>> num_steps = 5
+        >>> map_x, map_y = generate_grid(image_shape, steps_x, steps_y, num_steps)
+        >>> distorted_image = cv2.remap(image, map_x, map_y, cv2.INTER_LINEAR)
+    """
+    height, width = image_shape[:2]
+    x_step = width // num_steps
+    xx = np.zeros(width, np.float32)
+    prev = 0.0
+    for idx, step in enumerate(steps_x):
+        x = idx * x_step
+        start = int(x)
+        end = min(int(x) + x_step, width)
+        cur = prev + x_step * step
+        xx[start:end] = np.linspace(prev, cur, end - start)
+        prev = cur
+
+    y_step = height // num_steps
+    yy = np.zeros(height, np.float32)
+    prev = 0.0
+    for idx, step in enumerate(steps_y):
+        y = idx * y_step
+        start = int(y)
+        end = min(int(y) + y_step, height)
+        cur = prev + y_step * step
+        yy[start:end] = np.linspace(prev, cur, end - start)
+        prev = cur
+
+    return np.meshgrid(xx, yy)
+
+
+def normalize_grid_distortion_steps(
+    image_shape: tuple[int, int],
+    num_steps: int,
+    x_steps: list[float],
+    y_steps: list[float],
+) -> dict[str, np.ndarray]:
+    height, width = image_shape
+
+    # compensate for smaller last steps in source image.
+    x_step = width // num_steps
+    last_x_step = min(width, ((num_steps + 1) * x_step)) - (num_steps * x_step)
+    x_steps[-1] *= last_x_step / x_step
+
+    y_step = height // num_steps
+    last_y_step = min(height, ((num_steps + 1) * y_step)) - (num_steps * y_step)
+    y_steps[-1] *= last_y_step / y_step
+
+    # now normalize such that distortion never leaves image bounds.
+    tx = width / math.floor(width / num_steps)
+    ty = height / math.floor(height / num_steps)
+    x_steps = np.array(x_steps) * (tx / np.sum(x_steps))
+    y_steps = np.array(y_steps) * (ty / np.sum(y_steps))
+
+    return {"steps_x": x_steps, "steps_y": y_steps}
+
+
+def almost_equal_intervals(n: int, parts: int) -> np.ndarray:
+    """Generates an array of nearly equal integer intervals that sum up to `n`.
+
+    This function divides the number `n` into `parts` nearly equal parts. It ensures that
+    the sum of all parts equals `n`, and the difference between any two parts is at most one.
+    This is useful for distributing a total amount into nearly equal discrete parts.
+
+    Args:
+        n (int): The total value to be split.
+        parts (int): The number of parts to split into.
+
+    Returns:
+        np.ndarray: An array of integers where each integer represents the size of a part.
+
+    Example:
+        >>> almost_equal_intervals(20, 3)
+        array([7, 7, 6])  # Splits 20 into three parts: 7, 7, and 6
+        >>> almost_equal_intervals(16, 4)
+        array([4, 4, 4, 4])  # Splits 16 into four equal parts
+    """
+    part_size, remainder = divmod(n, parts)
+    # Create an array with the base part size and adjust the first `remainder` parts by adding 1
+    return np.array([part_size + 1 if i < remainder else part_size for i in range(parts)])
+
+
+def generate_shuffled_splits(
+    size: int,
+    divisions: int,
+    random_state: np.random.RandomState | None = None,
+) -> np.ndarray:
+    """Generate shuffled splits for a given dimension size and number of divisions.
+
+    Args:
+        size (int): Total size of the dimension (height or width).
+        divisions (int): Number of divisions (rows or columns).
+        random_state (Optional[np.random.RandomState]): Seed for the random number generator for reproducibility.
+
+    Returns:
+        np.ndarray: Cumulative edges of the shuffled intervals.
+    """
+    intervals = almost_equal_intervals(size, divisions)
+    intervals = random_utils.shuffle(intervals, random_state=random_state)
+    return np.insert(np.cumsum(intervals), 0, 0)
+
+
+def split_uniform_grid(
+    image_shape: tuple[int, int],
+    grid: tuple[int, int],
+    random_state: np.random.RandomState | None = None,
+) -> np.ndarray:
+    """Splits an image shape into a uniform grid specified by the grid dimensions.
+
+    Args:
+        image_shape (tuple[int, int]): The shape of the image as (height, width).
+        grid (tuple[int, int]): The grid size as (rows, columns).
+        random_state (Optional[np.random.RandomState]): The random state to use for shuffling the splits.
+            If None, the splits are not shuffled.
+
+    Returns:
+        np.ndarray: An array containing the tiles' coordinates in the format (start_y, start_x, end_y, end_x).
+
+    Note:
+        The function uses `generate_shuffled_splits` to generate the splits for the height and width of the image.
+        The splits are then used to calculate the coordinates of the tiles.
+    """
+    n_rows, n_cols = grid
+
+    height_splits = generate_shuffled_splits(image_shape[0], grid[0], random_state)
+    width_splits = generate_shuffled_splits(image_shape[1], grid[1], random_state)
+
+    # Calculate tiles coordinates
+    tiles = [
+        (height_splits[i], width_splits[j], height_splits[i + 1], width_splits[j + 1])
+        for i in range(n_rows)
+        for j in range(n_cols)
+    ]
+
+    return np.array(tiles, dtype=np.int16)
+
+
+def generate_perspective_points(
+    image_shape: tuple[int, int],
+    scale: float,
+    random_state: np.random.RandomState | None = None,
+) -> np.ndarray:
+    height, width = image_shape[:2]
+    points = random_utils.normal(0, scale, (4, 2), random_state=random_state)
+    points = np.mod(np.abs(points), 0.32)
+
+    # top left -- no changes needed, just use jitter
+    # top right
+    points[1, 0] = 1.0 - points[1, 0]  # w = 1.0 - jitter
+    # bottom right
+    points[2] = 1.0 - points[2]  # w = 1.0 - jitter
+    # bottom left
+    points[3, 1] = 1.0 - points[3, 1]  # h = 1.0 - jitter
+
+    points[:, 0] *= width
+    points[:, 1] *= height
+
+    return points
+
+
+def order_points(pts: np.ndarray) -> np.ndarray:
+    pts = np.array(sorted(pts, key=lambda x: x[0]))
+    left = pts[:2]  # points with smallest x coordinate - left points
+    right = pts[2:]  # points with greatest x coordinate - right points
+
+    if left[0][1] < left[1][1]:
+        tl, bl = left
+    else:
+        bl, tl = left
+
+    if right[0][1] < right[1][1]:
+        tr, br = right
+    else:
+        br, tr = right
+
+    return np.array([tl, tr, br, bl], dtype=np.float32)
+
+
+def compute_perspective_params(points: np.ndarray) -> tuple[np.ndarray, int, int]:
+    top_left, top_right, bottom_right, bottom_left = points
+
+    def adjust_dimension(dim1: np.ndarray, dim2: np.ndarray, min_size: int = 2) -> float:
+        size = np.sqrt(np.sum((dim1 - dim2) ** 2))
+        if size < min_size:
+            step_size = (min_size - size) / 2
+            dim1[dim1 > dim2] += step_size
+            dim2[dim1 > dim2] -= step_size
+            dim1[dim1 <= dim2] -= step_size
+            dim2[dim1 <= dim2] += step_size
+            size = min_size
+        return size
+
+    max_width = max(adjust_dimension(top_right, top_left), adjust_dimension(bottom_right, bottom_left))
+    max_height = max(adjust_dimension(bottom_right, top_right), adjust_dimension(bottom_left, top_left))
+
+    max_width, max_height = int(max_width), int(max_height)
+
+    dst = np.array([[0, 0], [max_width, 0], [max_width, max_height], [0, max_height]], dtype=np.float32)
+    matrix = cv2.getPerspectiveTransform(points, dst)
+
+    return matrix, max_width, max_height
+
+
+def expand_transform(matrix: np.ndarray, shape: tuple[int, int]) -> tuple[np.ndarray, int, int]:
+    height, width = shape[:2]
+    rect = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+    dst = cv2.perspectiveTransform(np.array([rect]), matrix)[0]
+
+    dst -= dst.min(axis=0, keepdims=True)
+    dst = np.around(dst, decimals=0)
+
+    matrix_expanded = cv2.getPerspectiveTransform(rect, dst)
+    max_width, max_height = dst.max(axis=0)
+    return matrix_expanded, int(max_width), int(max_height)

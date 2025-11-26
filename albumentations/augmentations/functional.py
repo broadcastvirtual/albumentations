@@ -28,12 +28,14 @@ from albucore import (
     uint8_io,
 )
 
+import albumentations.augmentations.geometric.functional as fgeometric
 from albumentations import random_utils
-from albumentations.augmentations.geometric.functional import resize
 from albumentations.augmentations.utils import (
     PCA,
+    handle_empty_array,
     non_rgb_error,
 )
+from albumentations.core.bbox_utils import bboxes_from_masks, masks_from_bboxes
 from albumentations.core.types import (
     EIGHT,
     MONO_CHANNEL_DIMENSIONS,
@@ -79,7 +81,6 @@ __all__ = [
     "swap_tiles_on_image",
     "to_gray",
     "unsharp_mask",
-    "split_uniform_grid",
     "chromatic_aberration",
     "erode",
     "dilate",
@@ -687,7 +688,7 @@ def add_fog(
     fog_intensity: float,
     alpha_coef: float,
     fog_particle_positions: list[tuple[int, int]],
-    random_state: np.random.RandomState | None = None,
+    random_state: np.random.RandomState,
 ) -> np.ndarray:
     """Add fog to the input image.
 
@@ -696,7 +697,7 @@ def add_fog(
         fog_intensity (float): Intensity of the fog effect, between 0 and 1.
         alpha_coef (float): Base alpha (transparency) value for fog particles.
         fog_particle_positions (list[tuple[int, int]]): List of (x, y) coordinates for fog particles.
-        random_state (np.random.RandomState | None): If specified, this will be random state used
+        random_state (np.random.RandomState): Random state used
     Returns:
         np.ndarray: Image with added fog effect.
     """
@@ -705,13 +706,19 @@ def add_fog(
 
     fog_layer = np.zeros((height, width, num_channels), dtype=np.uint8)
 
-    max_fog_radius = int(
-        min(height, width) * 0.1 * fog_intensity,
-    )  # Maximum radius scales with image size and intensity
+    max_value = MAX_VALUES_BY_DTYPE[np.uint8]
+
+    max_fog_radius = max(
+        2,
+        int(
+            min(height, width) * 0.1 * fog_intensity,
+        ),
+    )
 
     for x, y in fog_particle_positions:
-        radius = random_utils.randint(max_fog_radius // 2, max_fog_radius, random_state=random_state)
-        color = 255 if num_channels == 1 else (255,) * num_channels
+        min_radius = max(1, max_fog_radius // 2)
+        radius = random_utils.randint(min_radius, max_fog_radius, random_state=random_state)
+        color = max_value if num_channels == 1 else (max_value,) * num_channels
         cv2.circle(
             fog_layer,
             center=(x, y),
@@ -724,7 +731,7 @@ def add_fog(
     fog_layer = cv2.GaussianBlur(fog_layer, (25, 25), 0)
 
     # Blend the fog layer with the original image
-    alpha = np.mean(fog_layer, axis=2, keepdims=True) / 255 * alpha_coef * fog_intensity
+    alpha = np.mean(fog_layer, axis=2, keepdims=True) / max_value * alpha_coef * fog_intensity
     fog_image = img * (1 - alpha) + fog_layer * alpha
 
     return fog_image.astype(np.uint8)
@@ -1498,7 +1505,7 @@ def superpixels(
             scale = max_size / size
             height, width = image.shape[:2]
             new_height, new_width = int(height * scale), int(width * scale)
-            image = resize(image, (new_height, new_width), interpolation)
+            image = fgeometric.resize(image, (new_height, new_width), interpolation)
 
     segments = skimage.segmentation.slic(
         image,
@@ -1538,7 +1545,7 @@ def superpixels(
 
                 image_sp_c[segments == region_idx] = value
 
-    return resize(image, orig_shape[:2], interpolation) if orig_shape != image.shape else image
+    return fgeometric.resize(image, orig_shape[:2], interpolation) if orig_shape != image.shape else image
 
 
 @float32_io
@@ -1608,86 +1615,6 @@ def spatter(
         return img * non_mud + mud
 
     raise ValueError(f"Unsupported spatter mode: {mode}")
-
-
-def almost_equal_intervals(n: int, parts: int) -> np.ndarray:
-    """Generates an array of nearly equal integer intervals that sum up to `n`.
-
-    This function divides the number `n` into `parts` nearly equal parts. It ensures that
-    the sum of all parts equals `n`, and the difference between any two parts is at most one.
-    This is useful for distributing a total amount into nearly equal discrete parts.
-
-    Args:
-        n (int): The total value to be split.
-        parts (int): The number of parts to split into.
-
-    Returns:
-        np.ndarray: An array of integers where each integer represents the size of a part.
-
-    Example:
-        >>> almost_equal_intervals(20, 3)
-        array([7, 7, 6])  # Splits 20 into three parts: 7, 7, and 6
-        >>> almost_equal_intervals(16, 4)
-        array([4, 4, 4, 4])  # Splits 16 into four equal parts
-    """
-    part_size, remainder = divmod(n, parts)
-    # Create an array with the base part size and adjust the first `remainder` parts by adding 1
-    return np.array([part_size + 1 if i < remainder else part_size for i in range(parts)])
-
-
-def generate_shuffled_splits(
-    size: int,
-    divisions: int,
-    random_state: np.random.RandomState | None = None,
-) -> np.ndarray:
-    """Generate shuffled splits for a given dimension size and number of divisions.
-
-    Args:
-        size (int): Total size of the dimension (height or width).
-        divisions (int): Number of divisions (rows or columns).
-        random_state (Optional[np.random.RandomState]): Seed for the random number generator for reproducibility.
-
-    Returns:
-        np.ndarray: Cumulative edges of the shuffled intervals.
-    """
-    intervals = almost_equal_intervals(size, divisions)
-    intervals = random_utils.shuffle(intervals, random_state=random_state)
-    return np.insert(np.cumsum(intervals), 0, 0)
-
-
-def split_uniform_grid(
-    image_shape: tuple[int, int],
-    grid: tuple[int, int],
-    random_state: np.random.RandomState | None = None,
-) -> np.ndarray:
-    """Splits an image shape into a uniform grid specified by the grid dimensions.
-
-    Args:
-        image_shape (tuple[int, int]): The shape of the image as (height, width).
-        grid (tuple[int, int]): The grid size as (rows, columns).
-        random_state (Optional[np.random.RandomState]): The random state to use for shuffling the splits.
-            If None, the splits are not shuffled.
-
-    Returns:
-        np.ndarray: An array containing the tiles' coordinates in the format (start_y, start_x, end_y, end_x).
-
-    Note:
-        The function uses `generate_shuffled_splits` to generate the splits for the height and width of the image.
-        The splits are then used to calculate the coordinates of the tiles.
-    """
-    n_rows, n_cols = grid
-
-    height_splits = generate_shuffled_splits(image_shape[0], grid[0], random_state)
-    width_splits = generate_shuffled_splits(image_shape[1], grid[1], random_state)
-
-    # Calculate tiles coordinates
-    tiles = [
-        (height_splits[i], width_splits[j], height_splits[i + 1], width_splits[j + 1])
-        for i in range(n_rows)
-        for j in range(n_cols)
-    ]
-
-    return np.array(tiles)
 
 
 def create_shape_groups(tiles: np.ndarray) -> dict[tuple[int, int], list[int]]:
@@ -1806,13 +1733,27 @@ def dilate(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return cv2.dilate(img, kernel, iterations=1)
 
 
-def morphology(img: np.ndarray, kernel: np.ndarray, operation: str) -> np.ndarray:
+def morphology(img: np.ndarray, kernel: np.ndarray, operation: Literal["dilation", "erosion"]) -> np.ndarray:
     if operation == "dilation":
         return dilate(img, kernel)
     if operation == "erosion":
         return erode(img, kernel)
 
     raise ValueError(f"Unsupported operation: {operation}")
+
+
+@handle_empty_array
+def bboxes_morphology(
+    bboxes: np.ndarray,
+    kernel: np.ndarray,
+    operation: Literal["dilation", "erosion"],
+    image_shape: tuple[int, int],
+) -> np.ndarray:
+    bboxes = bboxes.copy()
+    masks = masks_from_bboxes(bboxes, image_shape)
+    masks = morphology(masks, kernel, operation)
+    bboxes[:, :4] = bboxes_from_masks(masks)
+    return bboxes
 
 
 PLANCKIAN_COEFFS = {
@@ -1873,21 +1814,30 @@ PLANCKIAN_COEFFS = {
 
 @float32_io
 @clipped
-def planckian_jitter(img: np.ndarray, temperature: int, mode: PlanckianJitterMode = "blackbody") -> np.ndarray:
+def planckian_jitter(img: np.ndarray, temperature: int, mode: PlanckianJitterMode) -> np.ndarray:
     img = img.copy()
+    # Get the min and max temperatures for the given mode
+    min_temp = min(PLANCKIAN_COEFFS[mode].keys())
+    max_temp = max(PLANCKIAN_COEFFS[mode].keys())
+
+    # Clamp the temperature to the available range
+    temperature = np.clip(temperature, min_temp, max_temp)
+
     # Linearly interpolate between 2 closest temperatures
     step = 500
-    t_left = (temperature // step) * step
-    t_right = (temperature // step + 1) * step
+    t_left = max((temperature // step) * step, min_temp)  # Ensure t_left doesn't go below min_temp
+    t_right = min((temperature // step + 1) * step, max_temp)  # Ensure t_right doesn't exceed max_temp
 
-    w_left = (t_right - temperature) / step
-    w_right = (temperature - t_left) / step
-
-    coeffs = w_left * np.array(PLANCKIAN_COEFFS[mode][t_left]) + w_right * np.array(PLANCKIAN_COEFFS[mode][t_right])
+    # Handle the case where temperature is at or near min_temp or max_temp
+    if t_left == t_right:
+        coeffs = np.array(PLANCKIAN_COEFFS[mode][t_left])
+    else:
+        w_right = (temperature - t_left) / (t_right - t_left)
+        w_left = 1 - w_right
+        coeffs = w_left * np.array(PLANCKIAN_COEFFS[mode][t_left]) + w_right * np.array(PLANCKIAN_COEFFS[mode][t_right])
 
     img[:, :, 0] = img[:, :, 0] * (coeffs[0] / coeffs[1])
     img[:, :, 2] = img[:, :, 2] * (coeffs[2] / coeffs[1])
-    img[img > 1] = 1
 
     return img
 

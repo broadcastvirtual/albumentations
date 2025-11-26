@@ -23,13 +23,6 @@ def get_targets_from_methods(cls):
     if has_keypoints_method:
         targets.add(Targets.KEYPOINTS)
 
-    has_global_label_method = any(
-        hasattr(cls, attr) and getattr(cls, attr) is not getattr(A.DualTransform, attr, None)
-        for attr in ["apply_to_global_label", "apply_to_global_labels"]
-    )
-    if has_global_label_method:
-        targets.add(Targets.GLOBAL_LABEL)
-
     return targets
 
 
@@ -69,8 +62,8 @@ DUAL_TARGETS = {
     A.HorizontalFlip: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.PadIfNeeded: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.RandomScale: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
-    A.XYMasking: (Targets.IMAGE, Targets.MASK, Targets.KEYPOINTS),
-    A.NoOp: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS, Targets.GLOBAL_LABEL),
+    A.XYMasking: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
+    A.NoOp: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.Resize: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.Rotate: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.RandomRotate90: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
@@ -78,28 +71,30 @@ DUAL_TARGETS = {
     A.SmallestMaxSize: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.ShiftScaleRotate: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.ElasticTransform: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
-    A.GridDistortion: (Targets.IMAGE, Targets.MASK, Targets.BBOXES),
+    A.GridDistortion: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.LongestMaxSize: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.PiecewiseAffine: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.RandomSizedCrop: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.RandomCropFromBorders: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.RandomGridShuffle: (Targets.IMAGE, Targets.MASK, Targets.KEYPOINTS),
-    A.OpticalDistortion: (Targets.IMAGE, Targets.MASK, Targets.BBOXES),
+    A.OpticalDistortion: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.SafeRotate: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.CropNonEmptyMaskIfExists: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
-    A.XYMasking: (Targets.IMAGE, Targets.MASK, Targets.KEYPOINTS),
+    A.XYMasking: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.RandomCropNearBBox: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.Perspective: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.RandomSizedBBoxSafeCrop: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
-    A.MixUp: (Targets.IMAGE, Targets.MASK, Targets.GLOBAL_LABEL),
-    A.Lambda: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS, Targets.GLOBAL_LABEL),
+    A.Lambda: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.D4: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
     A.OverlayElements: (Targets.IMAGE, Targets.MASK),
-    A.GridElasticDeform: (Targets.IMAGE, Targets.MASK),
+    A.GridElasticDeform: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
+    A.MaskDropout: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
+    A.Morphological: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
+    A.PixelDropout: (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS),
 }
 
 str2target = {
-    'image': Targets.IMAGE, 'mask': Targets.MASK, 'bboxes': Targets.BBOXES, 'keypoints': Targets.KEYPOINTS, 'global_label': Targets.GLOBAL_LABEL
+    'image': Targets.IMAGE, 'mask': Targets.MASK, 'bboxes': Targets.BBOXES, 'keypoints': Targets.KEYPOINTS,
 }
 
 @pytest.mark.parametrize(
@@ -151,12 +146,6 @@ def test_image_only(augmentation_cls, params):
                 "mask_y_length": 10,
                 "mask_fill_value": 1,
                 "fill_value": 0,
-            },
-             A.MixUp: {
-                "reference_data": [{"image": SQUARE_FLOAT_IMAGE,
-                                    "mask": np.random.uniform(low=0, high=1, size=(100, 100)).astype(np.float32)
-                                    }],
-                "read_fn": lambda x: x,
             },
              A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },

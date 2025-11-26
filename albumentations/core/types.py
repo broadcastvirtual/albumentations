@@ -15,6 +15,7 @@ NumericType = TypeVar("NumericType", float, int)
 
 ScaleIntType = Union[int, Tuple[int, int]]
 ScaleFloatType = Union[float, Tuple[float, float]]
+
 ScaleType = Union[ScaleIntType, ScaleFloatType]
 
 NumType = Union[ScalarType, np.ndarray]
@@ -38,7 +39,6 @@ D4Type = Literal["e", "r90", "r180", "r270", "v", "hvt", "h", "t"]
 class ReferenceImage(TypedDict):
     image: np.ndarray
     mask: NotRequired[np.ndarray]
-    global_label: NotRequired[np.ndarray]
     bbox: NotRequired[tuple[float, ...] | np.ndarray]
     keypoints: NotRequired[tuple[float, ...] | np.ndarray]
 
@@ -48,7 +48,6 @@ class Targets(Enum):
     MASK = "Mask"
     BBOXES = "BBoxes"
     KEYPOINTS = "Keypoints"
-    GLOBAL_LABEL = "Global Label"
 
 
 NUM_MULTI_CHANNEL_DIMENSIONS = 3
@@ -101,3 +100,6 @@ REFLECT_BORDER_MODES = {
 }
 
 NUM_KEYPOINTS_COLUMNS_IN_ALBUMENTATIONS = 4
+
+
+PositionType = Literal["center", "top_left", "top_right", "bottom_left", "bottom_right", "random"]

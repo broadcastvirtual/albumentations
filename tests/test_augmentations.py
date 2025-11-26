@@ -31,10 +31,6 @@ from .utils import get_dual_transforms, get_image_only_transforms, get_transform
             A.TemplateTransform: {
                 "templates": SQUARE_UINT8_IMAGE,
             },
-            A.MixUp: {
-                "reference_data": [{"image": SQUARE_UINT8_IMAGE}],
-                "read_fn": lambda x: x,
-            },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf")
         },
         except_augmentations={
@@ -79,10 +75,6 @@ def test_image_only_augmentations_mask_persists(augmentation_cls, params):
                 "templates": SQUARE_FLOAT_IMAGE,
             },
             A.RingingOvershoot: {"blur_limit": (3, 5)},
-            A.MixUp: {
-                "reference_data": [{"image": SQUARE_FLOAT_IMAGE}],
-                "read_fn": lambda x: x,
-            },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf")
         },
         except_augmentations={
@@ -124,12 +116,6 @@ def test_image_only_augmentations(augmentation_cls, params):
                 "fill_value": 0,
                 "mask_fill_value": 1,
             },
-            A.MixUp: {
-                "reference_data": [{"image": SQUARE_UINT8_IMAGE,
-                                    "mask": np.random.randint(0, 1, [100, 100, 1], dtype=np.uint8),
-                                    }],
-                "read_fn": lambda x: x,
-            },
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
@@ -169,13 +155,7 @@ def test_dual_augmentations(augmentation_cls, params):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
-             A.MixUp: {
-                "reference_data": [{"image": SQUARE_FLOAT_IMAGE,
-                                    "mask": np.random.uniform(low=0, high=1, size=(100, 100)).astype(np.float32)
-                                    }],
-                "read_fn": lambda x: x,
-            },
-             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
             A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop
@@ -230,12 +210,6 @@ def test_dual_augmentations_with_float_values(augmentation_cls, params):
                 "mask_y_length": 10,
                 "mask_fill_value": 1,
                 "fill_value": 0,
-            },
-            A.MixUp: {
-                "reference_data": [{"image": SQUARE_UINT8_IMAGE,
-                                    "mask": np.random.randint(0, 1, [100, 100, 1], dtype=np.uint8),
-                                    }],
-                "read_fn": lambda x: x,
             },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
@@ -300,12 +274,6 @@ def test_augmentations_wont_change_input(augmentation_cls, params):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
-             A.MixUp: {
-                "reference_data": [{"image": SQUARE_FLOAT_IMAGE,
-                                    "mask": np.random.uniform(low=0, high=1, size=(100, 100)).astype(np.float32)
-                                    }],
-                "read_fn": lambda x: x,
-            },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
@@ -313,7 +281,6 @@ def test_augmentations_wont_change_input(augmentation_cls, params):
             A.RandomSizedBBoxSafeCrop,
             A.BBoxSafeRandomCrop,
             A.CropNonEmptyMaskIfExists,
-            A.MaskDropout,
         },
     ),
 )
@@ -329,6 +296,10 @@ def test_augmentations_wont_change_float_input(augmentation_cls, params):
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
         data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
+    elif augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
 
     aug(**data)
 
@@ -358,12 +329,6 @@ def test_augmentations_wont_change_float_input(augmentation_cls, params):
                 "mask_y_length": 10,
                 "mask_fill_value": 1,
                 "fill_value": 0,
-            },
-            A.MixUp: {
-                "reference_data": [{"image": np.random.randint(0, 255, (100, 100), dtype=np.uint8),
-                                    "mask": np.random.randint(0, 1, (100, 100), dtype=np.uint8),
-                                    }],
-                "read_fn": lambda x: x,
             },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
@@ -454,12 +419,6 @@ def test_augmentations_wont_change_shape_grayscale(augmentation_cls, params, sha
                 "mask_y_length": 10,
                 "mask_fill_value": 1,
                 "fill_value": 0,
-            },
-            A.MixUp: {
-                "reference_data": [{"image": SQUARE_UINT8_IMAGE,
-                                    "mask": np.random.randint(0, 1, (100, 100, 3), dtype=np.uint8),
-                                    }],
-                "read_fn": lambda x: x,
             },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
@@ -588,12 +547,6 @@ def test_mask_fill_value(augmentation_cls, params):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
-             A.MixUp: {
-                "reference_data": [{"image": SQUARE_MULTI_UINT8_IMAGE,
-                                    "mask": np.random.randint(0, 1, [100, 100, 1], dtype=np.uint8),
-                                    }],
-                "read_fn": lambda x: x,
-            },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
             A.ToGray: {"method": "desaturation", "num_output_channels": 5},
@@ -610,7 +563,6 @@ def test_mask_fill_value(augmentation_cls, params):
             A.FromFloat,
             A.HueSaturationValue,
             A.ISONoise,
-            A.MaskDropout,
             A.Normalize,
             A.RGBShift,
             A.RandomCropNearBBox,
@@ -640,6 +592,10 @@ def test_multichannel_image_augmentations(augmentation_cls, params):
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
         data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
+    elif augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
 
     data = aug(**data)
     assert data["image"].dtype == np.uint8
@@ -678,12 +634,6 @@ def test_multichannel_image_augmentations(augmentation_cls, params):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
-            A.MixUp: {
-                "reference_data": [{"image": SQUARE_MULTI_FLOAT_IMAGE,
-                                    "mask": np.random.uniform(low=0, high=1, size=(100, 100)).astype(np.float32)
-                                    }],
-                "read_fn": lambda x: x,
-            },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
             A.ToGray: {"method": "max", "num_output_channels": 5},
@@ -700,7 +650,6 @@ def test_multichannel_image_augmentations(augmentation_cls, params):
             A.FromFloat,
             A.HueSaturationValue,
             A.ISONoise,
-            A.MaskDropout,
             A.RGBShift,
             A.RandomCropNearBBox,
             A.RandomGravel,
@@ -728,6 +677,10 @@ def test_float_multichannel_image_augmentations(augmentation_cls, params):
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
         data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
+    elif augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
 
     data = aug(**data)
 
@@ -757,12 +710,6 @@ def test_float_multichannel_image_augmentations(augmentation_cls, params):
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
-             A.MixUp: {
-                "reference_data": [{"image": SQUARE_MULTI_UINT8_IMAGE,
-                                    "mask": np.random.randint(0, 1, [100, 100, 1], dtype=np.uint8),
-                                    }],
-                "read_fn": lambda x: x,
-            },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
             A.ToGray: {"method": "pca", "num_output_channels": 5},
@@ -779,7 +726,6 @@ def test_float_multichannel_image_augmentations(augmentation_cls, params):
             A.FromFloat,
             A.HueSaturationValue,
             A.ISONoise,
-            A.MaskDropout,
             A.Normalize,
             A.RGBShift,
             A.RandomCropNearBBox,
@@ -813,6 +759,10 @@ def test_multichannel_image_augmentations_diff_channels(augmentation_cls, params
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
         data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
+    elif augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
 
     data = aug(**data)
 
@@ -844,12 +794,6 @@ def test_multichannel_image_augmentations_diff_channels(augmentation_cls, params
                 "mask_fill_value": 1,
                 "fill_value": 0,
             },
-            A.MixUp: {
-                "reference_data": [{"image": SQUARE_MULTI_FLOAT_IMAGE,
-                                    "mask": np.random.randint(0, 1, [100, 100, 1], dtype=np.uint8),
-                                    }],
-                "read_fn": lambda x: x,
-            },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
             A.ToGray: {"method": "pca", "num_output_channels": 5},
@@ -866,7 +810,6 @@ def test_multichannel_image_augmentations_diff_channels(augmentation_cls, params
             A.FromFloat,
             A.HueSaturationValue,
             A.ISONoise,
-            A.MaskDropout,
             A.RGBShift,
             A.RandomCropNearBBox,
             A.RandomGravel,
@@ -897,6 +840,10 @@ def test_float_multichannel_image_augmentations_diff_channels(augmentation_cls, 
         data["overlay_metadata"] = []
     elif augmentation_cls == A.TextImage:
         data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
+    elif augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
 
     data = aug(**data)
 
@@ -1010,75 +957,6 @@ def test_pad_if_needed_position(params, image_shape):
 
 
 @pytest.mark.parametrize(
-    ["points"],
-    [
-        [
-            [
-                [37.25756906, 11.0567457],
-                [514.03919117, 9.49484312],
-                [585.66154354, 74.97413793],
-                [63.60979494, 85.39815904],
-            ]
-        ],
-        [
-            [
-                [37, 11],
-                [514, 9],
-                [585, 74],
-                [63, 85],
-            ]
-        ],
-        [
-            [
-                [10, 20],
-                [719, 34],
-                [613, 63],
-                [91, 33],
-            ]
-        ],
-    ],
-)
-def test_perspective_order_points(points):
-    points = np.array(points)
-    res = A.Perspective._order_points(points)
-    assert len(points) == len(np.unique(res, axis=0))
-
-
-@pytest.mark.parametrize(
-    ["seed", "scale", "h", "w"],
-    [
-        [0, 0.08, 89, 628],
-        [0, 0.15, 89, 628],
-        [0, 0.15, 35, 190],
-    ],
-)
-def test_perspective_valid_keypoints_after_transform(seed: int, scale: float, h: int, w: int):
-    set_seed(seed)
-
-    image = np.zeros([h, w, 3], dtype=np.uint8)
-    keypoints = [
-        [0, 0],
-        [0, h - 1],
-        [w - 1, h - 1],
-        [w - 1, 0],
-    ]
-
-    transform = A.Compose(
-        [A.Perspective(scale=(scale, scale), p=1)], keypoint_params={"format": "xy", "remove_invisible": False}
-    )
-
-    res = transform(image=image, keypoints=keypoints)["keypoints"]
-
-    x1, y1 = res[0]
-    x2, y2 = res[1]
-    x3, y3 = res[2]
-    x4, y4 = res[3]
-
-    assert x1 < x3 and x1 < x4 and x2 < x3 and x2 < x4 and y1 < y2 and y1 < y3 and y4 < y2 and y4 < y3
-
-
-
-@pytest.mark.parametrize(
     ["augmentation_cls", "params"],
     get_transforms(
         custom_arguments={
@@ -1102,8 +980,8 @@ def test_perspective_valid_keypoints_after_transform(seed: int, scale: float, h:
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
-            A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop, A.FromFloat, A.ToFloat, A.Normalize, A.MaskDropout, A.CropNonEmptyMaskIfExists,
-            A.MixUp, A.FDA, A.HistogramMatching, A.PixelDistributionAdaptation, A.TemplateTransform, A.OverlayElements, A.TextImage,
+            A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop, A.FromFloat, A.ToFloat, A.Normalize, A.CropNonEmptyMaskIfExists,
+            A.FDA, A.HistogramMatching, A.PixelDistributionAdaptation, A.TemplateTransform, A.OverlayElements, A.TextImage,
             A.Solarize, A.RGBShift, A.HueSaturationValue, A.GaussNoise, A.ColorJitter
             },
     ),
@@ -1114,9 +992,16 @@ def test_augmentations_match_uint8_float32(augmentation_cls, params):
 
     transform = A.Compose([augmentation_cls(p=1, **params)])
 
+    data = {"image": image_uint8}
+    if augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image_uint8)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
+
     set_seed(42)
-    transformed_uint8 = transform(image=image_uint8)["image"]
+    transformed_uint8 = transform(**data)["image"]
     set_seed(42)
-    transformed_float32 = transform(image=image_float32)["image"]
+    data["image"] = image_float32
+    transformed_float32 = transform(**data)["image"]
 
     np.testing.assert_array_almost_equal(to_float(transformed_uint8), transformed_float32, decimal=2)

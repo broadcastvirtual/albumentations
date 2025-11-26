@@ -16,6 +16,7 @@ from albucore.functions import to_float
 import albumentations as A
 import albumentations.augmentations.functional as F
 import albumentations.augmentations.geometric.functional as fgeometric
+import albumentations.augmentations.dropout.functional as fdropout
 from albumentations.core.transforms_interface import BasicTransform
 from albumentations.random_utils import get_random_seed
 from tests.conftest import IMAGES, SQUARE_FLOAT_IMAGE, SQUARE_MULTI_UINT8_IMAGE, SQUARE_UINT8_IMAGE
@@ -55,51 +56,6 @@ def test_rotate_crop_border():
     assert (aug_img == border_value).sum() == 0
 
 
-@pytest.mark.parametrize("interpolation", [cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_CUBIC])
-def test_optical_distortion_interpolation(interpolation):
-    image = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
-    mask = np.random.randint(low=0, high=2, size=(100, 100), dtype=np.uint8)
-    aug = A.OpticalDistortion(distort_limit=(0.05, 0.05), shift_limit=(0, 0), interpolation=interpolation, p=1)
-    data = aug(image=image, mask=mask)
-    expected_image = fgeometric.optical_distortion(
-        image, k=0.05, dx=0, dy=0, interpolation=interpolation, border_mode=cv2.BORDER_REFLECT_101
-    )
-    expected_mask = fgeometric.optical_distortion(
-        mask, k=0.05, dx=0, dy=0, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_REFLECT_101
-    )
-    assert np.array_equal(data["image"], expected_image)
-    assert np.array_equal(data["mask"], expected_mask)
-
-
-@pytest.mark.parametrize("interpolation", [cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_CUBIC])
-def test_grid_distortion_interpolation(interpolation):
-    image = np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8)
-    mask = np.random.randint(low=0, high=2, size=(100, 100), dtype=np.uint8)
-    aug = A.GridDistortion(num_steps=1, distort_limit=(0.3, 0.3), interpolation=interpolation, p=1)
-    data = aug(image=image, mask=mask)
-    expected_image = fgeometric.grid_distortion(
-        image, num_steps=1, xsteps=[1.3], ysteps=[1.3], interpolation=interpolation, border_mode=cv2.BORDER_REFLECT_101
-    )
-    expected_mask = fgeometric.grid_distortion(
-        mask,
-        num_steps=1,
-        xsteps=[1.3],
-        ysteps=[1.3],
-        interpolation=cv2.INTER_NEAREST,
-        border_mode=cv2.BORDER_REFLECT_101,
-    )
-    assert np.array_equal(data["image"], expected_image)
-    assert np.array_equal(data["mask"], expected_mask)
-
-
-@pytest.mark.parametrize("size", [17, 21, 33])
-def test_grid_distortion_steps(size):
-    image = np.random.rand(size, size, 3)
-    aug = A.GridDistortion(num_steps=size - 2, p=1)
-    data = aug(image=image)
-    assert np.array_equal(data["image"].shape, (size, size, 3))
-
-
 @pytest.mark.parametrize(
     ["augmentation_cls", "params"],
     get_dual_transforms(
@@ -125,7 +81,7 @@ def test_grid_distortion_steps(size):
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={A.RandomCropNearBBox, A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop, A.PixelDropout,
-                              A.MixUp},
+                              },
     ),
 )
 def test_binary_mask_interpolation(augmentation_cls, params):
@@ -168,7 +124,6 @@ def test_binary_mask_interpolation(augmentation_cls, params):
             A.BBoxSafeRandomCrop,
             A.CropAndPad,
             A.PixelDropout,
-            A.MixUp,
             A.XYMasking,
             A.OverlayElements,
             A.TextImage
@@ -223,10 +178,9 @@ def __test_multiprocessing_support_proc(args):
             A.FDA,
             A.HistogramMatching,
             A.PixelDistributionAdaptation,
-            A.MaskDropout,
-            A.MixUp,
             A.OverlayElements,
-            A.TextImage
+            A.TextImage,
+            A.MaskDropout,
         },
     ),
 )
@@ -616,137 +570,6 @@ def test_mask_dropout():
     assert np.all(result["image"] == img)
     assert np.all(result["mask"] == 0)
 
-
-@pytest.mark.parametrize( "image", IMAGES )
-def test_grid_dropout_mask(image):
-    height, width = image.shape[:2]
-    mask = np.ones([height, width], dtype=np.uint8)
-    aug = A.GridDropout(p=1, mask_fill_value=0)
-    result = aug(image=image, mask=mask)
-    # with mask on ones and fill_value = 0 the sum of pixels is smaller
-    assert result["image"].sum() < image.sum()
-    assert result["image"].shape == image.shape
-    assert result["mask"].sum() < mask.sum()
-    assert result["mask"].shape == mask.shape
-
-    # with mask of zeros and fill_value = 0 mask should not change
-    mask = np.zeros([height, width], dtype=np.uint8)
-    aug = A.GridDropout(p=1, mask_fill_value=0)
-    result = aug(image=image, mask=mask)
-    assert result["image"].sum() < image.sum()
-    assert np.all(result["mask"] == 0)
-
-    # with mask mask_fill_value=100, mask sum is larger
-    mask = np.random.randint(0, 10, [height, width], np.uint8)
-    aug = A.GridDropout(p=1, mask_fill_value=100)
-    result = aug(image=image, mask=mask)
-    assert result["image"].sum() < image.sum()
-    assert result["mask"].sum() > mask.sum()
-
-    # with mask mask_fill_value=None, mask is not changed
-    mask = np.ones([height, width], dtype=np.uint8)
-    aug = A.GridDropout(p=1, mask_fill_value=None)
-    result = aug(image=image, mask=mask)
-    assert result["image"].sum() < image.sum()
-    assert result["mask"].sum() == mask.sum()
-
-
-@pytest.mark.parametrize(
-    ["ratio", "holes_number_xy", "unit_size_range", "shift_xy"],
-    [
-        (0.00001, (10, 10), (100, 100), (50, 50)),
-        (0.4556, (10, 20), None, (0, 0)),
-        (0.00004, None, (2, 100), (0, 0)),
-    ],
-)
-def test_grid_dropout_params(ratio, holes_number_xy, unit_size_range, shift_xy):
-    img = SQUARE_FLOAT_IMAGE
-
-    aug = A.GridDropout(
-        ratio=ratio,
-        unit_size_range=unit_size_range,
-        holes_number_xy=holes_number_xy,
-        shift_xy=shift_xy,
-        random_offset=False,
-        fill_value=0,
-        p=1,
-    )
-    result = aug(image=img)["image"]
-    # with fill_value = 0 the sum of pixels is smaller
-    assert result.sum() < img.sum()
-    assert result.shape == img.shape
-    params = aug.get_params_dependent_on_data(
-        params={"shape": img.shape},
-        data={"image": img},
-    )
-    holes = params["holes"]
-    assert len(holes[0]) == 4
-    # check grid offsets
-    if shift_xy:
-        np.testing.assert_array_equal(holes[0][:2], shift_xy)
-    else:
-        np.testing.assert_array_equal(holes[0], (0, 0))
-
-
-@pytest.mark.parametrize("params, expected", [
-    # Test default initialization values
-    ({}, {
-        "ratio": 0.5,
-        "unit_size_range": None,
-        "holes_number_xy": None,
-        "shift_xy": (0, 0),
-        "random_offset": False,
-        "fill_value": 0,
-        "mask_fill_value": None,
-    }),
-    ({"ratio": 0.3}, {"ratio": 0.3}),
-    ({"shift_x": 1, "shift_y": 2}, {"shift_xy": (1, 2)}),
-    ({"unit_size_min": 10, "unit_size_max": 20}, {"unit_size_range": (10, 20)}),
-    ({"unit_size_range": (10, 20)}, {"unit_size_range": (10, 20)}),
-    ({"holes_number_x": 10, "holes_number_y": 20}, {"holes_number_xy": (10, 20)}),
-    ({"holes_number_xy": (5, 5)}, {"holes_number_xy": (5, 5)}),
-    ({"shift_xy": (5, 5)}, {"shift_xy": (5, 5)}),
-    ({"random_offset": True}, {"random_offset": True}),
-    ({"fill_value": 255}, {"fill_value": 255}),
-    ({"mask_fill_value": 100}, {"mask_fill_value": 100}),
-])
-def test_grid_dropout_initialization(params, expected):
-    transform = A.GridDropout(p=1, **params)
-    for key, value in expected.items():
-        assert getattr(transform, key) == value, f"Failed on {key} with value {value}"
-
-
-@pytest.mark.parametrize("params", [
-    ({"ratio": 1.5}),  # Invalid ratio > 1
-    ({"ratio": 0}),
-    ({"unit_size_range": (1, 20)}),  # Invalid unit_size_min < 2
-    ({"holes_number_xy": (0, 5)}),  # Invalid holes_number_x < 1
-])
-def test_grid_dropout_invalid_input(params):
-    with pytest.raises(ValueError):
-        A.Compose([A.GridDropout(p=1, **params)])(image=SQUARE_UINT8_IMAGE)
-
-
-@pytest.mark.parametrize("params, expected_holes", [
-    (
-        {"unit_size_range": (10, 10), "ratio": 0.5, "shift_xy": (0, 0)},
-        [(0, 0, 5, 5), (0, 10, 5, 15), (0, 20, 5, 20), (10, 0, 15, 5), (10, 10, 15, 15), (10, 20, 15, 20), (20, 0, 25, 5), (20, 10, 25, 15), (20, 20, 25, 20), (30, 0, 30, 5), (30, 10, 30, 15), (30, 20, 30, 20)]
-    ),
-    (
-        {"unit_size_range": (12, 12), "ratio": 0.6, "shift_xy": (1, 1)},
-        [(1, 1, 8, 8), (1, 13, 8, 20), (13, 1, 20, 8), (13, 13, 20, 20), (25, 1, 30, 8), (25, 13, 30, 20)]
-    ),
-])
-def test_grid_dropout_holes_generation(params, expected_holes):
-    transform = A.GridDropout(p=1, **params)
-    image = np.zeros((20, 30, 3), dtype=np.uint8)
-
-    holes = transform.get_params_dependent_on_data(
-        params={"shape": image.shape},
-        data={"image": image},
-    )["holes"]
-
-    np.testing.assert_array_equal(holes, expected_holes, f"Failed on holes generation with value {holes}")
 
 @pytest.mark.parametrize(
     ["blur_limit", "sigma", "result_blur", "result_sigma"],
@@ -1442,8 +1265,6 @@ def test_coarse_dropout_invalid_input(params):
             A.RandomSizedBBoxSafeCrop,
             A.BBoxSafeRandomCrop,
             A.CropNonEmptyMaskIfExists,
-            A.MaskDropout,
-            A.MixUp,
             A.NoOp,
             A.Lambda,
             A.ToRGB,
@@ -1469,6 +1290,10 @@ def test_change_image(augmentation_cls, params):
         data["image"] = SQUARE_FLOAT_IMAGE
     elif augmentation_cls == A.TextImage:
         data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
+    elif augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
 
     assert not np.array_equal(aug(**data)["image"], image)
 
@@ -1509,8 +1334,6 @@ def test_change_image(augmentation_cls, params):
             A.CropNonEmptyMaskIfExists,
             A.FDA,
             A.HistogramMatching,
-            A.MaskDropout,
-            A.MixUp,
             A.NoOp,
             A.Lambda,
             A.ToRGB,
@@ -1528,6 +1351,7 @@ def test_change_image(augmentation_cls, params):
             A.FromFloat,
             A.TextImage,
             A.PixelDistributionAdaptation,
+            A.MaskDropout,
         },
     ),
 )
@@ -1549,7 +1373,7 @@ def test_selective_channel(augmentation_cls: BasicTransform, params: Dict[str, A
         if channel in channels:
             assert not np.array_equal(image[..., channel], transformed_image[..., channel])
         else:
-            assert np.array_equal(image[..., channel], transformed_image[..., channel])
+            np.testing.assert_array_equal(image[..., channel], transformed_image[..., channel])
 
 
 @pytest.mark.parametrize("params, expected", [
@@ -1581,12 +1405,12 @@ def test_downscale_invalid_input(params):
 
 @pytest.mark.parametrize("params, expected", [
     # Default values
-    ({}, {"min_height": 1024, "min_width": 1024, "position": A.PadIfNeeded.PositionType.CENTER, "border_mode": cv2.BORDER_REFLECT_101}),
+    ({}, {"min_height": 1024, "min_width": 1024, "position": "center", "border_mode": cv2.BORDER_REFLECT_101}),
     # Boundary values
     ({"min_height": 800, "min_width": 800}, {"min_height": 800, "min_width": 800}),
     ({"pad_height_divisor": 10, "min_height": None, "pad_width_divisor": 10, "min_width": None},
      {"pad_height_divisor": 10, "min_height": None, "pad_width_divisor": 10, "min_width": None}),
-    ({"position": "top_left"}, {"position": A.PadIfNeeded.PositionType.TOP_LEFT}),
+    ({"position": "top_left"}, {"position": "top_left"}),
     # Value handling when border_mode is BORDER_CONSTANT
     ({"border_mode": cv2.BORDER_CONSTANT, "value": 255}, {"border_mode": cv2.BORDER_CONSTANT, "value": 255}),
     ({"border_mode": cv2.BORDER_CONSTANT, "value": [0, 0, 0]}, {"border_mode": cv2.BORDER_CONSTANT, "value": [0, 0, 0]}),
@@ -1679,6 +1503,7 @@ def test_random_snow_invalid_input(params):
                 "read_fn": lambda x: x,
                 "transform_type": "standard",
             },
+            A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={
             A.RandomSizedBBoxSafeCrop,
@@ -1687,10 +1512,8 @@ def test_random_snow_invalid_input(params):
             A.CropNonEmptyMaskIfExists,
             A.FDA,
             A.HistogramMatching,
-            A.MaskDropout,
-            A.MixUp,
             A.OverlayElements,
-            A.GridElasticDeform
+            A.MaskDropout,
         },
     ),
 )
@@ -1711,7 +1534,7 @@ def test_dual_transforms_methods(augmentation_cls, params):
         if target in arg:
             kwarg = {target: arg[target]}
             try:
-                _res = aug(image=image, **kwarg)
+                _ = aug(image=image, **kwarg)
             except Exception as e:
                 if isinstance(e, NotImplementedError):
                     raise NotImplementedError(f"{target} error at: {augmentation_cls},  {e}")
@@ -2018,8 +1841,6 @@ def test_rot90(bboxes, angle, keypoints):
             A.RandomSizedBBoxSafeCrop,
             A.BBoxSafeRandomCrop,
             A.CropNonEmptyMaskIfExists,
-            A.MaskDropout,
-            A.MixUp,
             A.OverlayElements,
             A.NoOp,
             A.Lambda,
@@ -2042,6 +1863,10 @@ def test_return_nonzero(augmentation_cls, params):
         data["textimage_metadata"] = {"text": "May the transformations be ever in your favor!", "bbox": (0.1, 0.1, 0.9, 0.2)}
     elif augmentation_cls == A.ToRGB:
         data["image"] = np.random.randint(0, 255, size=(100, 100)).astype(np.uint8)
+    elif augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
 
     result = aug(**data)
 
@@ -2108,11 +1933,11 @@ def test_padding_color(transform, num_channels):
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
         },
         except_augmentations={A.RandomCropNearBBox, A.RandomSizedBBoxSafeCrop, A.BBoxSafeRandomCrop,
-                              A.MixUp, A.MaskDropout, A.OverlayElements, A.GridElasticDeform, A.CropNonEmptyMaskIfExists},
+                              A.OverlayElements, A.GridElasticDeform, A.CropNonEmptyMaskIfExists},
     ),
 )
 def test_empty_bboxes_keypoints(augmentation_cls, params):
-    aug = A.Compose([augmentation_cls(p=1, **params)], bbox_params=A.BboxParams(format="pascal_voc", label_fields=["labels"]), keypoint_params=A.KeypointParams(format="xyas"))
+    aug = A.Compose([augmentation_cls(p=1, **params)], bbox_params=A.BboxParams(format="pascal_voc", label_fields=["labels"]), keypoint_params=A.KeypointParams(format="xy"))
     image = SQUARE_UINT8_IMAGE
     data = {
         "image": image,
@@ -2127,7 +1952,25 @@ def test_empty_bboxes_keypoints(augmentation_cls, params):
             "overlay_metadata": []
         }
 
+    if augmentation_cls == A.MaskDropout:
+        mask = np.zeros_like(image)[:, :, 0]
+        mask[:20, :20] = 1
+        data["mask"] = mask
+
     data = aug(**data)
 
-    np.testing.assert_array_equal(data["bboxes"], np.array([]))
-    np.testing.assert_array_equal(data["keypoints"], np.array([]))
+    np.testing.assert_array_equal(data["bboxes"], [])
+    np.testing.assert_array_equal(data["keypoints"], [])
+
+
+@pytest.mark.parametrize("remove_invisible, expected_keypoints", [(True, np.array([], dtype=np.float32).reshape(0, 2)), (False, np.array([[10, 10]]))])
+def test_mask_dropout_bboxes(remove_invisible, expected_keypoints):
+    image = SQUARE_UINT8_IMAGE
+    mask = np.zeros_like(image)[:, :, 0]
+    mask[:20, :20] = 1
+    keypoints = np.array([[10, 10]])
+
+    transform = A.Compose([A.MaskDropout(p=1, max_objects=1, image_fill_value=0, mask_fill_value=1)], keypoint_params=A.KeypointParams(format="xy", remove_invisible=remove_invisible))
+
+    transformed = transform(image=image, mask=mask, keypoints=keypoints)
+    np.testing.assert_array_equal(transformed["keypoints"], expected_keypoints)
