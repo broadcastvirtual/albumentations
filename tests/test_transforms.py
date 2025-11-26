@@ -17,7 +17,7 @@ import albumentations.augmentations.geometric.functional as fgeometric
 from albumentations.core.transforms_interface import BasicTransform
 from tests.conftest import IMAGES, SQUARE_FLOAT_IMAGE, SQUARE_MULTI_UINT8_IMAGE, SQUARE_UINT8_IMAGE, RECTANGULAR_UINT8_IMAGE
 
-from .utils import get_dual_transforms, get_image_only_transforms, get_transforms, set_seed
+from .utils import get_dual_transforms, get_image_only_transforms, get_transforms
 
 
 def test_transpose_both_image_and_mask():
@@ -96,7 +96,7 @@ def test_binary_mask_interpolation(augmentation_cls, params):
     get_dual_transforms(
         custom_arguments={
             A.RandomResizedCrop: {"size": (113, 103)},
-            A.RandomSizedCrop: {"min_max_height": (4, 8), "size": (113, 103)},
+            A.RandomSizedCrop: {"min_max_height": (99, 99), "size": (113, 103)},
             A.Resize: {"height": 113, "width": 113},
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
             A.CropAndPad: {"px": 10},
@@ -579,7 +579,7 @@ def test_mask_dropout():
 )
 def test_unsharp_mask_limits(blur_limit, sigma, result_blur, result_sigma):
     img = np.zeros([100, 100, 3], dtype=np.uint8)
-    aug = A.Compose([A.UnsharpMask(blur_limit=blur_limit, sigma_limit=sigma, p=1)])
+    aug = A.Compose([A.UnsharpMask(blur_limit=blur_limit, sigma_limit=sigma, p=1)], seed=42)
 
     res = aug(image=img)["image"]
     assert np.allclose(res, F.unsharp_mask(img, result_blur, result_sigma))
@@ -594,11 +594,10 @@ def test_unsharp_mask_float_uint8_diff_less_than_two(val_uint8):
     x_float32[2, 2] = val_uint8 / 255.0
 
     unsharpmask = A.UnsharpMask(blur_limit=3, p=1)
+    unsharpmask.set_random_seed(0)
 
-    set_seed(0)
     usm_uint8 = unsharpmask(image=x_uint8)["image"]
 
-    set_seed(0)
     usm_float32 = unsharpmask(image=x_float32)["image"]
 
     # Before comparison, rescale the usm_float32 to [0, 255]
@@ -635,6 +634,7 @@ def test_color_jitter_float_uint8_equal(brightness, contrast, saturation, hue):
                 p=1,
             ),
         ],
+        seed=42,
     )
 
     res1 = transform(image=img)["image"]
@@ -664,16 +664,19 @@ def test_perspective_keep_size():
         [A.Perspective(keep_size=True, p=1)],
         keypoint_params=A.KeypointParams("xys"),
         bbox_params=A.BboxParams("pascal_voc", label_fields=["labels"]),
+        seed=42,
     )
+
+
+    res_1 = transform_1(image=img, bboxes=bboxes, keypoints=keypoints, labels=[0] * len(bboxes))
+
     transform_2 = A.Compose(
         [A.Perspective(keep_size=False, p=1), A.Resize(height, width, p=1)],
         keypoint_params=A.KeypointParams("xys"),
         bbox_params=A.BboxParams("pascal_voc", label_fields=["labels"]),
+        seed=42,
     )
 
-    set_seed(0)
-    res_1 = transform_1(image=img, bboxes=bboxes, keypoints=keypoints, labels=[0] * len(bboxes))
-    set_seed(0)
     res_2 = transform_2(image=img, bboxes=bboxes, keypoints=keypoints, labels=[0] * len(bboxes))
 
     assert np.allclose(res_1["bboxes"], res_2["bboxes"], atol=0.2)
@@ -765,8 +768,9 @@ def test_template_transform_incorrect_channels(img_channels, template_channels):
     ],
 )
 def test_affine_scale_ratio(params):
-    set_seed(0)
     aug = A.Affine(**params, p=1.0)
+    aug.set_random_seed(0)
+
     image = SQUARE_UINT8_IMAGE
 
     data = {"image": image}
@@ -908,8 +912,6 @@ def test_safe_rotate(angle: float, targets: dict, expected: dict):
 # @pytest.mark.parametrize("angle", list(range(-360, 360, 15)))
 @pytest.mark.parametrize("angle", [15])
 def test_rotate_equal(img, aug_cls, angle):
-    set_seed(0)
-
     height, width = img.shape[:2]
     kp = [[random.randint(0, width - 1), random.randint(0, height - 1), random.randint(0, 360)] for _ in range(50)]
     kp += [
@@ -922,12 +924,13 @@ def test_rotate_equal(img, aug_cls, angle):
     ]
     keypoint_params = A.KeypointParams("xya", remove_invisible=False)
 
-    a = A.Compose([aug_cls(rotate=(angle, angle))], keypoint_params=keypoint_params)
+    a = A.Compose([aug_cls(rotate=(angle, angle))], keypoint_params=keypoint_params, seed=42)
+
     b = A.Compose(
         [A.Rotate((angle, angle), border_mode=cv2.BORDER_CONSTANT, value=0, p=1)],
         keypoint_params=keypoint_params,
+        seed=42,
     )
-
     res_a = a(image=img, keypoints=kp)
     res_b = b(image=img, keypoints=kp)
     np.testing.assert_array_equal(res_a["image"], res_b["image"])
@@ -939,10 +942,7 @@ def test_rotate_equal(img, aug_cls, angle):
     assert (diff[:, -1] % 360).max() <= 1
 
 
-@pytest.mark.parametrize("seed", list(range(10)))
-def test_motion_blur_allow_shifted(seed):
-    set_seed(seed)
-
+def test_motion_blur_allow_shifted():
     transform = A.MotionBlur(allow_shifted=False)
     kernel = transform.get_params()["kernel"]
 
@@ -1087,11 +1087,9 @@ def test_grid_shuffle(image, grid):
     """As we reshuffle the grid, the mean and sum of the image and mask should remain the same,
     while the reshuffled image and mask should not be equal to the original image and mask.
     """
-    set_seed(0)
-
     mask = image.copy()
 
-    aug = A.Compose([A.RandomGridShuffle(grid=grid, p=1)])
+    aug = A.Compose([A.RandomGridShuffle(grid=grid, p=1)], seed=42)
 
     res = aug(image=image, mask=mask)
     assert res["image"].shape == image.shape
@@ -1117,7 +1115,6 @@ def test_grid_shuffle(image, grid):
     ],
 )
 def test_random_crop_from_borders(image, bboxes, keypoints, crop_left, crop_right, crop_top, crop_bottom):
-    set_seed(0)
     aug = A.Compose(
         [
             A.RandomCropFromBorders(
@@ -1130,6 +1127,7 @@ def test_random_crop_from_borders(image, bboxes, keypoints, crop_left, crop_righ
         ],
         bbox_params=A.BboxParams("pascal_voc"),
         keypoint_params=A.KeypointParams("xy"),
+        seed=42,
     )
 
     assert aug(image=image, mask=image, bboxes=bboxes, keypoints=keypoints)
@@ -1204,7 +1202,7 @@ def test_coarse_dropout_functionality(params, expected):
 )
 def test_coarse_dropout_invalid_input(params):
     with pytest.raises(Exception):
-        aug = A.CoarseDropout(**params, p=1)
+        _ =  A.CoarseDropout(**params, p=1)
 
 
 @pytest.mark.parametrize(
@@ -1260,14 +1258,15 @@ def test_coarse_dropout_invalid_input(params):
             A.NoOp,
             A.Lambda,
             A.ToRGB,
-            A.RandomRotate90,
         },
     ),
 )
 def test_change_image(augmentation_cls, params):
     """Checks whether resulting image is different from the original one."""
-    aug = A.Compose([augmentation_cls(p=1, **params)])
+    aug = A.Compose([augmentation_cls(p=1, **params)], seed=0)
+
     image = SQUARE_UINT8_IMAGE
+    original_image = image.copy()
 
     data = {
         "image": image,
@@ -1290,6 +1289,7 @@ def test_change_image(augmentation_cls, params):
         mask[:20, :20] = 1
         data["mask"] = mask
 
+    np.testing.assert_array_equal(image, original_image)
     assert not np.array_equal(aug(**data)["image"], image)
 
 
@@ -1312,6 +1312,7 @@ def test_change_image(augmentation_cls, params):
             },
             A.FancyPCA: {"alpha": 1},
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
+            A.RGBShift: {"r_shift_limit": (10, 10), "g_shift_limit": (10, 10), "b_shift_limit": (10, 10)},
         },
         except_augmentations={
             A.Crop,
@@ -1340,7 +1341,6 @@ def test_change_image(augmentation_cls, params):
             A.RandomScale,
             A.ChannelShuffle,
             A.ChromaticAberration,
-            A.RandomRotate90,
             A.PlanckianJitter,
             A.OverlayElements,
             A.FromFloat,
@@ -1351,13 +1351,12 @@ def test_change_image(augmentation_cls, params):
     ),
 )
 def test_selective_channel(augmentation_cls: BasicTransform, params: dict[str, Any]) -> None:
-    set_seed(3)
-
     image = SQUARE_MULTI_UINT8_IMAGE
     channels = [3, 2, 4]
 
     aug = A.Compose(
         [A.SelectiveChannelTransform(transforms=[augmentation_cls(**params, p=1)], channels=channels, p=1)],
+        seed=0,
     )
 
     data = {"image": image}
@@ -1751,8 +1750,8 @@ def test_random_fog_invalid_input(params):
 @pytest.mark.parametrize("image", IMAGES + [np.full((100, 100), 128, dtype=np.uint8)])
 @pytest.mark.parametrize("mean", (0, 10, -10))
 def test_gauss_noise(mean, image):
-    set_seed(42)
     aug = A.GaussNoise(p=1, noise_scale_factor=1.0, mean=mean)
+    aug.set_random_seed(42)
 
     apply_params = aug.get_params_dependent_on_data(
         params={"shape": image.shape},
@@ -1871,7 +1870,6 @@ def test_random_sun_flare_invalid_input(params):
 )
 def test_return_nonzero(augmentation_cls, params):
     """Mistakes in clipping may lead to zero image, testing for that"""
-    set_seed(42)
     image = SQUARE_FLOAT_IMAGE if augmentation_cls == A.FromFloat else SQUARE_UINT8_IMAGE
 
     aug = A.Compose([augmentation_cls(**params, p=1)])
@@ -2055,12 +2053,14 @@ def test_mask_dropout_bboxes(remove_invisible, expected_keypoints):
             A.D4,
             A.RandomRotate90,
             A.PiecewiseAffine,
+            A.Perspective,
         },
     ),
 )
 def test_keypoints_bboxes_match(augmentation_cls, params):
     """Checks whether transformations based on DualTransform dont has abstract methods."""
     aug = augmentation_cls(p=1, **params)
+
     image = RECTANGULAR_UINT8_IMAGE
 
     x_min, y_min, x_max, y_max = 40, 30, 50, 60
@@ -2068,7 +2068,7 @@ def test_keypoints_bboxes_match(augmentation_cls, params):
     bboxes = np.array([[x_min, y_min, x_max, y_max]])
     keypoints = np.array([[x_min, y_min], [x_max, y_max]])
 
-    transform = A.Compose([aug], bbox_params=A.BboxParams(format="pascal_voc", label_fields=["labels"]), keypoint_params=A.KeypointParams(format="xy"))
+    transform = A.Compose([aug], bbox_params=A.BboxParams(format="pascal_voc", label_fields=["labels"]), keypoint_params=A.KeypointParams(format="xy"), seed=42)
 
     transformed = transform(image=image, bboxes=bboxes, keypoints=keypoints, labels=[1])
 

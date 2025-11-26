@@ -10,7 +10,6 @@ from albucore import hflip, vflip
 from pydantic import AfterValidator, Field, ValidationInfo, field_validator, model_validator
 from typing_extensions import Self
 
-from albumentations import random_utils
 from albumentations.augmentations.utils import check_range
 from albumentations.core.bbox_utils import denormalize_bboxes, normalize_bboxes
 from albumentations.core.pydantic import (
@@ -261,7 +260,7 @@ class ElasticTransform(BaseDistortion):
             self.sigma,
             same_dxdy=self.same_dxdy,
             kernel_size=kernel_size,
-            random_generator=random_utils.get_random_generator(),
+            random_generator=self.random_generator,
         )
 
         x, y = np.meshgrid(np.arange(width), np.arange(height))
@@ -440,9 +439,9 @@ class Perspective(DualTransform):
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         image_shape = params["shape"][:2]
 
-        scale = random.uniform(*self.scale)
+        scale = self.py_random.uniform(*self.scale)
 
-        points = fgeometric.generate_perspective_points(image_shape, scale)
+        points = fgeometric.generate_perspective_points(image_shape, scale, self.random_generator)
         points = fgeometric.order_points(points)
 
         matrix, max_width, max_height = fgeometric.compute_perspective_params(points, image_shape)
@@ -758,6 +757,7 @@ class Affine(DualTransform):
         scale: dict[str, float | tuple[float, float]],
         keep_ratio: bool,
         balanced_scale: bool,
+        random_state: random.Random,
     ) -> fgeometric.ScaleDict:
         result_scale = {}
         for key, value in scale.items():
@@ -769,7 +769,7 @@ class Affine(DualTransform):
                     upper_interval = (1.0, value[1]) if value[1] > 1 else None
 
                     if lower_interval is not None and upper_interval is not None:
-                        selected_interval = random.choice([lower_interval, upper_interval])
+                        selected_interval = random_state.choice([lower_interval, upper_interval])
                     elif lower_interval is not None:
                         selected_interval = lower_interval
                     elif upper_interval is not None:
@@ -778,9 +778,9 @@ class Affine(DualTransform):
                         result_scale[key] = 1.0
                         continue
 
-                    result_scale[key] = random.uniform(*selected_interval)
+                    result_scale[key] = random_state.uniform(*selected_interval)
                 else:
-                    result_scale[key] = random.uniform(*value)
+                    result_scale[key] = random_state.uniform(*value)
             else:
                 raise TypeError(
                     f"Invalid scale value for key {key}: {value}. Expected a float or a tuple of two floats.",
@@ -796,8 +796,8 @@ class Affine(DualTransform):
 
         translate = self._get_translate_params(image_shape)
         shear = self._get_shear_params()
-        scale = self.get_scale(self.scale, self.keep_ratio, self.balanced_scale)
-        rotate = random.uniform(*self.rotate)
+        scale = self.get_scale(self.scale, self.keep_ratio, self.balanced_scale, self.py_random)
+        rotate = self.py_random.uniform(*self.rotate)
 
         image_shift = fgeometric.center(image_shape)
         bbox_shift = fgeometric.center_bbox(image_shape)
@@ -824,15 +824,15 @@ class Affine(DualTransform):
         if self.translate_px is not None:
             return cast(
                 fgeometric.TranslateDict,
-                {key: random.randint(*value) for key, value in self.translate_px.items()},
+                {key: self.py_random.randint(*value) for key, value in self.translate_px.items()},
             )
         if self.translate_percent is not None:
-            translate = {key: random.uniform(*value) for key, value in self.translate_percent.items()}
+            translate = {key: self.py_random.uniform(*value) for key, value in self.translate_percent.items()}
             return cast(fgeometric.TranslateDict, {"x": translate["x"] * width, "y": translate["y"] * height})
         return cast(fgeometric.TranslateDict, {"x": 0, "y": 0})
 
     def _get_shear_params(self) -> fgeometric.ShearDict:
-        return cast(fgeometric.ShearDict, {key: -random.uniform(*value) for key, value in self.shear.items()})
+        return cast(fgeometric.ShearDict, {key: -self.py_random.uniform(*value) for key, value in self.shear.items()})
 
 
 class ShiftScaleRotate(Affine):
@@ -1106,15 +1106,16 @@ class PiecewiseAffine(DualTransform):
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         height, width = params["shape"][:2]
 
-        nb_rows = np.clip(random.randint(*self.nb_rows), 2, None)
-        nb_cols = np.clip(random.randint(*self.nb_cols), 2, None)
-        scale = random.uniform(*self.scale)
+        nb_rows = np.clip(self.py_random.randint(*self.nb_rows), 2, None)
+        nb_cols = np.clip(self.py_random.randint(*self.nb_cols), 2, None)
+        scale = self.py_random.uniform(*self.scale)
 
         map_x, map_y = fgeometric.create_piecewise_affine_maps(
             image_shape=(height, width),
             grid=(nb_rows, nb_cols),
             scale=scale,
             absolute_scale=self.absolute_scale,
+            random_generator=self.random_generator,
         )
 
         border_modes = {
@@ -1275,41 +1276,21 @@ class PadIfNeeded(DualTransform):
 
     def update_params(self, params: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         params = super().update_params(params, **kwargs)
-        rows, cols = params["shape"][:2]
+        h_pad_top, h_pad_bottom, w_pad_left, w_pad_right = fgeometric.get_padding_params(
+            image_shape=params["shape"][:2],
+            min_height=self.min_height,
+            min_width=self.min_width,
+            pad_height_divisor=self.pad_height_divisor,
+            pad_width_divisor=self.pad_width_divisor,
+        )
 
-        if self.min_height is not None:
-            if rows < self.min_height:
-                h_pad_top = int((self.min_height - rows) / 2.0)
-                h_pad_bottom = self.min_height - rows - h_pad_top
-            else:
-                h_pad_top = 0
-                h_pad_bottom = 0
-        else:
-            pad_remained = rows % self.pad_height_divisor
-            pad_rows = self.pad_height_divisor - pad_remained if pad_remained > 0 else 0
-
-            h_pad_top = pad_rows // 2
-            h_pad_bottom = pad_rows - h_pad_top
-
-        if self.min_width is not None:
-            if cols < self.min_width:
-                w_pad_left = int((self.min_width - cols) / 2.0)
-                w_pad_right = self.min_width - cols - w_pad_left
-            else:
-                w_pad_left = 0
-                w_pad_right = 0
-        else:
-            pad_remainder = cols % self.pad_width_divisor
-            pad_cols = self.pad_width_divisor - pad_remainder if pad_remainder > 0 else 0
-
-            w_pad_left = pad_cols // 2
-            w_pad_right = pad_cols - w_pad_left
-
-        h_pad_top, h_pad_bottom, w_pad_left, w_pad_right = self.__update_position_params(
+        h_pad_top, h_pad_bottom, w_pad_left, w_pad_right = fgeometric.adjust_padding_by_position(
             h_top=h_pad_top,
             h_bottom=h_pad_bottom,
             w_left=w_pad_left,
             w_right=w_pad_right,
+            position=self.position,
+            py_random=self.py_random,
         )
 
         params.update(
@@ -1416,47 +1397,6 @@ class PadIfNeeded(DualTransform):
             "value",
             "mask_value",
         )
-
-    def __update_position_params(
-        self,
-        h_top: int,
-        h_bottom: int,
-        w_left: int,
-        w_right: int,
-    ) -> tuple[int, int, int, int]:
-        if self.position == "top_left":
-            h_bottom += h_top
-            w_right += w_left
-            h_top = 0
-            w_left = 0
-
-        elif self.position == "top_right":
-            h_bottom += h_top
-            w_left += w_right
-            h_top = 0
-            w_right = 0
-
-        elif self.position == "bottom_left":
-            h_top += h_bottom
-            w_right += w_left
-            h_bottom = 0
-            w_left = 0
-
-        elif self.position == "bottom_right":
-            h_top += h_bottom
-            w_left += w_right
-            h_bottom = 0
-            w_right = 0
-
-        elif self.position == "random":
-            h_pad = h_top + h_bottom
-            w_pad = w_left + w_right
-            h_top = random.randint(0, h_pad)
-            h_bottom = h_pad - h_top
-            w_left = random.randint(0, w_pad)
-            w_right = w_pad - w_left
-
-        return h_top, h_bottom, w_left, w_right
 
 
 class VerticalFlip(DualTransform):
@@ -1573,7 +1513,7 @@ class Flip(DualTransform):
 
     def get_params(self) -> dict[str, int]:
         # Random int in the range [-1, 1]
-        return {"d": random.randint(-1, 1)}
+        return {"d": self.py_random.randint(-1, 1)}
 
     def apply_to_bboxes(self, bboxes: np.ndarray, **params: Any) -> np.ndarray:
         return fgeometric.bboxes_flip(bboxes, params["d"])
@@ -1737,9 +1677,9 @@ class OpticalDistortion(BaseDistortion):
         fx = width
         fy = height
 
-        k = random.uniform(*self.distort_limit)
-        dx = round(random.uniform(*self.shift_limit))
-        dy = round(random.uniform(*self.shift_limit))
+        k = self.py_random.uniform(*self.distort_limit)
+        dx = round(self.py_random.uniform(*self.shift_limit))
+        dy = round(self.py_random.uniform(*self.shift_limit))
 
         cx = width * 0.5 + dx
         cy = height * 0.5 + dy
@@ -1852,8 +1792,8 @@ class GridDistortion(BaseDistortion):
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         image_shape = params["shape"][:2]
-        steps_x = [1 + random.uniform(*self.distort_limit) for _ in range(self.num_steps + 1)]
-        steps_y = [1 + random.uniform(*self.distort_limit) for _ in range(self.num_steps + 1)]
+        steps_x = [1 + self.py_random.uniform(*self.distort_limit) for _ in range(self.num_steps + 1)]
+        steps_y = [1 + self.py_random.uniform(*self.distort_limit) for _ in range(self.num_steps + 1)]
 
         if self.normalized:
             normalized_params = fgeometric.normalize_grid_distortion_steps(
@@ -1948,7 +1888,7 @@ class D4(DualTransform):
 
     def get_params(self) -> dict[str, D4Type]:
         return {
-            "group_element": random_utils.choice(d4_group_elements),
+            "group_element": self.random_generator.choice(d4_group_elements),
         }
 
     def get_transform_init_args_names(self) -> tuple[()]:
@@ -2024,7 +1964,7 @@ class GridElasticDeform(DualTransform):
         image_shape = params["shape"][:2]
 
         # Replace calculate_grid_dimensions with split_uniform_grid
-        tiles = fgeometric.split_uniform_grid(image_shape, self.num_grid_xy)
+        tiles = fgeometric.split_uniform_grid(image_shape, self.num_grid_xy, self.random_generator)
 
         # Convert tiles to the format expected by generate_distorted_grid_polygons
         dimensions = np.array(
@@ -2034,7 +1974,7 @@ class GridElasticDeform(DualTransform):
             ],
         ).reshape(self.num_grid_xy[::-1] + (4,))  # Reshape to (grid_height, grid_width, 4)
 
-        polygons = fgeometric.generate_distorted_grid_polygons(dimensions, self.magnitude)
+        polygons = fgeometric.generate_distorted_grid_polygons(dimensions, self.magnitude, self.random_generator)
 
         generated_mesh = self.generate_mesh(polygons, dimensions)
 

@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 from albucore import get_num_channels, hflip, maybe_process_in_chunks, preserve_channel_dim, vflip
 
-from albumentations import random_utils
 from albumentations.augmentations.utils import angle_2pi_range, handle_empty_array
 from albumentations.core.bbox_utils import bboxes_from_masks, denormalize_bboxes, masks_from_bboxes, normalize_bboxes
 from albumentations.core.types import (
@@ -18,6 +17,7 @@ from albumentations.core.types import (
     REFLECT_BORDER_MODES,
     ColorType,
     D4Type,
+    PositionType,
     ScalarType,
 )
 
@@ -1487,19 +1487,17 @@ def generate_displacement_fields(
     sigma: float,
     same_dxdy: bool,
     kernel_size: tuple[int, int],
-    random_generator: np.random.Generator | None = None,
+    random_generator: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate displacement fields for elastic transform."""
-    height, width = image_shape[:2]
-
-    dx = random_utils.rand(height, width, random_generator=random_generator).astype(np.float32) * 2 - 1
+    dx = random_generator.standard_normal(size=image_shape[:2]).astype(np.float32) * 2 - 1
     cv2.GaussianBlur(dx, kernel_size, sigma, dst=dx)
     dx *= alpha
 
     if same_dxdy:
         dy = dx
     else:
-        dy = random_utils.rand(height, width, random_generator=random_generator).astype(np.float32) * 2 - 1
+        dy = random_generator.standard_normal(size=image_shape[:2]).astype(np.float32) * 2 - 1
         cv2.GaussianBlur(dy, kernel_size, sigma, dst=dy)
         dy *= alpha
 
@@ -1850,6 +1848,7 @@ def distort_image_keypoints(
 def generate_distorted_grid_polygons(
     dimensions: np.ndarray,
     magnitude: int,
+    random_generator: np.random.Generator,
 ) -> np.ndarray:
     """Generate distorted grid polygons based on input dimensions and magnitude.
 
@@ -1862,6 +1861,7 @@ def generate_distorted_grid_polygons(
                                  is [x_min, y_min, x_max, y_max] representing the dimensions of a grid cell.
         magnitude (int): Maximum pixel-wise displacement for distortion. The actual displacement
                          will be randomly chosen in the range [-magnitude, magnitude].
+        random_generator (np.random.Generator): A random number generator.
 
     Returns:
         np.ndarray: A 2D array of shape (total_cells, 8) where each row represents a distorted polygon
@@ -1907,7 +1907,7 @@ def generate_distorted_grid_polygons(
 
     # Generate displacements for internal grid points only
     internal_points_height, internal_points_width = grid_height - 1, grid_width - 1
-    displacements = random_utils.randint(
+    displacements = random_generator.integers(
         -magnitude,
         magnitude + 1,
         size=(internal_points_height, internal_points_width, 2),
@@ -1943,7 +1943,7 @@ def pad_keypoints(
     border_mode: int,
     image_shape: tuple[int, int],
 ) -> np.ndarray:
-    if border_mode not in {cv2.BORDER_REFLECT_101, cv2.BORDER_REFLECT101}:
+    if border_mode not in REFLECT_BORDER_MODES:
         shift_vector = np.array([pad_left, pad_top])  # Only shift x and y
         return shift_keypoints(keypoints, shift_vector)
 
@@ -2371,7 +2371,7 @@ def almost_equal_intervals(n: int, parts: int) -> np.ndarray:
 def generate_shuffled_splits(
     size: int,
     divisions: int,
-    random_generator: np.random.Generator | None = None,
+    random_generator: np.random.Generator,
 ) -> np.ndarray:
     """Generate shuffled splits for a given dimension size and number of divisions.
 
@@ -2385,21 +2385,21 @@ def generate_shuffled_splits(
         np.ndarray: Cumulative edges of the shuffled intervals.
     """
     intervals = almost_equal_intervals(size, divisions)
-    intervals = random_utils.shuffle(intervals, random_generator=random_generator)
+    random_generator.shuffle(intervals)
     return np.insert(np.cumsum(intervals), 0, 0)
 
 
 def split_uniform_grid(
     image_shape: tuple[int, int],
     grid: tuple[int, int],
-    random_generator: np.random.Generator | None = None,
+    random_generator: np.random.Generator,
 ) -> np.ndarray:
     """Splits an image shape into a uniform grid specified by the grid dimensions.
 
     Args:
         image_shape (tuple[int, int]): The shape of the image as (height, width).
         grid (tuple[int, int]): The grid size as (rows, columns).
-        random_generator (np.random.Generator | None): The random generator to use for shuffling the splits.
+        random_generator (np.random.Generator): The random generator to use for shuffling the splits.
             If None, the splits are not shuffled.
 
     Returns:
@@ -2427,10 +2427,10 @@ def split_uniform_grid(
 def generate_perspective_points(
     image_shape: tuple[int, int],
     scale: float,
-    random_generator: np.random.Generator | None = None,
+    random_generator: np.random.Generator,
 ) -> np.ndarray:
     height, width = image_shape[:2]
-    points = random_utils.normal(0, scale, (4, 2), random_generator=random_generator)
+    points = random_generator.normal(0, scale, (4, 2))
     points = np.mod(np.abs(points), 0.32)
 
     # top left -- no changes needed, just use jitter
@@ -2506,8 +2506,8 @@ def create_piecewise_affine_maps(
     image_shape: tuple[int, int],
     grid: tuple[int, int],
     scale: float,
-    absolute_scale: bool = False,
-    random_generator: np.random.Generator | None = None,
+    absolute_scale: bool,
+    random_generator: np.random.Generator,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Create maps for piecewise affine transformation using OpenCV's remap function."""
     height, width = image_shape[:2]
@@ -2531,9 +2531,7 @@ def create_piecewise_affine_maps(
     # Generate jitter for control points
     jitter_scale = scale / 3 if absolute_scale else scale * min(width, height) / 3
 
-    jitter = random_utils.normal(0, jitter_scale, (nb_rows, nb_cols, 2), random_generator=random_generator).astype(
-        np.float32,
-    )
+    jitter = random_generator.normal(0, jitter_scale, (nb_rows, nb_cols, 2)).astype(np.float32)
 
     # Create control points with jitter
     control_points = np.zeros((nb_rows * nb_cols, 4), dtype=np.float32)
@@ -2589,3 +2587,97 @@ def bboxes_piecewise_affine(
     bboxes[:, :4] = bboxes_from_masks(transformed_masks)
 
     return bboxes
+
+
+def _get_dimension_padding(
+    current_size: int,
+    min_size: int | None,
+    divisor: int | None,
+) -> tuple[int, int]:
+    """Calculate padding for a single dimension.
+
+    Args:
+        current_size: Current size of the dimension
+        min_size: Minimum size requirement, if any
+        divisor: Divisor for padding to make size divisible, if any
+
+    Returns:
+        tuple[int, int]: (pad_before, pad_after)
+    """
+    if min_size is not None:
+        if current_size < min_size:
+            pad_before = int((min_size - current_size) / 2.0)
+            pad_after = min_size - current_size - pad_before
+            return pad_before, pad_after
+    elif divisor is not None:
+        remainder = current_size % divisor
+        if remainder > 0:
+            total_pad = divisor - remainder
+            pad_before = total_pad // 2
+            pad_after = total_pad - pad_before
+            return pad_before, pad_after
+
+    return 0, 0
+
+
+def get_padding_params(
+    image_shape: tuple[int, int],
+    min_height: int | None,
+    min_width: int | None,
+    pad_height_divisor: int | None,
+    pad_width_divisor: int | None,
+) -> tuple[int, int, int, int]:
+    """Calculate padding parameters based on target dimensions.
+
+    Args:
+        image_shape: (height, width) of the image
+        min_height: Minimum height requirement, if any
+        min_width: Minimum width requirement, if any
+        pad_height_divisor: Divisor for height padding, if any
+        pad_width_divisor: Divisor for width padding, if any
+
+    Returns:
+        tuple[int, int, int, int]: (pad_top, pad_bottom, pad_left, pad_right)
+    """
+    rows, cols = image_shape[:2]
+
+    h_pad_top, h_pad_bottom = _get_dimension_padding(rows, min_height, pad_height_divisor)
+    w_pad_left, w_pad_right = _get_dimension_padding(cols, min_width, pad_width_divisor)
+
+    return h_pad_top, h_pad_bottom, w_pad_left, w_pad_right
+
+
+def adjust_padding_by_position(
+    h_top: int,
+    h_bottom: int,
+    w_left: int,
+    w_right: int,
+    position: PositionType,
+    py_random: np.random.RandomState,
+) -> tuple[int, int, int, int]:
+    """Adjust padding values based on desired position."""
+    if position == "center":
+        return h_top, h_bottom, w_left, w_right
+
+    if position == "top_left":
+        return 0, h_top + h_bottom, 0, w_left + w_right
+
+    if position == "top_right":
+        return 0, h_top + h_bottom, w_left + w_right, 0
+
+    if position == "bottom_left":
+        return h_top + h_bottom, 0, 0, w_left + w_right
+
+    if position == "bottom_right":
+        return h_top + h_bottom, 0, w_left + w_right, 0
+
+    if position == "random":
+        h_pad = h_top + h_bottom
+        w_pad = w_left + w_right
+        h_top = py_random.randint(0, h_pad)
+        h_bottom = h_pad - h_top
+        w_left = py_random.randint(0, w_pad)
+        w_right = w_pad - w_left
+        return h_top, h_bottom, w_left, w_right
+
+    raise ValueError(f"Unknown position: {position}")

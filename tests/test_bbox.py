@@ -26,8 +26,6 @@ from albumentations.core.bbox_utils import (
 from albumentations.core.composition import BboxParams, Compose, ReplayCompose
 from albumentations.core.transforms_interface import BasicTransform, NoOp
 
-from .utils import set_seed
-
 
 @pytest.mark.parametrize(
     "bboxes, image_shape, expected",
@@ -890,6 +888,7 @@ def test_random_sized_crop_size() -> None:
     aug = A.Compose(
         [RandomSizedCrop(min_max_height=(70, 90), size=(50, 50), p=1.0)],
         bbox_params={"format": "albumentations"},
+        seed=42,
     )
     transformed = aug(image=image, bboxes=bboxes)
     assert transformed["image"].shape == (50, 50, 3)
@@ -899,7 +898,7 @@ def test_random_sized_crop_size() -> None:
 def test_random_resized_crop_size() -> None:
     image = np.ones((100, 100, 3))
     bboxes = [(0.2, 0.3, 0.6, 0.8, 2), (0.3, 0.4, 0.7, 0.9, 99)]
-    aug = A.Compose([RandomResizedCrop(size=(50, 50), p=1.0)], bbox_params={"format": "albumentations"})
+    aug = A.Compose([RandomResizedCrop(size=(50, 50), p=1.0)], bbox_params={"format": "albumentations"}, seed=42)
     transformed = aug(image=image, bboxes=bboxes)
     assert transformed["image"].shape == (50, 50, 3)
     assert len(bboxes) == len(transformed["bboxes"])
@@ -908,7 +907,7 @@ def test_random_resized_crop_size() -> None:
 def test_random_rotate() -> None:
     image = np.ones((192, 192, 3))
     bboxes = [(78, 42, 142, 80, 1), (32, 12, 42, 72, 2)]
-    aug = A.Compose([Rotate(limit=15, p=1.0)], bbox_params={"format": "pascal_voc"})
+    aug = A.Compose([Rotate(limit=15, p=1.0, border_mode=cv2.BORDER_CONSTANT)], bbox_params={"format": "pascal_voc"})
     transformed = aug(image=image, bboxes=bboxes)
     assert len(bboxes) == len(transformed["bboxes"])
 
@@ -929,30 +928,6 @@ def test_crop_boxes_replay_compose() -> None:
     input_data = dict(image=image, bboxes=bboxes, labels=labels)
     transformed = transform(**input_data)
     transformed2 = ReplayCompose.replay(transformed["replay"], **input_data)
-
-    np.testing.assert_almost_equal(transformed["bboxes"], transformed2["bboxes"])
-
-
-def test_crop_boxes_return_params() -> None:
-    image = np.ones((512, 384, 3))
-    bboxes = [(78, 42, 142, 80), (32, 12, 42, 72), (200, 100, 300, 200)]
-    labels = [0, 1, 2]
-    transform = Compose(
-        [RandomCrop(256, 256, p=1.0)],
-        bbox_params=BboxParams(
-            format="pascal_voc",
-            min_area=16,
-            label_fields=["labels"],
-        ),
-        return_params=True,
-    )
-
-    input_data = dict(image=image, bboxes=bboxes, labels=labels)
-    transformed = transform(**input_data)
-    transformed2 = transform.run_with_params(
-        params=transformed["applied_params"],
-        **input_data,
-    )
 
     np.testing.assert_almost_equal(transformed["bboxes"], transformed2["bboxes"])
 
@@ -1088,10 +1063,10 @@ def test_bbox_clipping(
 
 
 def test_bbox_clipping_perspective() -> None:
-    set_seed(1)
     transform = A.Compose(
         [A.Perspective(scale=(0.05, 0.05), p=1)],
         bbox_params=A.BboxParams(format="pascal_voc", min_visibility=0.6),
+        seed=42,
     )
 
     image = np.empty([1000, 1000, 3], dtype=np.uint8)

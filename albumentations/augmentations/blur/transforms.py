@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 import warnings
 from typing import Any, Literal, cast
 
@@ -9,7 +8,6 @@ import numpy as np
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from typing_extensions import Self
 
-from albumentations import random_utils
 from albumentations.augmentations import functional as fmain
 from albumentations.augmentations.utils import check_range
 from albumentations.core.pydantic import (
@@ -103,7 +101,7 @@ class Blur(ImageOnlyTransform):
         return fblur.blur(img, kernel)
 
     def get_params(self) -> dict[str, Any]:
-        return {"kernel": random_utils.choice(list(range(self.blur_limit[0], self.blur_limit[1] + 1, 2)))}
+        return {"kernel": self.random_generator.choice(list(range(self.blur_limit[0], self.blur_limit[1] + 1, 2)))}
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return ("blur_limit",)
@@ -196,15 +194,15 @@ class MotionBlur(Blur):
         return fmain.convolve(img, kernel=kernel)
 
     def get_params(self) -> dict[str, Any]:
-        ksize = random.choice(list(range(self.blur_limit[0], self.blur_limit[1] + 1, 2)))
+        ksize = self.py_random.choice(list(range(self.blur_limit[0], self.blur_limit[1] + 1, 2)))
         if ksize <= TWO:
             raise ValueError(f"ksize must be > 2. Got: {ksize}")
         kernel = np.zeros((ksize, ksize), dtype=np.uint8)
-        x1, x2 = random.randint(0, ksize - 1), random.randint(0, ksize - 1)
+        x1, x2 = self.py_random.randint(0, ksize - 1), self.py_random.randint(0, ksize - 1)
         if x1 == x2:
-            y1, y2 = random.sample(range(ksize), 2)
+            y1, y2 = self.py_random.sample(range(ksize), 2)
         else:
-            y1, y2 = random.randint(0, ksize - 1), random.randint(0, ksize - 1)
+            y1, y2 = self.py_random.randint(0, ksize - 1), self.py_random.randint(0, ksize - 1)
 
         def make_odd_val(v1: int, v2: int) -> tuple[int, int]:
             len_v = abs(v1 - v2) + 1
@@ -394,11 +392,11 @@ class GaussianBlur(ImageOnlyTransform):
         return fblur.gaussian_blur(img, ksize, sigma=sigma)
 
     def get_params(self) -> dict[str, float]:
-        ksize = random.randrange(self.blur_limit[0], self.blur_limit[1] + 1)
+        ksize = self.py_random.randrange(self.blur_limit[0], self.blur_limit[1] + 1)
         if ksize != 0 and ksize % 2 != 1:
             ksize = (ksize + 1) % (self.blur_limit[1] + 1)
 
-        return {"ksize": ksize, "sigma": random.uniform(*self.sigma_limit)}
+        return {"ksize": ksize, "sigma": self.py_random.uniform(*self.sigma_limit)}
 
     def get_transform_init_args_names(self) -> tuple[str, str]:
         return "blur_limit", "sigma_limit"
@@ -497,7 +495,7 @@ class GlassBlur(ImageOnlyTransform):
         width_pixels = height - self.max_delta * 2
         height_pixels = width - self.max_delta * 2
         total_pixels = int(width_pixels * height_pixels)
-        dxy = random_utils.randint(-self.max_delta, self.max_delta, size=(total_pixels, self.iterations, 2))
+        dxy = self.random_generator.integers(-self.max_delta, self.max_delta, size=(total_pixels, self.iterations, 2))
 
         return {"dxy": dxy}
 
@@ -650,17 +648,19 @@ class AdvancedBlur(ImageOnlyTransform):
         return fmain.convolve(img, kernel=kernel)
 
     def get_params(self) -> dict[str, np.ndarray]:
-        ksize = random.randrange(self.blur_limit[0], self.blur_limit[1] + 1, 2)
-        sigma_x = random.uniform(*self.sigma_x_limit)
-        sigma_y = random.uniform(*self.sigma_y_limit)
-        angle = np.deg2rad(random.uniform(*self.rotate_limit))
+        ksize = self.py_random.randrange(self.blur_limit[0], self.blur_limit[1] + 1, 2)
+        sigma_x = self.py_random.uniform(*self.sigma_x_limit)
+        sigma_y = self.py_random.uniform(*self.sigma_y_limit)
+        angle = np.deg2rad(self.py_random.uniform(*self.rotate_limit))
 
         # Split into 2 cases to avoid selection of narrow kernels (beta > 1) too often.
         beta = (
-            random.uniform(self.beta_limit[0], 1) if random.random() < HALF else random.uniform(1, self.beta_limit[1])
+            self.py_random.uniform(self.beta_limit[0], 1)
+            if self.py_random.random() < HALF
+            else self.py_random.uniform(1, self.beta_limit[1])
         )
 
-        noise_matrix = random_utils.uniform(*self.noise_limit, size=(ksize, ksize))
+        noise_matrix = self.random_generator.uniform(*self.noise_limit, size=(ksize, ksize))
 
         # Generate mesh grid centered at zero.
         ax = np.arange(-ksize // 2 + 1.0, ksize // 2 + 1.0)
@@ -762,8 +762,8 @@ class Defocus(ImageOnlyTransform):
 
     def get_params(self) -> dict[str, Any]:
         return {
-            "radius": random.randint(*self.radius),
-            "alias_blur": random.uniform(*self.alias_blur),
+            "radius": self.py_random.randint(*self.radius),
+            "alias_blur": self.py_random.uniform(*self.alias_blur),
         }
 
     def get_transform_init_args_names(self) -> tuple[str, str]:
@@ -811,8 +811,8 @@ class ZoomBlur(ImageOnlyTransform):
         return fblur.zoom_blur(img, zoom_factors)
 
     def get_params(self) -> dict[str, Any]:
-        step_factor = random.uniform(*self.step_factor)
-        max_factor = max(1 + step_factor, random.uniform(*self.max_factor))
+        step_factor = self.py_random.uniform(*self.step_factor)
+        max_factor = max(1 + step_factor, self.py_random.uniform(*self.max_factor))
         return {"zoom_factors": np.arange(1.0, max_factor, step_factor)}
 
     def get_transform_init_args_names(self) -> tuple[str, str]:

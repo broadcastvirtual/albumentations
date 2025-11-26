@@ -8,8 +8,6 @@ import albumentations as A
 from albumentations.pytorch.transforms import ToTensorV2
 from tests.conftest import RECTANGULAR_UINT8_IMAGE, SQUARE_UINT8_IMAGE, UINT8_IMAGES
 
-from .utils import set_seed
-
 
 @pytest.mark.parametrize("image", UINT8_IMAGES)
 def test_torch_to_tensor_v2_augmentations(image):
@@ -135,25 +133,11 @@ def test_with_replaycompose() -> None:
         "mask": np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8),
     }
     res = aug(**kwargs)
+
     res2 = A.ReplayCompose.replay(res["replay"], **kwargs)
-    assert np.array_equal(res["image"], res2["image"])
-    assert np.array_equal(res["mask"], res2["mask"])
-    assert res["image"].dtype == torch.uint8
-    assert res["mask"].dtype == torch.uint8
-    assert res2["image"].dtype == torch.uint8
-    assert res2["mask"].dtype == torch.uint8
+    np.testing.assert_array_equal(res["image"], res2["image"])
+    np.testing.assert_array_equal(res["mask"], res2["mask"])
 
-
-def test_with_return_params() -> None:
-    aug = A.Compose([ToTensorV2()], return_params=True)
-    kwargs = {
-        "image": np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8),
-        "mask": np.random.randint(low=0, high=256, size=(100, 100, 3), dtype=np.uint8),
-    }
-    res = aug(**kwargs)
-    res2 = aug.run_with_params(params=res["applied_params"], **kwargs)
-    assert np.array_equal(res["image"], res2["image"])
-    assert np.array_equal(res["mask"], res2["mask"])
     assert res["image"].dtype == torch.uint8
     assert res["mask"].dtype == torch.uint8
     assert res2["image"].dtype == torch.uint8
@@ -173,7 +157,6 @@ def test_with_return_params() -> None:
     ],
 )
 def test_color_jitter(brightness, contrast, saturation, hue):
-    set_seed(0)
     img = np.random.randint(0, 256, [100, 100, 3], dtype=np.uint8)
     pil_image = Image.fromarray(img)
 
