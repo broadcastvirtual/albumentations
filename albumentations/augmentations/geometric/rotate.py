@@ -5,12 +5,20 @@ from typing import Any, cast
 
 import cv2
 import numpy as np
-from typing_extensions import Literal
+from pydantic import Field, model_validator
+from typing_extensions import Literal, Self
 
 from albumentations.augmentations.crops import functional as fcrops
 from albumentations.augmentations.geometric.transforms import Affine
-from albumentations.core.pydantic import BorderModeType, InterpolationType, SymmetricRangeType
-from albumentations.core.transforms_interface import BaseTransformInitSchema, DualTransform
+from albumentations.core.pydantic import (
+    BorderModeType,
+    InterpolationType,
+    SymmetricRangeType,
+)
+from albumentations.core.transforms_interface import (
+    BaseTransformInitSchema,
+    DualTransform,
+)
 from albumentations.core.types import (
     ColorType,
     ScaleFloatType,
@@ -19,7 +27,7 @@ from albumentations.core.types import (
 
 from . import functional as fgeometric
 
-__all__ = ["Rotate", "RandomRotate90", "SafeRotate"]
+__all__ = ["RandomRotate90", "Rotate", "SafeRotate"]
 
 SMALL_NUMBER = 1e-10
 
@@ -47,10 +55,20 @@ class RandomRotate90(DualTransform):
         # Random int in the range [0, 3]
         return {"factor": self.py_random.randint(0, 3)}
 
-    def apply_to_bboxes(self, bboxes: np.ndarray, factor: int, **params: Any) -> np.ndarray:
+    def apply_to_bboxes(
+        self,
+        bboxes: np.ndarray,
+        factor: int,
+        **params: Any,
+    ) -> np.ndarray:
         return fgeometric.bboxes_rot90(bboxes, factor)
 
-    def apply_to_keypoints(self, keypoints: np.ndarray, factor: int, **params: Any) -> np.ndarray:
+    def apply_to_keypoints(
+        self,
+        keypoints: np.ndarray,
+        factor: int,
+        **params: Any,
+    ) -> np.ndarray:
         return fgeometric.keypoints_rot90(keypoints, factor, params["shape"])
 
     def get_transform_init_args_names(self) -> tuple[()]:
@@ -65,8 +83,8 @@ class RotateInitSchema(BaseTransformInitSchema):
 
     border_mode: BorderModeType
 
-    value: ColorType | None
-    mask_value: ColorType | None
+    fill: ColorType | None
+    fill_mask: ColorType | None
 
 
 class Rotate(DualTransform):
@@ -81,9 +99,8 @@ class Rotate(DualTransform):
         border_mode (OpenCV flag): Flag that is used to specify the pixel extrapolation method. Should be one of:
             cv2.BORDER_CONSTANT, cv2.BORDER_REPLICATE, cv2.BORDER_REFLECT, cv2.BORDER_WRAP, cv2.BORDER_REFLECT_101.
             Default: cv2.BORDER_REFLECT_101
-        value (int, float, list of ints, list of float): Padding value if border_mode is cv2.BORDER_CONSTANT.
-        mask_value (int, float, list of ints, list of float): Padding value if border_mode is cv2.BORDER_CONSTANT
-            applied for masks.
+        fill (ColorType): Padding value if border_mode is cv2.BORDER_CONSTANT.
+        fill_mask (ColorType): Padding value if border_mode is cv2.BORDER_CONSTANT applied for masks.
         rotate_method (str): Method to rotate bounding boxes. Should be 'largest_box' or 'ellipse'.
             Default: 'largest_box'
         crop_border (bool): Whether to crop border after rotation. If True, the output image size might differ
@@ -136,6 +153,26 @@ class Rotate(DualTransform):
         rotate_method: Literal["largest_box", "ellipse"]
         crop_border: bool
 
+        fill: ColorType
+        fill_mask: ColorType
+
+        value: ColorType | None = Field(
+            default=None,
+            deprecated="Deprecated use fill instead",
+        )
+        mask_value: ColorType | None = Field(
+            default=None,
+            deprecated="Deprecated use fill_mask instead",
+        )
+
+        @model_validator(mode="after")
+        def validate_value(self) -> Self:
+            if self.value is not None:
+                self.fill = self.value
+            if self.mask_value is not None:
+                self.fill_mask = self.mask_value
+            return self
+
     def __init__(
         self,
         limit: ScaleFloatType = (-90, 90),
@@ -146,16 +183,18 @@ class Rotate(DualTransform):
         rotate_method: Literal["largest_box", "ellipse"] = "largest_box",
         crop_border: bool = False,
         mask_interpolation: int = cv2.INTER_NEAREST,
-        always_apply: bool | None = None,
+        fill: ColorType = 0,
+        fill_mask: ColorType = 0,
         p: float = 0.5,
+        always_apply: bool | None = None,
     ):
         super().__init__(p=p, always_apply=always_apply)
         self.limit = cast(tuple[float, float], limit)
         self.interpolation = interpolation
         self.mask_interpolation = mask_interpolation
         self.border_mode = border_mode
-        self.value = value
-        self.mask_value = mask_value
+        self.fill = fill
+        self.fill_mask = fill_mask
         self.rotate_method = rotate_method
         self.crop_border = crop_border
 
@@ -173,7 +212,7 @@ class Rotate(DualTransform):
             img,
             matrix,
             self.interpolation,
-            self.value,
+            self.fill,
             self.border_mode,
             params["shape"][:2],
         )
@@ -195,7 +234,7 @@ class Rotate(DualTransform):
             mask,
             matrix,
             self.mask_interpolation,
-            self.mask_value,
+            self.fill_mask,
             self.border_mode,
             params["shape"][:2],
         )
@@ -223,7 +262,11 @@ class Rotate(DualTransform):
             image_shape,
         )
         if self.crop_border:
-            return fcrops.crop_bboxes_by_coords(bboxes_out, (x_min, y_min, x_max, y_max), image_shape)
+            return fcrops.crop_bboxes_by_coords(
+                bboxes_out,
+                (x_min, y_min, x_max, y_max),
+                image_shape,
+            )
         return bboxes_out
 
     def apply_to_keypoints(
@@ -241,14 +284,21 @@ class Rotate(DualTransform):
             matrix,
             params["shape"][:2],
             scale={"x": 1, "y": 1},
-            mode=self.border_mode,
+            border_mode=self.border_mode,
         )
         if self.crop_border:
-            return fcrops.crop_keypoints_by_coords(keypoints_out, (x_min, y_min, x_max, y_max))
+            return fcrops.crop_keypoints_by_coords(
+                keypoints_out,
+                (x_min, y_min, x_max, y_max),
+            )
         return keypoints_out
 
     @staticmethod
-    def _rotated_rect_with_max_area(height: int, width: int, angle: float) -> dict[str, int]:
+    def _rotated_rect_with_max_area(
+        height: int,
+        width: int,
+        angle: float,
+    ) -> dict[str, int]:
         """Given a rectangle of size wxh that has been rotated by 'angle' (in
         degrees), computes the width and height of the largest possible
         axis-aligned rectangle (maximal area) within the rotated rectangle.
@@ -271,7 +321,10 @@ class Rotate(DualTransform):
         else:
             # fully constrained case: crop touches all 4 sides
             cos_2a = cos_a * cos_a - sin_a * sin_a
-            wr, hr = (width * cos_a - height * sin_a) / cos_2a, (height * cos_a - width * sin_a) / cos_2a
+            wr, hr = (
+                (width * cos_a - height * sin_a) / cos_2a,
+                (height * cos_a - width * sin_a) / cos_2a,
+            )
 
         return {
             "x_min": max(0, int(width / 2 - wr / 2)),
@@ -280,7 +333,11 @@ class Rotate(DualTransform):
             "y_max": min(height, int(height / 2 + hr / 2)),
         }
 
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    def get_params_dependent_on_data(
+        self,
+        params: dict[str, Any],
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
         angle = self.py_random.uniform(*self.limit)
 
         if self.crop_border:
@@ -292,13 +349,25 @@ class Rotate(DualTransform):
         center = fgeometric.center(params["shape"][:2])
         bbox_center = fgeometric.center_bbox(params["shape"][:2])
 
-        translate: fgeometric.TranslateDict = {"x": 0, "y": 0}
-        shear: fgeometric.ShearDict = {"x": 0, "y": 0}
-        scale: fgeometric.ScaleDict = {"x": 1, "y": 1}
+        translate: fgeometric.XYInt = {"x": 0, "y": 0}
+        shear: fgeometric.XYFloat = {"x": 0, "y": 0}
+        scale: fgeometric.XYFloat = {"x": 1, "y": 1}
         rotate = angle
 
-        matrix = fgeometric.create_affine_transformation_matrix(translate, shear, scale, rotate, center)
-        bbox_matrix = fgeometric.create_affine_transformation_matrix(translate, shear, scale, rotate, bbox_center)
+        matrix = fgeometric.create_affine_transformation_matrix(
+            translate,
+            shear,
+            scale,
+            rotate,
+            center,
+        )
+        bbox_matrix = fgeometric.create_affine_transformation_matrix(
+            translate,
+            shear,
+            scale,
+            rotate,
+            bbox_center,
+        )
         out_params["matrix"] = matrix
         out_params["bbox_matrix"] = bbox_matrix
 
@@ -309,8 +378,8 @@ class Rotate(DualTransform):
             "limit",
             "interpolation",
             "border_mode",
-            "value",
-            "mask_value",
+            "fill",
+            "fill_mask",
             "rotate_method",
             "crop_border",
             "mask_interpolation",
@@ -333,11 +402,11 @@ class SafeRotate(Affine):
         border_mode (OpenCV flag): Flag that is used to specify the pixel extrapolation method. Should be one of:
             cv2.BORDER_CONSTANT, cv2.BORDER_REPLICATE, cv2.BORDER_REFLECT, cv2.BORDER_WRAP, cv2.BORDER_REFLECT_101.
             Default: cv2.BORDER_REFLECT_101
-        value (int, float, list of int, list of float): Padding value if border_mode is cv2.BORDER_CONSTANT.
-        mask_value (int, float, list of int, list of float): Padding value if border_mode is cv2.BORDER_CONSTANT applied
+        fill (ColorType): Padding value if border_mode is cv2.BORDER_CONSTANT.
+        fill_mask (ColorType): Padding value if border_mode is cv2.BORDER_CONSTANT applied
             for masks.
-        rotate_method (str): Method to rotate bounding boxes. Should be 'largest_box' or 'ellipse'.
-            Default: 'largest_box'
+        rotate_method (Literal["largest_box", "ellipse"]): Method to rotate bounding boxes.
+            Should be 'largest_box' or 'ellipse'. Default: 'largest_box'
         mask_interpolation (OpenCV flag): flag that is used to specify the interpolation algorithm for mask.
             Should be one of: cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_CUBIC, cv2.INTER_AREA, cv2.INTER_LANCZOS4.
             Default: cv2.INTER_NEAREST.
@@ -398,28 +467,27 @@ class SafeRotate(Affine):
         mask_value: ColorType | None = None,
         rotate_method: Literal["largest_box", "ellipse"] = "largest_box",
         mask_interpolation: int = cv2.INTER_NEAREST,
-        always_apply: bool | None = None,
+        fill: ColorType = 0,
+        fill_mask: ColorType = 0,
         p: float = 0.5,
+        always_apply: bool | None = None,
     ):
-        value = 0 if value is None else value
-        mask_value = 0 if mask_value is None else mask_value
         super().__init__(
             rotate=limit,
             interpolation=interpolation,
-            mode=border_mode,
-            cval=value,
-            cval_mask=mask_value,
+            border_mode=border_mode,
+            fill=fill,
+            fill_mask=fill_mask,
             rotate_method=rotate_method,
             fit_output=True,
             mask_interpolation=mask_interpolation,
             p=p,
-            always_apply=always_apply,
         )
         self.limit = cast(tuple[float, float], limit)
         self.interpolation = interpolation
         self.border_mode = border_mode
-        self.value = value
-        self.mask_value = mask_value
+        self.fill = fill
+        self.fill_mask = fill_mask
         self.rotate_method = rotate_method
         self.mask_interpolation = mask_interpolation
 
@@ -428,8 +496,8 @@ class SafeRotate(Affine):
             "limit",
             "interpolation",
             "border_mode",
-            "value",
-            "mask_value",
+            "fill",
+            "fill_mask",
             "rotate_method",
             "mask_interpolation",
         )
@@ -465,7 +533,11 @@ class SafeRotate(Affine):
 
         return matrix, {"x": scale_x, "y": scale_y}
 
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    def get_params_dependent_on_data(
+        self,
+        params: dict[str, Any],
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
         image_shape = params["shape"][:2]
         angle = self.py_random.uniform(*self.limit)
 
@@ -474,8 +546,16 @@ class SafeRotate(Affine):
         bbox_center = fgeometric.center_bbox(image_shape)
 
         # Create matrices for image and bbox
-        matrix, scale = self._create_safe_rotate_matrix(angle, image_center, image_shape)
-        bbox_matrix, _ = self._create_safe_rotate_matrix(angle, bbox_center, image_shape)
+        matrix, scale = self._create_safe_rotate_matrix(
+            angle,
+            image_center,
+            image_shape,
+        )
+        bbox_matrix, _ = self._create_safe_rotate_matrix(
+            angle,
+            bbox_center,
+            image_shape,
+        )
 
         return {
             "rotate": angle,

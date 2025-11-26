@@ -19,23 +19,41 @@ Here is an example of how you can apply some [pixel-level](#pixel-level-transfor
 
 ## Why Albumentations
 
-- Albumentations **[supports all common computer vision tasks](#i-want-to-use-albumentations-for-the-specific-task-such-as-classification-or-segmentation)** such as classification, semantic segmentation, instance segmentation, object detection, and pose estimation.
-- The library provides **[a simple unified API](#a-simple-example)** to work with all data types: images (RGB-images, grayscale images, multispectral images), segmentation masks, bounding boxes, and keypoints.
-- The library contains **[more than 70 different augmentations](#list-of-augmentations)** to generate new training samples from the existing data.
-- Albumentations is **[fast](#benchmarking-results)**. We benchmark each new release to ensure that augmentations provide maximum speed.
-- It **[works with popular deep learning frameworks](#i-want-to-know-how-to-use-albumentations-with-deep-learning-frameworks)** such as PyTorch and TensorFlow. By the way, Albumentations is a part of the [PyTorch ecosystem](https://pytorch.org/ecosystem/).
-- [**Written by experts**](#authors). The authors have experience both working on production computer vision systems and participating in competitive machine learning. Many core team members are Kaggle Masters and Grandmasters.
-- The library is [**widely used**](#who-is-using-albumentations) in industry, deep learning research, machine learning competitions, and open source projects.
+- **Complete Computer Vision Support**: Works with [all major CV tasks](#i-want-to-use-albumentations-for-the-specific-task-such-as-classification-or-segmentation) including classification, segmentation (semantic & instance), object detection, and pose estimation.
+- **Simple, Unified API**: [One consistent interface](#a-simple-example) for all data types - RGB/grayscale/multispectral images, masks, bounding boxes, and keypoints.
+- **Rich Augmentation Library**: [70+ high-quality augmentations](https://albumentations.ai/docs/api_reference/transforms/) to enhance your training data.
+- **Fast**: Consistently benchmarked as the [fastest augmentation library](https://albumentations.ai/docs/benchmarks/), with optimizations for production use.
+- **Deep Learning Integration**: Works with [PyTorch](https://pytorch.org/), [TensorFlow](https://www.tensorflow.org/), and other frameworks. Part of the [PyTorch ecosystem](https://pytorch.org/ecosystem/).
+- **Created by Experts**: Built by [developers with deep experience in computer vision and machine learning competitions](https://albumentations.ai/docs/#authors).
 
-## Sponsors
+## Community-Driven Project, Supported By
 
-<a href="https://roboflow.com/" target="_blank"><img src="https://avatars.githubusercontent.com/u/53104118?s=200&v=4" width="100"/></a>
+Albumentations thrives on developer contributions. We appreciate our sponsors who help sustain the project's infrastructure.
+
+| 🏆 Gold Sponsors |
+|-----------------|
+| Your company could be here |
+
+| 🥈 Silver Sponsors |
+|-------------------|
+| <a href="https://datature.io" target="_blank"><img src="https://albumentations.ai/assets/sponsors/datature-full.png" width="100" alt="Datature"/></a> |
+
+| 🥉 Bronze Sponsors |
+|-------------------|
+| <a href="https://roboflow.com" target="_blank"><img src="https://albumentations.ai/assets/sponsors/roboflow.png" width="100" alt="Roboflow"/></a> |
+
+---
+
+### 💝 Become a Sponsor
+
+Your sponsorship is a way to say "thank you" to the maintainers and contributors who spend their free time building and maintaining Albumentations. Sponsors are featured on our website and README. View sponsorship tiers on [GitHub Sponsors](https://github.com/sponsors/albumentations-team)
 
 ## Table of contents
 
 - [Albumentations](#albumentations)
   - [Why Albumentations](#why-albumentations)
-  - [Sponsors](#sponsors)
+  - [Community-Driven Project, Supported By](#community-driven-project-supported-by)
+    - [💝 Become a Sponsor](#-become-a-sponsor)
   - [Table of contents](#table-of-contents)
   - [Authors](#authors)
     - [Current Maintainer](#current-maintainer)
@@ -64,8 +82,7 @@ Here is an example of how you can apply some [pixel-level](#pixel-level-transfor
     - [Library Versions](#library-versions)
   - [Performance Comparison](#performance-comparison)
   - [Contributing](#contributing)
-  - [Community and Support](#community-and-support)
-  - [Comments](#comments)
+  - [Community](#community)
   - [Citing](#citing)
 
 ## Authors
@@ -140,25 +157,24 @@ Check the [online demo of the library](https://albumentations-demo.herokuapp.com
 
 ## Who is using Albumentations
 
-<a href="https://www.apple.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/apple.jpeg" width="100"/></a>
-<a href="https://research.google/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/google.png" width="100"/></a>
-<a href="https://opensource.fb.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/meta_research.png" width="100"/></a>
-<a href="https: //www.nvidia.com/en-us/research/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/nvidia_research.jpeg" width="100"/></a>
-<a href="https://www.amazon.science/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/amazon_science.png" width="100"/></a>
-<a href="https://opensource.microsoft.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/microsoft.png" width="100"/></a>
-<a href="https://engineering.salesforce.com/open-source/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/salesforce_open_source.png" width="100"/></a>
-<a href="https://stability.ai/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/stability.png" width="100"/></a>
-<a href="https://www.ibm.com/opensource/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/ibm.jpeg" width="100"/></a>
-<a href="https://huggingface.co/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/hugging_face.png" width="100"/></a>
-<a href="https://www.sony.com/en/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/sony.png" width="100"/></a>
-<a href="https://opensource.alibaba.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/alibaba.png" width="100"/></a>
-<a href="https://opensource.tencent.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/tencent.png" width="100"/></a>
-<a href="https://h2o.ai/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/html/assets/img/industry/h2o_ai.png" width="100"/></a>
+<a href="https://www.apple.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/apple.jpeg" width="100"/></a>
+<a href="https://research.google/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/google.png" width="100"/></a>
+<a href="https://opensource.fb.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/meta_research.png" width="100"/></a>
+<a href="https://www.nvidia.com/en-us/research/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/nvidia_research.jpeg" width="100"/></a>
+<a href="https://www.amazon.science/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/amazon_science.png" width="100"/></a>
+<a href="https://opensource.microsoft.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/microsoft.png" width="100"/></a>
+<a href="https://engineering.salesforce.com/open-source/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/salesforce_open_source.png" width="100"/></a>
+<a href="https://stability.ai/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/stability.png" width="100"/></a>
+<a href="https://www.ibm.com/opensource/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/ibm.jpeg" width="100"/></a>
+<a href="https://huggingface.co/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/hugging_face.png" width="100"/></a>
+<a href="https://www.sony.com/en/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/sony.png" width="100"/></a>
+<a href="https://opensource.alibaba.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/alibaba.png" width="100"/></a>
+<a href="https://opensource.tencent.com/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/tencent.png" width="100"/></a>
+<a href="https://h2o.ai/" target="_blank"><img src="https://raw.githubusercontent.com/albumentations-team/albumentations.ai/main/website/public/assets/industry/h2o_ai.png" width="100"/></a>
 
 ### See also
 
 - [A list of papers that cite Albumentations](https://scholar.google.com/citations?view_op=view_citation&citation_for_view=vkjh9X0AAAAJ:r0BpntZqJG4C).
-- [A list of teams that were using Albumentations and took high places in machine learning competitions](https://albumentations.ai/whos_using#competitions).
 - [Open source projects that use Albumentations](https://github.com/albumentations-team/albumentations/network/dependents?dependent_type=PACKAGE).
 
 ## List of augmentations
@@ -167,7 +183,9 @@ Check the [online demo of the library](https://albumentations-demo.herokuapp.com
 
 Pixel-level transforms will change just an input image and will leave any additional targets such as masks, bounding boxes, and keypoints unchanged. The list of pixel-level transforms:
 
+- [AdditiveNoise](https://explore.albumentations.ai/transform/AdditiveNoise)
 - [AdvancedBlur](https://explore.albumentations.ai/transform/AdvancedBlur)
+- [AutoContrast](https://explore.albumentations.ai/transform/AutoContrast)
 - [Blur](https://explore.albumentations.ai/transform/Blur)
 - [CLAHE](https://explore.albumentations.ai/transform/CLAHE)
 - [ChannelDropout](https://explore.albumentations.ai/transform/ChannelDropout)
@@ -181,12 +199,12 @@ Pixel-level transforms will change just an input image and will leave any additi
 - [FDA](https://explore.albumentations.ai/transform/FDA)
 - [FancyPCA](https://explore.albumentations.ai/transform/FancyPCA)
 - [FromFloat](https://explore.albumentations.ai/transform/FromFloat)
-- [GaussNoise](https://explore.albumentations.ai/transform/GaussNoise)
 - [GaussianBlur](https://explore.albumentations.ai/transform/GaussianBlur)
 - [GlassBlur](https://explore.albumentations.ai/transform/GlassBlur)
 - [HistogramMatching](https://explore.albumentations.ai/transform/HistogramMatching)
 - [HueSaturationValue](https://explore.albumentations.ai/transform/HueSaturationValue)
 - [ISONoise](https://explore.albumentations.ai/transform/ISONoise)
+- [Illumination](https://explore.albumentations.ai/transform/Illumination)
 - [ImageCompression](https://explore.albumentations.ai/transform/ImageCompression)
 - [InvertImg](https://explore.albumentations.ai/transform/InvertImg)
 - [MedianBlur](https://explore.albumentations.ai/transform/MedianBlur)
@@ -195,6 +213,8 @@ Pixel-level transforms will change just an input image and will leave any additi
 - [Normalize](https://explore.albumentations.ai/transform/Normalize)
 - [PixelDistributionAdaptation](https://explore.albumentations.ai/transform/PixelDistributionAdaptation)
 - [PlanckianJitter](https://explore.albumentations.ai/transform/PlanckianJitter)
+- [PlasmaBrightnessContrast](https://explore.albumentations.ai/transform/PlasmaBrightnessContrast)
+- [PlasmaShadow](https://explore.albumentations.ai/transform/PlasmaShadow)
 - [Posterize](https://explore.albumentations.ai/transform/Posterize)
 - [RGBShift](https://explore.albumentations.ai/transform/RGBShift)
 - [RandomBrightnessContrast](https://explore.albumentations.ai/transform/RandomBrightnessContrast)
@@ -207,7 +227,9 @@ Pixel-level transforms will change just an input image and will leave any additi
 - [RandomSunFlare](https://explore.albumentations.ai/transform/RandomSunFlare)
 - [RandomToneCurve](https://explore.albumentations.ai/transform/RandomToneCurve)
 - [RingingOvershoot](https://explore.albumentations.ai/transform/RingingOvershoot)
+- [SaltAndPepper](https://explore.albumentations.ai/transform/SaltAndPepper)
 - [Sharpen](https://explore.albumentations.ai/transform/Sharpen)
+- [ShotNoise](https://explore.albumentations.ai/transform/ShotNoise)
 - [Solarize](https://explore.albumentations.ai/transform/Solarize)
 - [Spatter](https://explore.albumentations.ai/transform/Spatter)
 - [Superpixels](https://explore.albumentations.ai/transform/Superpixels)
@@ -235,6 +257,8 @@ Spatial-level transforms will simultaneously change both an input image as well 
 | [CropNonEmptyMaskIfExists](https://explore.albumentations.ai/transform/CropNonEmptyMaskIfExists) | ✓     | ✓    | ✓      | ✓         |
 | [D4](https://explore.albumentations.ai/transform/D4)                                             | ✓     | ✓    | ✓      | ✓         |
 | [ElasticTransform](https://explore.albumentations.ai/transform/ElasticTransform)                 | ✓     | ✓    | ✓      | ✓         |
+| [Erasing](https://explore.albumentations.ai/transform/Erasing)                                   | ✓     | ✓    | ✓      | ✓         |
+| [FrequencyMasking](https://explore.albumentations.ai/transform/FrequencyMasking)                 | ✓     | ✓    | ✓      | ✓         |
 | [GridDistortion](https://explore.albumentations.ai/transform/GridDistortion)                     | ✓     | ✓    | ✓      | ✓         |
 | [GridDropout](https://explore.albumentations.ai/transform/GridDropout)                           | ✓     | ✓    | ✓      | ✓         |
 | [GridElasticDeform](https://explore.albumentations.ai/transform/GridElasticDeform)               | ✓     | ✓    | ✓      | ✓         |
@@ -246,13 +270,14 @@ Spatial-level transforms will simultaneously change both an input image as well 
 | [NoOp](https://explore.albumentations.ai/transform/NoOp)                                         | ✓     | ✓    | ✓      | ✓         |
 | [OpticalDistortion](https://explore.albumentations.ai/transform/OpticalDistortion)               | ✓     | ✓    | ✓      | ✓         |
 | [OverlayElements](https://explore.albumentations.ai/transform/OverlayElements)                   | ✓     | ✓    |        |           |
+| [Pad](https://explore.albumentations.ai/transform/Pad)                                           | ✓     | ✓    | ✓      | ✓         |
 | [PadIfNeeded](https://explore.albumentations.ai/transform/PadIfNeeded)                           | ✓     | ✓    | ✓      | ✓         |
 | [Perspective](https://explore.albumentations.ai/transform/Perspective)                           | ✓     | ✓    | ✓      | ✓         |
 | [PiecewiseAffine](https://explore.albumentations.ai/transform/PiecewiseAffine)                   | ✓     | ✓    | ✓      | ✓         |
 | [PixelDropout](https://explore.albumentations.ai/transform/PixelDropout)                         | ✓     | ✓    | ✓      | ✓         |
 | [RandomCrop](https://explore.albumentations.ai/transform/RandomCrop)                             | ✓     | ✓    | ✓      | ✓         |
 | [RandomCropFromBorders](https://explore.albumentations.ai/transform/RandomCropFromBorders)       | ✓     | ✓    | ✓      | ✓         |
-| [RandomGridShuffle](https://explore.albumentations.ai/transform/RandomGridShuffle)               | ✓     | ✓    |        | ✓         |
+| [RandomGridShuffle](https://explore.albumentations.ai/transform/RandomGridShuffle)               | ✓     | ✓    | ✓      | ✓         |
 | [RandomResizedCrop](https://explore.albumentations.ai/transform/RandomResizedCrop)               | ✓     | ✓    | ✓      | ✓         |
 | [RandomRotate90](https://explore.albumentations.ai/transform/RandomRotate90)                     | ✓     | ✓    | ✓      | ✓         |
 | [RandomScale](https://explore.albumentations.ai/transform/RandomScale)                           | ✓     | ✓    | ✓      | ✓         |
@@ -263,6 +288,9 @@ Spatial-level transforms will simultaneously change both an input image as well 
 | [SafeRotate](https://explore.albumentations.ai/transform/SafeRotate)                             | ✓     | ✓    | ✓      | ✓         |
 | [ShiftScaleRotate](https://explore.albumentations.ai/transform/ShiftScaleRotate)                 | ✓     | ✓    | ✓      | ✓         |
 | [SmallestMaxSize](https://explore.albumentations.ai/transform/SmallestMaxSize)                   | ✓     | ✓    | ✓      | ✓         |
+| [ThinPlateSpline](https://explore.albumentations.ai/transform/ThinPlateSpline)                   | ✓     | ✓    | ✓      | ✓         |
+| [TimeMasking](https://explore.albumentations.ai/transform/TimeMasking)                           | ✓     | ✓    | ✓      | ✓         |
+| [TimeReverse](https://explore.albumentations.ai/transform/TimeReverse)                           | ✓     | ✓    | ✓      | ✓         |
 | [Transpose](https://explore.albumentations.ai/transform/Transpose)                               | ✓     | ✓    | ✓      | ✓         |
 | [VerticalFlip](https://explore.albumentations.ai/transform/VerticalFlip)                         | ✓     | ✓    | ✓      | ✓         |
 | [XYMasking](https://explore.albumentations.ai/transform/XYMasking)                               | ✓     | ✓    | ✓      | ✓         |
@@ -310,6 +338,8 @@ Spatial-level transforms will simultaneously change both an input image as well 
 
 ## Performance Comparison
 
+Number - is the number of uint8 RGB images processed per second on a single CPU core. Higher is better.
+
 | Transform         | albumentations<br>1.4.20   | augly<br>1.0.0   | imgaug<br>0.4.0   | kornia<br>0.7.3   | torchvision<br>0.20.0   |
 |:------------------|:---------------------------|:-----------------|:------------------|:------------------|:------------------------|
 | HorizontalFlip    | **8618 ± 1233**            | 4807 ± 818       | 6042 ± 788        | 390 ± 106         | 914 ± 67                |
@@ -346,20 +376,11 @@ To create a pull request to the repository, follow the documentation at [CONTRIB
 
 ![https://github.com/albuemntations-team/albumentation/graphs/contributors](https://contrib.rocks/image?repo=albumentations-team/albumentations)
 
-## Community and Support
+## Community
 
+- [LinkedIn](https://www.linkedin.com/company/albumentations/)
 - [Twitter](https://twitter.com/albumentations)
 - [Discord](https://discord.gg/AKPrrDYNAt)
-- [LinkedIn](https://www.linkedin.com/company/albumentations/)
-
-## Comments
-
-In some systems, in the multiple GPU regime, PyTorch may deadlock the DataLoader if OpenCV was compiled with OpenCL optimizations. Adding the following two lines before the library import may help. For more details [https://github.com/pytorch/pytorch/issues/1355](https://github.com/pytorch/pytorch/issues/1355)
-
-```python
-cv2.setNumThreads(0)
-cv2.ocl.setUseOpenCL(False)
-```
 
 ## Citing
 

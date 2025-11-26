@@ -1,43 +1,50 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
-import cv2
 import numpy as np
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from typing_extensions import Self
 
 from albumentations.augmentations import functional as fmain
-from albumentations.augmentations.utils import check_range
 from albumentations.core.pydantic import (
     NonNegativeFloatRangeType,
     OnePlusFloatRangeType,
     OnePlusIntRangeType,
     SymmetricRangeType,
+    check_range_bounds,
+    nondecreasing,
 )
-from albumentations.core.transforms_interface import BaseTransformInitSchema, ImageOnlyTransform
+from albumentations.core.transforms_interface import (
+    BaseTransformInitSchema,
+    ImageOnlyTransform,
+)
 from albumentations.core.types import ScaleFloatType, ScaleIntType
 from albumentations.core.utils import to_tuple
 
 from . import functional as fblur
 
-__all__ = ["Blur", "MotionBlur", "GaussianBlur", "GlassBlur", "AdvancedBlur", "MedianBlur", "Defocus", "ZoomBlur"]
+__all__ = [
+    "AdvancedBlur",
+    "Blur",
+    "Defocus",
+    "GaussianBlur",
+    "GlassBlur",
+    "MedianBlur",
+    "MotionBlur",
+    "ZoomBlur",
+]
 
 
 HALF = 0.5
 TWO = 2
-
-
-def process_blur_limit(value: ScaleIntType, info: ValidationInfo, min_value: float = 0) -> tuple[int, int]:
-    bounds = 0, float("inf")
-    result = to_tuple(value, min_value)
-    check_range(result, *bounds, info.field_name)
-
-    for v in result:
-        if v != 0 and v % 2 != 1:
-            raise ValueError(f"Blur limit must be 0 or odd. Got: {result}")
-    return result
 
 
 class BlurInitSchema(BaseTransformInitSchema):
@@ -46,7 +53,7 @@ class BlurInitSchema(BaseTransformInitSchema):
     @field_validator("blur_limit")
     @classmethod
     def process_blur(cls, value: ScaleIntType, info: ValidationInfo) -> tuple[int, int]:
-        return process_blur_limit(value, info, min_value=3)
+        return fblur.process_blur_limit(value, info, min_value=3)
 
 
 class Blur(ImageOnlyTransform):
@@ -93,7 +100,12 @@ class Blur(ImageOnlyTransform):
     class InitSchema(BlurInitSchema):
         pass
 
-    def __init__(self, blur_limit: ScaleIntType = (3, 7), p: float = 0.5, always_apply: bool | None = None):
+    def __init__(
+        self,
+        blur_limit: ScaleIntType = (3, 7),
+        p: float = 0.5,
+        always_apply: bool | None = None,
+    ):
         super().__init__(p=p, always_apply=always_apply)
         self.blur_limit = cast(tuple[int, int], blur_limit)
 
@@ -101,134 +113,181 @@ class Blur(ImageOnlyTransform):
         return fblur.blur(img, kernel)
 
     def get_params(self) -> dict[str, Any]:
-        return {"kernel": self.random_generator.choice(list(range(self.blur_limit[0], self.blur_limit[1] + 1, 2)))}
+        kernel = fblur.sample_odd_from_range(
+            self.py_random,
+            self.blur_limit[0],
+            self.blur_limit[1],
+        )
+        return {"kernel": kernel}
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return ("blur_limit",)
 
 
 class MotionBlur(Blur):
-    """Apply motion blur to the input image using a random-sized kernel.
+    """Apply motion blur to the input image using a directional kernel.
 
-    This transform simulates the effect of camera or object motion during image capture,
-    creating a directional blur. It uses a line-shaped kernel with random orientation
-    to achieve this effect.
+    This transform simulates motion blur effects that occur during image capture,
+    such as camera shake or object movement. It creates a directional blur using
+    a line-shaped kernel with controllable angle, direction, and position.
 
     Args:
-        blur_limit (int | tuple[int, int]): Maximum kernel size for blurring the input image.
+        blur_limit (int | tuple[int, int]): Maximum kernel size for blurring.
             Should be in range [3, inf).
-            - If a single int is provided, the kernel size will be randomly chosen
-              between 3 and that value.
-            - If a tuple of two ints is provided, it defines the inclusive range
-              of possible kernel sizes.
+            - If int: kernel size will be randomly chosen from [3, blur_limit]
+            - If tuple: kernel size will be randomly chosen from [min, max]
+            Larger values create stronger blur effects.
             Default: (3, 7)
 
-        allow_shifted (bool): If set to True, allows the motion blur kernel to be
-            randomly shifted from the center. If False, the kernel will always be
-            centered. Default: True
+        angle_range (tuple[float, float]): Range of possible angles in degrees.
+            Controls the rotation of the motion blur line:
+            - 0°: Horizontal motion blur →
+            - 45°: Diagonal motion blur ↗
+            - 90°: Vertical motion blur ↑
+            - 135°: Diagonal motion blur ↖
+            Default: (0, 360)
+
+        direction_range (tuple[float, float]): Range for motion bias.
+            Controls how the blur extends from the center:
+            - -1.0: Blur extends only backward (←)
+            -  0.0: Blur extends equally in both directions (←→)
+            -  1.0: Blur extends only forward (→)
+            For example, with angle=0:
+            - direction=-1.0: ←•
+            - direction=0.0:  ←•→
+            - direction=1.0:   •→
+            Default: (-1.0, 1.0)
+
+        allow_shifted (bool): Allow random kernel position shifts.
+            - If True: Kernel can be randomly offset from center
+            - If False: Kernel will always be centered
+            Default: True
 
         p (float): Probability of applying the transform. Default: 0.5
 
-    Targets:
-        image
+    Examples of angle vs direction:
+        1. Horizontal motion (angle=0°):
+           - direction=0.0:   ←•→   (symmetric blur)
+           - direction=1.0:    •→   (forward blur)
+           - direction=-1.0:  ←•    (backward blur)
 
-    Image types:
-        uint8, float32
+        2. Vertical motion (angle=90°):
+           - direction=0.0:   ↑•↓   (symmetric blur)
+           - direction=1.0:    •↑   (upward blur)
+           - direction=-1.0:  ↓•    (downward blur)
 
-    Number of channels:
-        Any
+        3. Diagonal motion (angle=45°):
+           - direction=0.0:   ↙•↗   (symmetric blur)
+           - direction=1.0:    •↗   (forward diagonal blur)
+           - direction=-1.0:  ↙•    (backward diagonal blur)
 
     Note:
-        - The blur kernel is always a straight line, simulating linear motion.
-        - The angle of the motion blur is randomly chosen for each application.
-        - Larger kernel sizes result in more pronounced motion blur effects.
-        - When `allow_shifted` is True, the blur effect can appear more natural and varied,
-          as it simulates motion that isn't perfectly centered in the frame.
-        - This transform is particularly useful for:
-          * Simulating camera shake or motion blur in action scenes
-          * Data augmentation for object detection or tracking tasks
-          * Creating more challenging inputs for image stabilization algorithms
+        - angle controls the orientation of the motion line
+        - direction controls the distribution of the blur along that line
+        - Together they can simulate various motion effects:
+          * Camera shake: Small angle range + direction near 0
+          * Object motion: Specific angle + direction=1.0
+          * Complex motion: Random angle + random direction
 
     Example:
-        >>> import numpy as np
         >>> import albumentations as A
-        >>> image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
-        >>> transform = A.MotionBlur(blur_limit=7, allow_shifted=True, p=0.5)
-        >>> result = transform(image=image)
-        >>> motion_blurred_image = result["image"]
+        >>> # Horizontal camera shake (symmetric)
+        >>> transform = A.MotionBlur(
+        ...     angle_range=(-5, 5),      # Near-horizontal motion
+        ...     direction_range=(0, 0),    # Symmetric blur
+        ...     p=1.0
+        ... )
+        >>>
+        >>> # Object moving right
+        >>> transform = A.MotionBlur(
+        ...     angle_range=(0, 0),        # Horizontal motion
+        ...     direction_range=(0.8, 1.0), # Strong forward bias
+        ...     p=1.0
+        ... )
 
     References:
-        - Motion blur: https://en.wikipedia.org/wiki/Motion_blur
-        - OpenCV filter2D (used internally):
+        - Motion blur fundamentals:
+          https://en.wikipedia.org/wiki/Motion_blur
+
+        - Directional blur kernels:
+          https://www.sciencedirect.com/topics/computer-science/directional-blur
+
+        - OpenCV filter2D (used for convolution):
           https://docs.opencv.org/master/d4/d86/group__imgproc__filter.html#ga27c049795ce870216ddfb366086b5a04
+
+        - Research on motion blur simulation:
+          "Understanding and Evaluating Blind Deconvolution Algorithms" (CVPR 2009)
+          https://doi.org/10.1109/CVPR.2009.5206815
+
+        - Motion blur in photography:
+          "The Manual of Photography", Chapter 7: Motion in Photography
+          ISBN: 978-0240520377
+
+        - Kornia's implementation (similar approach):
+          https://kornia.readthedocs.io/en/latest/augmentation.html#kornia.augmentation.RandomMotionBlur
+
+    See Also:
+        - GaussianBlur: For uniform blur effects
+        - MedianBlur: For noise reduction while preserving edges
+        - RandomRain: Another motion-based effect
+        - Perspective: For geometric motion-like distortions
+
     """
 
-    class InitSchema(BaseTransformInitSchema):
+    class InitSchema(BlurInitSchema):
         allow_shifted: bool
-        blur_limit: ScaleIntType
-
-        @model_validator(mode="after")
-        def process_blur(self) -> Self:
-            self.blur_limit = to_tuple(self.blur_limit, 3)
-
-            if self.allow_shifted and isinstance(self.blur_limit, tuple) and any(x % 2 != 1 for x in self.blur_limit):
-                raise ValueError(f"Blur limit must be odd when centered=True. Got: {self.blur_limit}")
-
-            return self
+        angle_range: Annotated[tuple[float, float], AfterValidator(nondecreasing)]
+        direction_range: Annotated[
+            tuple[float, float],
+            AfterValidator(nondecreasing),
+            AfterValidator(check_range_bounds(min_val=-1.0, max_val=1.0)),
+        ]
 
     def __init__(
         self,
         blur_limit: ScaleIntType = 7,
         allow_shifted: bool = True,
-        always_apply: bool | None = None,
+        angle_range: tuple[float, float] = (0, 360),
+        direction_range: tuple[float, float] = (-1.0, 1.0),
         p: float = 0.5,
+        always_apply: bool | None = None,
     ):
-        super().__init__(blur_limit=blur_limit, p=p, always_apply=always_apply)
+        super().__init__(blur_limit=blur_limit, p=p)
         self.allow_shifted = allow_shifted
         self.blur_limit = cast(tuple[int, int], blur_limit)
+        self.angle_range = angle_range
+        self.direction_range = direction_range
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
-        return (*super().get_transform_init_args_names(), "allow_shifted")
+        return (
+            *super().get_transform_init_args_names(),
+            "allow_shifted",
+            "angle_range",
+            "direction_range",
+        )
 
     def apply(self, img: np.ndarray, kernel: np.ndarray, **params: Any) -> np.ndarray:
         return fmain.convolve(img, kernel=kernel)
 
     def get_params(self) -> dict[str, Any]:
-        ksize = self.py_random.choice(list(range(self.blur_limit[0], self.blur_limit[1] + 1, 2)))
-        if ksize <= TWO:
-            raise ValueError(f"ksize must be > 2. Got: {ksize}")
-        kernel = np.zeros((ksize, ksize), dtype=np.uint8)
-        x1, x2 = self.py_random.randint(0, ksize - 1), self.py_random.randint(0, ksize - 1)
-        if x1 == x2:
-            y1, y2 = self.py_random.sample(range(ksize), 2)
-        else:
-            y1, y2 = self.py_random.randint(0, ksize - 1), self.py_random.randint(0, ksize - 1)
+        ksize = fblur.sample_odd_from_range(
+            self.py_random,
+            self.blur_limit[0],
+            self.blur_limit[1],
+        )
 
-        def make_odd_val(v1: int, v2: int) -> tuple[int, int]:
-            len_v = abs(v1 - v2) + 1
-            if len_v % 2 != 1:
-                if v2 > v1:
-                    v2 -= 1
-                else:
-                    v1 -= 1
-            return v1, v2
+        angle = self.py_random.uniform(*self.angle_range)
+        direction = self.py_random.uniform(*self.direction_range)
 
-        if not self.allow_shifted:
-            x1, x2 = make_odd_val(x1, x2)
-            y1, y2 = make_odd_val(y1, y2)
+        # Create motion blur kernel
+        kernel = fblur.create_motion_kernel(
+            ksize,
+            angle,
+            direction,
+            allow_shifted=self.allow_shifted,
+            random_state=self.py_random,
+        )
 
-            xc = (x1 + x2) / 2
-            yc = (y1 + y2) / 2
-
-            center = ksize / 2 - 0.5
-            dx = xc - center
-            dy = yc - center
-            x1, x2 = (int(i - dx) for i in [x1, x2])
-            y1, y2 = (int(i - dy) for i in [y1, y2])
-
-        cv2.line(kernel, (x1, y1), (x2, y2), 1, thickness=1)
-
-        # Normalize kernel
         return {"kernel": kernel.astype(np.float32) / np.sum(kernel)}
 
 
@@ -284,7 +343,12 @@ class MedianBlur(Blur):
         - OpenCV medianBlur: https://docs.opencv.org/master/d4/d86/group__imgproc__filter.html#ga564869aa33e58769b4469101aac458f9
     """
 
-    def __init__(self, blur_limit: ScaleIntType = 7, p: float = 0.5, always_apply: bool | None = None):
+    def __init__(
+        self,
+        blur_limit: ScaleIntType = 7,
+        p: float = 0.5,
+        always_apply: bool | None = None,
+    ):
         super().__init__(blur_limit=blur_limit, p=p, always_apply=always_apply)
 
     def apply(self, img: np.ndarray, kernel: int, **params: Any) -> np.ndarray:
@@ -352,8 +416,12 @@ class GaussianBlur(ImageOnlyTransform):
 
         @field_validator("blur_limit")
         @classmethod
-        def process_blur(cls, value: ScaleIntType, info: ValidationInfo) -> tuple[int, int]:
-            return process_blur_limit(value, info, min_value=0)
+        def process_blur(
+            cls,
+            value: ScaleIntType,
+            info: ValidationInfo,
+        ) -> tuple[int, int]:
+            return fblur.process_blur_limit(value, info, min_value=0)
 
         @model_validator(mode="after")
         def validate_limits(self) -> Self:
@@ -370,11 +438,6 @@ class GaussianBlur(ImageOnlyTransform):
                     stacklevel=2,
                 )
 
-            if isinstance(self.blur_limit, tuple):
-                for v in self.blur_limit:
-                    if v != 0 and v % 2 != 1:
-                        raise ValueError(f"Blur limit must be 0 or odd. Got: {self.blur_limit}")
-
             return self
 
     def __init__(
@@ -388,17 +451,25 @@ class GaussianBlur(ImageOnlyTransform):
         self.blur_limit = cast(tuple[int, int], blur_limit)
         self.sigma_limit = cast(tuple[float, float], sigma_limit)
 
-    def apply(self, img: np.ndarray, ksize: int, sigma: float, **params: Any) -> np.ndarray:
+    def apply(
+        self,
+        img: np.ndarray,
+        ksize: int,
+        sigma: float,
+        **params: Any,
+    ) -> np.ndarray:
         return fblur.gaussian_blur(img, ksize, sigma=sigma)
 
     def get_params(self) -> dict[str, float]:
-        ksize = self.py_random.randrange(self.blur_limit[0], self.blur_limit[1] + 1)
-        if ksize != 0 and ksize % 2 != 1:
-            ksize = (ksize + 1) % (self.blur_limit[1] + 1)
+        ksize = fblur.sample_odd_from_range(
+            self.py_random,
+            self.blur_limit[0],
+            self.blur_limit[1],
+        )
 
         return {"ksize": ksize, "sigma": self.py_random.uniform(*self.sigma_limit)}
 
-    def get_transform_init_args_names(self) -> tuple[str, str]:
+    def get_transform_init_args_names(self) -> tuple[str, ...]:
         return "blur_limit", "sigma_limit"
 
 
@@ -485,17 +556,38 @@ class GlassBlur(ImageOnlyTransform):
         self.iterations = iterations
         self.mode = mode
 
-    def apply(self, img: np.ndarray, *args: Any, dxy: np.ndarray, **params: Any) -> np.ndarray:
-        return fblur.glass_blur(img, self.sigma, self.max_delta, self.iterations, dxy, self.mode)
+    def apply(
+        self,
+        img: np.ndarray,
+        *args: Any,
+        dxy: np.ndarray,
+        **params: Any,
+    ) -> np.ndarray:
+        return fblur.glass_blur(
+            img,
+            self.sigma,
+            self.max_delta,
+            self.iterations,
+            dxy,
+            self.mode,
+        )
 
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, np.ndarray]:
+    def get_params_dependent_on_data(
+        self,
+        params: dict[str, Any],
+        data: dict[str, Any],
+    ) -> dict[str, np.ndarray]:
         height, width = params["shape"][:2]
 
         # generate array containing all necessary values for transformations
         width_pixels = height - self.max_delta * 2
         height_pixels = width - self.max_delta * 2
         total_pixels = int(width_pixels * height_pixels)
-        dxy = self.random_generator.integers(-self.max_delta, self.max_delta, size=(total_pixels, self.iterations, 2))
+        dxy = self.random_generator.integers(
+            -self.max_delta,
+            self.max_delta,
+            size=(total_pixels, self.iterations, 2),
+        )
 
         return {"dxy": dxy}
 
@@ -630,11 +722,19 @@ class AdvancedBlur(ImageOnlyTransform):
         super().__init__(p=p, always_apply=always_apply)
 
         if sigmaX_limit is not None:
-            warnings.warn("sigmaX_limit is deprecated; use sigma_x_limit instead.", DeprecationWarning, stacklevel=2)
+            warnings.warn(
+                "sigmaX_limit is deprecated; use sigma_x_limit instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             sigma_x_limit = sigmaX_limit
 
         if sigmaY_limit is not None:
-            warnings.warn("sigmaY_limit is deprecated; use sigma_y_limit instead.", DeprecationWarning, stacklevel=2)
+            warnings.warn(
+                "sigmaY_limit is deprecated; use sigma_y_limit instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             sigma_y_limit = sigmaY_limit
 
         self.blur_limit = cast(tuple[int, int], blur_limit)
@@ -648,7 +748,11 @@ class AdvancedBlur(ImageOnlyTransform):
         return fmain.convolve(img, kernel=kernel)
 
     def get_params(self) -> dict[str, np.ndarray]:
-        ksize = self.py_random.randrange(self.blur_limit[0], self.blur_limit[1] + 1, 2)
+        ksize = fblur.sample_odd_from_range(
+            self.py_random,
+            self.blur_limit[0],
+            self.blur_limit[1],
+        )
         sigma_x = self.py_random.uniform(*self.sigma_x_limit)
         sigma_y = self.py_random.uniform(*self.sigma_y_limit)
         angle = np.deg2rad(self.py_random.uniform(*self.rotate_limit))
@@ -660,7 +764,10 @@ class AdvancedBlur(ImageOnlyTransform):
             else self.py_random.uniform(1, self.beta_limit[1])
         )
 
-        noise_matrix = self.random_generator.uniform(*self.noise_limit, size=(ksize, ksize))
+        noise_matrix = self.random_generator.uniform(
+            *self.noise_limit,
+            size=(ksize, ksize),
+        )
 
         # Generate mesh grid centered at zero.
         ax = np.arange(-ksize // 2 + 1.0, ksize // 2 + 1.0)
@@ -669,12 +776,16 @@ class AdvancedBlur(ImageOnlyTransform):
 
         # Calculate rotated sigma matrix
         d_matrix = np.array([[sigma_x**2, 0], [0, sigma_y**2]])
-        u_matrix = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+        u_matrix = np.array(
+            [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]],
+        )
         sigma_matrix = np.dot(u_matrix, np.dot(d_matrix, u_matrix.T))
 
         inverse_sigma = np.linalg.inv(sigma_matrix)
         # Described in "Parameter Estimation For Multivariate Generalized Gaussian Distributions"
-        kernel = np.exp(-0.5 * np.power(np.sum(np.dot(grid, inverse_sigma) * grid, 2), beta))
+        kernel = np.exp(
+            -0.5 * np.power(np.sum(np.dot(grid, inverse_sigma) * grid, 2), beta),
+        )
         # Add noise
         kernel *= noise_matrix
 
@@ -757,7 +868,13 @@ class Defocus(ImageOnlyTransform):
         self.radius = cast(tuple[int, int], radius)
         self.alias_blur = cast(tuple[float, float], alias_blur)
 
-    def apply(self, img: np.ndarray, radius: int, alias_blur: float, **params: Any) -> np.ndarray:
+    def apply(
+        self,
+        img: np.ndarray,
+        radius: int,
+        alias_blur: float,
+        **params: Any,
+    ) -> np.ndarray:
         return fblur.defocus(img, radius, alias_blur)
 
     def get_params(self) -> dict[str, Any]:
@@ -807,7 +924,12 @@ class ZoomBlur(ImageOnlyTransform):
         self.max_factor = cast(tuple[float, float], max_factor)
         self.step_factor = cast(tuple[float, float], step_factor)
 
-    def apply(self, img: np.ndarray, zoom_factors: np.ndarray, **params: Any) -> np.ndarray:
+    def apply(
+        self,
+        img: np.ndarray,
+        zoom_factors: np.ndarray,
+        **params: Any,
+    ) -> np.ndarray:
         return fblur.zoom_blur(img, zoom_factors)
 
     def get_params(self) -> dict[str, Any]:

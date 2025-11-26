@@ -708,8 +708,8 @@ def test_single_transform_compose(
                 "num_masks_y": 3,
                 "mask_x_length": (10, 20),
                 "mask_y_length": 10,
-                "fill_value": 0,
-                "mask_fill_value": 1,
+                "fill": 0,
+                "fill_mask": 1,
             },
             A.PadIfNeeded: {
                 "min_height": 512,
@@ -1084,8 +1084,8 @@ def test_transform_always_apply_warning() -> None:
                 "num_masks_y": 3,
                 "mask_x_length": (10, 20),
                 "mask_y_length": 10,
-                "fill_value": 0,
-                "mask_fill_value": 1,
+                "fill": 0,
+                "fill_mask": 1,
             },
             A.PadIfNeeded: {
                 "min_height": 512,
@@ -1172,8 +1172,8 @@ def test_images_as_target(augmentation_cls, params):
                 "num_masks_y": (1, 3),
                 "mask_x_length": 10,
                 "mask_y_length": 10,
-                "mask_fill_value": 1,
-                "fill_value": 0,
+                "fill_mask": 1,
+                "fill": 0,
             },
             A.TextImage: dict(font_path="./tests/files/LiberationSerif-Bold.ttf"),
             A.GridElasticDeform: {"num_grid_xy": (10, 10), "magnitude": 10},
@@ -1247,8 +1247,8 @@ def test_non_contiguous_input_with_compose(augmentation_cls, params, bboxes):
                 "num_masks_y": 3,
                 "mask_x_length": (10, 20),
                 "mask_y_length": 10,
-                "fill_value": 0,
-                "mask_fill_value": 1,
+                "fill": 0,
+                "fill_mask": 1,
             },
             A.PadIfNeeded: {
                 "min_height": 512,
@@ -1331,6 +1331,9 @@ def test_masks_as_target(augmentation_cls, params, masks):
             A.FromFloat,
             A.MaskDropout,
             A.XYMasking,
+            A.TimeMasking,
+            A.FrequencyMasking,
+            A.Erasing,
         },
     ),
 )
@@ -1343,7 +1346,7 @@ def test_mask_interpolation(augmentation_cls, params, interpolation):
     image = SQUARE_UINT8_IMAGE
     mask = image.copy()
 
-    aug = A.Compose([augmentation_cls(p=1, interpolation=interpolation, mask_interpolation=interpolation, **params)])
+    aug = A.Compose([augmentation_cls(p=1, interpolation=interpolation, mask_interpolation=interpolation, seed=42,**params)])
 
     transformed = aug(image=image, mask=mask)
 
@@ -1381,7 +1384,7 @@ def test_mask_interpolation_someof(interpolation, compose):
         ),
         (
             A.Rotate(p=1),
-            {'shape', 'cols', 'rows', 'x_min', 'x_max', 'y_min', 'y_max', 'matrix', 'bbox_matrix', 'interpolation'}
+            {'shape', 'cols', 'rows', 'x_min', 'x_max', 'y_min', 'y_max', 'matrix', 'bbox_matrix', 'interpolation', "fill", "fill_mask"}
         ),
     ],
 )

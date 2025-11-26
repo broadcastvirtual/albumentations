@@ -20,11 +20,11 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "read_bgr_image",
-    "read_rgb_image",
-    "read_grayscale",
     "angle_2pi_range",
     "non_rgb_error",
+    "read_bgr_image",
+    "read_grayscale",
+    "read_rgb_image",
 ]
 
 P = ParamSpec("P")
@@ -172,11 +172,23 @@ class PCA:
         return np.cumsum(self.explained_variance_ratio())
 
 
-def handle_empty_array(func: F) -> F:
-    @functools.wraps(func)
-    def wrapper(array: T, *args: Any, **kwargs: Any) -> Any:
-        if len(array) == 0:
-            return array
-        return func(array, *args, **kwargs)
+def handle_empty_array(param_name: str) -> Callable[[F], F]:
+    def decorator(func: F) -> F:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # Check if the parameter is passed as positional argument
+            if len(args) > 0:
+                array = args[0]
+            # Check if the parameter is passed as keyword argument
+            elif param_name in kwargs:
+                array = kwargs[param_name]
+            else:
+                raise ValueError(f"Missing required argument: {param_name}")
 
-    return cast(F, wrapper)
+            if len(array) == 0:
+                return array
+            return func(*args, **kwargs)
+
+        return cast(F, wrapper)
+
+    return decorator

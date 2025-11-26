@@ -1,22 +1,30 @@
 from __future__ import annotations
 
+from typing import cast
+
 import cv2
 import numpy as np
-from albucore import MAX_VALUES_BY_DTYPE, is_grayscale_image, preserve_channel_dim
-from typing_extensions import Literal
+from albucore import (
+    MAX_VALUES_BY_DTYPE,
+    NUM_MULTI_CHANNEL_DIMENSIONS,
+    get_num_channels,
+    is_grayscale_image,
+    preserve_channel_dim,
+    uint8_io,
+)
 
 from albumentations.augmentations.geometric.functional import split_uniform_grid
 from albumentations.augmentations.utils import handle_empty_array
-from albumentations.core.types import MONO_CHANNEL_DIMENSIONS, ColorType
+from albumentations.core.types import MONO_CHANNEL_DIMENSIONS, ColorType, DropoutFillValue, InpaintMethod
 
 __all__ = [
-    "cutout",
-    "channel_dropout",
-    "filter_keypoints_in_holes",
-    "generate_random_fill",
-    "filter_bboxes_by_holes",
     "calculate_grid_dimensions",
+    "channel_dropout",
+    "cutout",
+    "filter_bboxes_by_holes",
+    "filter_keypoints_in_holes",
     "generate_grid_holes",
+    "generate_random_fill",
 ]
 
 
@@ -74,65 +82,136 @@ def generate_random_fill(
     raise ValueError(f"Unsupported dtype: {dtype}")
 
 
-def cutout(
-    img: np.ndarray,
-    holes: np.ndarray,
-    fill_value: ColorType | Literal["random"],
-    random_generator: np.random.Generator,
-) -> np.ndarray:
-    """Apply cutout augmentation to the image by cutting out holes and filling them
-    with either a given value or random noise.
+@uint8_io
+def apply_inpainting(img: np.ndarray, holes: np.ndarray, method: InpaintMethod) -> np.ndarray:
+    """Apply OpenCV inpainting to fill the holes in the image.
 
     Args:
-        img (np.ndarray): The image to augment. Can be a 2D (grayscale) or 3D (color) array.
-        holes (np.ndarray): An array of holes with shape (num_holes, 4).
-            Each hole is represented as [x1, y1, x2, y2].
-        fill_value (ColorType | Literal["random"]): The fill value to use for the holes.
-            Can be a single integer, a tuple or list of numbers for multichannel images,
-            or the string "random" to fill with random noise.
-        random_generator (np.random.Generator): The random generator to use for generating
-            random fill values. If None, a new random generator will be used. Defaults to None.
+        img: Input image (grayscale or BGR)
+        holes: Array of [x1, y1, x2, y2] coordinates
+        method: Inpainting method to use ("inpaint_telea" or "inpaint_ns")
 
     Returns:
-        np.ndarray: The augmented image with cutout holes applied.
+        np.ndarray: Inpainted image
 
     Raises:
-        ValueError: If the fill_value is not of the expected type.
-
-    Note:
-        - The function creates a copy of the input image before applying the cutout.
-        - For multichannel images, the fill_value should match the number of channels.
-        - When using "random" fill, the random values are generated to match the image's dtype and shape.
-
-    Example:
-        >>> import numpy as np
-        >>> img = np.ones((100, 100, 3), dtype=np.uint8) * 255
-        >>> holes = np.array([[20, 20, 40, 40], [60, 60, 80, 80]])
-        >>> result = cutout(img, holes, fill_value=0)
-        >>> print(result.shape)
-        (100, 100, 3)
+        NotImplementedError: If image has more than 3 channels
     """
-    img = img.copy()
-
-    if isinstance(fill_value, (int, float, tuple, list)):
-        fill_value = np.array(fill_value, dtype=img.dtype)
-
+    num_channels = get_num_channels(img)
+    # Create inpainting mask
+    mask = np.zeros(img.shape[:2], dtype=np.uint8)
     for x_min, y_min, x_max, y_max in holes:
-        if isinstance(fill_value, str) and fill_value == "random":
-            shape = (
-                (y_max - y_min, x_max - x_min)
-                if img.ndim == MONO_CHANNEL_DIMENSIONS
-                else (y_max - y_min, x_max - x_min, img.shape[2])
-            )
-            random_fill = generate_random_fill(img.dtype, shape, random_generator)
-            img[y_min:y_max, x_min:x_max] = random_fill
-        else:
-            img[y_min:y_max, x_min:x_max] = fill_value
+        mask[y_min:y_max, x_min:x_max] = 255
 
+    inpaint_method = cv2.INPAINT_TELEA if method == "inpaint_telea" else cv2.INPAINT_NS
+
+    # Handle grayscale images by converting to 3 channels and back
+    if num_channels == 1:
+        if img.ndim == NUM_MULTI_CHANNEL_DIMENSIONS:
+            img = img.squeeze()
+        img_3ch = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        result = cv2.inpaint(img_3ch, mask, 3, inpaint_method)
+        return (
+            cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)[..., None]
+            if num_channels == NUM_MULTI_CHANNEL_DIMENSIONS
+            else cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        )
+
+    return cv2.inpaint(img, mask, 3, inpaint_method)
+
+
+def fill_holes_with_value(img: np.ndarray, holes: np.ndarray, fill_value: np.ndarray) -> np.ndarray:
+    """Fill holes with a constant value.
+
+    Args:
+        img: Input image
+        holes: Array of [x1, y1, x2, y2] coordinates
+        fill_value: Value to fill the holes with
+    """
+    for x_min, y_min, x_max, y_max in holes:
+        img[y_min:y_max, x_min:x_max] = fill_value
     return img
 
 
-@handle_empty_array
+def fill_holes_with_random(
+    img: np.ndarray,
+    holes: np.ndarray,
+    random_generator: np.random.Generator,
+    uniform: bool,
+) -> np.ndarray:
+    """Fill holes with random values.
+
+    Args:
+        img: Input image
+        holes: Array of [x1, y1, x2, y2] coordinates
+        random_generator: Random number generator
+        uniform: If True, use same random value for entire hole
+    """
+    for x_min, y_min, x_max, y_max in holes:
+        shape = (1,) if uniform else (y_max - y_min, x_max - x_min)
+        if img.ndim != MONO_CHANNEL_DIMENSIONS:
+            shape = (1, img.shape[2]) if uniform else (*shape, img.shape[2])
+
+        random_fill = generate_random_fill(img.dtype, shape, random_generator)
+        img[y_min:y_max, x_min:x_max] = random_fill
+    return img
+
+
+def cutout(
+    img: np.ndarray,
+    holes: np.ndarray,
+    fill_value: DropoutFillValue,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Apply cutout augmentation to the image by cutting out holes and filling them.
+
+    Args:
+        img: The image to augment
+        holes: Array of [x1, y1, x2, y2] coordinates
+        fill_value: Value to fill holes with. Can be:
+            - number (int/float): Will be broadcast to all channels
+            - sequence (tuple/list/ndarray): Must match number of channels
+            - "random": Different random values for each pixel
+            - "random_uniform": Same random value for entire hole
+            - "inpaint_telea"/"inpaint_ns": OpenCV inpainting methods
+        random_generator: Random number generator for random fills
+
+    Raises:
+        ValueError: If fill_value length doesn't match number of channels
+    """
+    img = img.copy()
+
+    # Handle inpainting methods
+    if isinstance(fill_value, str):
+        if fill_value in {"inpaint_telea", "inpaint_ns"}:
+            return apply_inpainting(img, holes, cast(InpaintMethod, fill_value))
+        if fill_value == "random":
+            return fill_holes_with_random(img, holes, random_generator, uniform=False)
+        if fill_value == "random_uniform":
+            return fill_holes_with_random(img, holes, random_generator, uniform=True)
+        raise ValueError(f"Unsupported string fill_value: {fill_value}")
+
+    # Convert numeric fill values to numpy array
+    if isinstance(fill_value, (int, float)):
+        fill_array = np.array(fill_value, dtype=img.dtype)
+        return fill_holes_with_value(img, holes, fill_array)
+
+    # Handle sequence fill values
+    fill_array = np.array(fill_value, dtype=img.dtype)
+
+    # For multi-channel images, verify fill_value matches number of channels
+    if img.ndim == NUM_MULTI_CHANNEL_DIMENSIONS:
+        fill_array = fill_array.ravel()
+        if fill_array.size != img.shape[2]:
+            raise ValueError(
+                f"Fill value must have same number of channels as image. "
+                f"Got {fill_array.size}, expected {img.shape[2]}",
+            )
+
+    return fill_holes_with_value(img, holes, fill_array)
+
+
+@handle_empty_array("keypoints")
 def filter_keypoints_in_holes(keypoints: np.ndarray, holes: np.ndarray) -> np.ndarray:
     """Filter out keypoints that are inside any of the holes.
 
@@ -362,7 +441,7 @@ def generate_grid_holes(
     return np.column_stack((x_min, y_min, x_max, y_max))
 
 
-@handle_empty_array
+@handle_empty_array("bboxes")
 def mask_dropout_bboxes(
     bboxes: np.ndarray,
     dropout_mask: np.ndarray,
@@ -408,7 +487,7 @@ def mask_dropout_bboxes(
     return bboxes[keep_mask]
 
 
-@handle_empty_array
+@handle_empty_array("keypoints")
 def mask_dropout_keypoints(keypoints: np.ndarray, dropout_mask: np.ndarray) -> np.ndarray:
     keep_indices = np.array([not dropout_mask[int(kp[1]), int(kp[0])] for kp in keypoints])
     return keypoints[keep_indices]

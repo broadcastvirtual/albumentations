@@ -7,22 +7,22 @@ from typing import Literal, TypeVar, Union
 import cv2
 import numpy as np
 from albucore.utils import MAX_VALUES_BY_DTYPE
+from numpy.typing import NDArray
 from typing_extensions import NotRequired, TypedDict
 
-ScalarType = Union[int, float]
 ColorType = Union[float, Sequence[float]]
 
-NumericType = TypeVar("NumericType", float, int)
+Number = TypeVar("Number", float, int)
+
+ScalarType = Union[float, int]
 
 ScaleIntType = Union[int, tuple[int, int]]
 ScaleFloatType = Union[float, tuple[float, float]]
 
 ScaleType = Union[ScaleIntType, ScaleFloatType]
 
-NumType = Union[ScalarType, np.ndarray]
-
-IntNumType = Union[np.integer, np.ndarray]
-FloatNumType = Union[np.floating, np.ndarray]
+IntNumType = Union[np.integer, NDArray[np.integer]]
+FloatNumType = Union[np.floating, NDArray[np.floating]]
 
 ImageMode = Literal["cv", "pil"]
 SpatterMode = Literal["rain", "mud"]
@@ -103,3 +103,7 @@ NUM_BBOXES_COLUMNS_IN_ALBUMENTATIONS = 4
 
 
 PositionType = Literal["center", "top_left", "top_right", "bottom_left", "bottom_right", "random"]
+
+InpaintMethod = Literal["inpaint_telea", "inpaint_ns"]
+
+DropoutFillValue = Union[ColorType, Literal["random", "random_uniform"], InpaintMethod]

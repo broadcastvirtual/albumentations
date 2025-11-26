@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy as np
+from albucore import get_num_channels
 
-from albumentations.augmentations.dropout.functional import cutout, filter_bboxes_by_holes, filter_keypoints_in_holes
+from albumentations.augmentations.dropout.functional import (
+    cutout,
+    filter_bboxes_by_holes,
+    filter_keypoints_in_holes,
+)
 from albumentations.core.bbox_utils import BboxProcessor, denormalize_bboxes, normalize_bboxes
 from albumentations.core.keypoints_utils import KeypointsProcessor
 from albumentations.core.transforms_interface import BaseTransformInitSchema, DualTransform
-from albumentations.core.types import ColorType, Targets
+from albumentations.core.types import ColorType, DropoutFillValue, Targets
 
 
 class BaseDropout(DualTransform):
@@ -18,9 +23,9 @@ class BaseDropout(DualTransform):
     including applying cutouts to images and masks.
 
     Args:
-        fill_value (Union[int, float, list[int], list[float], str]): Value to fill dropped regions.
-            If "random", fills with random values.
-        mask_fill_value (Union[int, float, list[int], list[float]] | None): Value to fill
+        fill (ColorType | Literal["random", "random_uniform", "inpaint_telea", "inpaint_ns"]):
+            Value to fill dropped regions.
+        fill_mask (ColorType | None): Value to fill
             dropped regions in the mask. If None, the mask is not modified.
         p (float): Probability of applying the transform.
 
@@ -34,27 +39,33 @@ class BaseDropout(DualTransform):
     _targets = (Targets.IMAGE, Targets.MASK, Targets.BBOXES, Targets.KEYPOINTS)
 
     class InitSchema(BaseTransformInitSchema):
-        fill_value: ColorType | Literal["random"]
-        mask_fill_value: ColorType | None
+        fill: DropoutFillValue
+        fill_mask: ColorType | None
 
     def __init__(
         self,
-        fill_value: ColorType | Literal["random"],
-        mask_fill_value: ColorType | None,
+        fill: DropoutFillValue,
+        fill_mask: ColorType | None,
         p: float,
         always_apply: bool | None = None,
     ):
         super().__init__(p=p, always_apply=always_apply)
-        self.fill_value = fill_value
-        self.mask_fill_value = mask_fill_value
+        self.fill = fill
+        self.fill_mask = fill_mask
 
     def apply(self, img: np.ndarray, holes: np.ndarray, seed: int, **params: Any) -> np.ndarray:
-        return cutout(img, holes, self.fill_value, np.random.default_rng(seed))
+        if holes.size == 0:
+            return img
+        if self.fill in {"inpaint_telea", "inpaint_ns"}:
+            num_channels = get_num_channels(img)
+            if num_channels not in {1, 3}:
+                raise ValueError("Inpainting works only for 1 or 3 channel images")
+        return cutout(img, holes, self.fill, np.random.default_rng(seed))
 
     def apply_to_mask(self, mask: np.ndarray, holes: np.ndarray, seed: int, **params: Any) -> np.ndarray:
-        if self.mask_fill_value is None:
+        if self.fill_mask is None or holes.size == 0:
             return mask
-        return cutout(mask, holes, self.mask_fill_value, np.random.default_rng(seed))
+        return cutout(mask, holes, self.fill_mask, np.random.default_rng(seed))
 
     def apply_to_bboxes(
         self,
@@ -62,6 +73,8 @@ class BaseDropout(DualTransform):
         holes: np.ndarray,
         **params: Any,
     ) -> np.ndarray:
+        if holes.size == 0:
+            return bboxes
         processor = cast(BboxProcessor, self.get_processor("bboxes"))
         if processor is None:
             return bboxes
@@ -87,6 +100,8 @@ class BaseDropout(DualTransform):
         holes: np.ndarray,
         **params: Any,
     ) -> np.ndarray:
+        if holes.size == 0:
+            return keypoints
         processor = cast(KeypointsProcessor, self.get_processor("keypoints"))
 
         if processor is None or not processor.params.remove_invisible:
@@ -112,4 +127,4 @@ class BaseDropout(DualTransform):
         Returns:
             tuple: Names of the arguments.
         """
-        return ("fill_value", "mask_fill_value")
+        return "fill", "fill_mask"

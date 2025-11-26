@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Annotated, overload
 
 import cv2
 from pydantic import Field
 from pydantic.functional_validators import AfterValidator
 
-from albumentations.core.types import NumericType, ScalarType, ScaleFloatType, ScaleIntType, ScaleType
+from albumentations.core.types import Number, ScaleFloatType, ScaleIntType, ScaleType
 from albumentations.core.utils import to_tuple
 
 valid_interpolations = {
@@ -46,7 +47,7 @@ def check_valid_border_modes(value: int) -> int:
     return value
 
 
-def nondecreasing(value: tuple[NumericType, NumericType]) -> tuple[NumericType, NumericType]:
+def nondecreasing(value: tuple[Number, Number]) -> tuple[Number, Number]:
     if not value[0] <= value[1]:
         raise ValueError(f"First value should be less than the second value, got {value} instead")
     return value
@@ -96,13 +97,13 @@ def convert_to_1plus_range(value: ScaleType) -> tuple[float, float]:
     return to_tuple(value, low=1)
 
 
-def check_1plus(value: tuple[NumericType, NumericType]) -> tuple[NumericType, NumericType]:
+def check_1plus(value: tuple[Number, Number]) -> tuple[Number, Number]:
     if any(x < 1 for x in value):
         raise ValueError(f"All values should be >= 1, got {value} instead")
     return value
 
 
-def check_0plus(value: tuple[NumericType, NumericType]) -> tuple[NumericType, NumericType]:
+def check_0plus(value: tuple[Number, Number]) -> tuple[Number, Number]:
     if any(x < 0 for x in value):
         raise ValueError(f"All values should be >= 0, got {value} instead")
     return value
@@ -117,7 +118,7 @@ OnePlusIntRangeType = Annotated[
 ]
 
 OnePlusIntNonDecreasingRangeType = Annotated[
-    tuple[ScalarType, ScalarType],
+    tuple[Number, Number],
     AfterValidator(check_1plus),
     AfterValidator(nondecreasing),
     AfterValidator(float2int),
@@ -128,8 +129,8 @@ def convert_to_0plus_range(value: ScaleType) -> tuple[float, float]:
     return to_tuple(value, low=0)
 
 
-def check_01(value: tuple[NumericType, NumericType]) -> tuple[NumericType, NumericType]:
-    if not all(0 <= x <= 1 for x in value):
+def check_01(value: tuple[Number, Number]) -> tuple[Number, Number]:
+    if not all(0.0 <= x <= 1.0 for x in value):
         raise ValueError(f"All values should be in [0, 1], got {value} instead")
     return value
 
@@ -144,3 +145,32 @@ ZeroOneRangeType = Annotated[
 
 def repeat_if_scalar(value: ScaleType) -> tuple[float, float]:
     return (value, value) if isinstance(value, (int, float)) else value
+
+
+def check_range_bounds(
+    min_val: Number,
+    max_val: Number | None = None,
+) -> Callable[[tuple[Number, Number]], tuple[Number, Number]]:
+    """Validates that both values in a tuple are within specified bounds.
+
+    Args:
+        min_val: Minimum allowed value (inclusive)
+        max_val: Maximum allowed value (inclusive). If None, only lower bound is checked.
+
+    Returns:
+        Validator function that checks if both values in tuple are within bounds.
+        If max_val is None, only checks that values are >= min_val.
+
+    Raises:
+        ValueError: If any value in tuple is outside the allowed range
+    """
+
+    def validator(value: tuple[Number, Number]) -> tuple[Number, Number]:
+        if max_val is None:
+            if not (value[0] >= min_val and value[1] >= min_val):
+                raise ValueError(f"All values in {value} must be >= {min_val}")
+        elif not (min_val <= value[0] <= max_val and min_val <= value[1] <= max_val):
+            raise ValueError(f"All values in {value} must be in range [{min_val}, {max_val}]")
+        return value
+
+    return validator

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any, Literal
 from warnings import warn
@@ -25,6 +24,7 @@ from albucore import (
     multiply_add,
     multiply_by_constant,
     normalize_per_image,
+    power,
     preserve_channel_dim,
     sz_lut,
     to_float,
@@ -50,9 +50,9 @@ from albumentations.core.types import (
 
 __all__ = [
     "add_fog",
+    "add_gravel",
     "add_rain",
     "add_shadow",
-    "add_gravel",
     "add_snow_bleach",
     "add_snow_texture",
     "add_sun_flare_overlay",
@@ -61,12 +61,14 @@ __all__ = [
     "adjust_contrast_torchvision",
     "adjust_hue_torchvision",
     "adjust_saturation_torchvision",
-    "brightness_contrast_adjust",
     "channel_shuffle",
+    "chromatic_aberration",
     "clahe",
     "convolve",
+    "dilate",
     "downscale",
     "equalize",
+    "erode",
     "fancy_pca",
     "gamma_transform",
     "image_compression",
@@ -79,19 +81,19 @@ __all__ = [
     "shift_hsv",
     "solarize",
     "superpixels",
-    "swap_tiles_on_image",
     "to_gray",
     "unsharp_mask",
-    "chromatic_aberration",
-    "erode",
-    "dilate",
-    "generate_approx_gaussian_noise",
 ]
 
 
 @uint8_io
 @preserve_channel_dim
-def shift_hsv(img: np.ndarray, hue_shift: float, sat_shift: float, val_shift: float) -> np.ndarray:
+def shift_hsv(
+    img: np.ndarray,
+    hue_shift: float,
+    sat_shift: float,
+    val_shift: float,
+) -> np.ndarray:
     if hue_shift == 0 and sat_shift == 0 and val_shift == 0:
         return img
 
@@ -117,10 +119,10 @@ def shift_hsv(img: np.ndarray, hue_shift: float, sat_shift: float, val_shift: fl
         hue = sz_lut(hue, lut_hue, inplace=False)
 
     if sat_shift != 0:
-        sat = add_constant(sat, sat_shift)
+        sat = add_constant(sat, sat_shift, inplace=True)
 
     if val_shift != 0:
-        val = add_constant(val, val_shift)
+        val = add_constant(val, val_shift, inplace=True)
 
     img = cv2.merge((hue, sat, val))
     img = cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
@@ -129,27 +131,34 @@ def shift_hsv(img: np.ndarray, hue_shift: float, sat_shift: float, val_shift: fl
 
 
 @clipped
-def solarize(img: np.ndarray, threshold: int) -> np.ndarray:
+def solarize(img: np.ndarray, threshold: float) -> np.ndarray:
     """Invert all pixel values above a threshold.
 
     Args:
-        img: The image to solarize.
-        threshold: All pixels above this grayscale level are inverted.
+        img: The image to solarize. Can be uint8 or float32.
+        threshold: Normalized threshold value in range [0, 1].
+            For uint8 images: pixels above threshold * 255 are inverted
+            For float32 images: pixels above threshold are inverted
 
     Returns:
         Solarized image.
 
+    Note:
+        The threshold is normalized to [0, 1] range for both uint8 and float32 images.
+        For uint8 images, the threshold is internally scaled by 255.
     """
     dtype = img.dtype
     max_val = MAX_VALUES_BY_DTYPE[dtype]
 
     if dtype == np.uint8:
-        lut = [(i if i < threshold else max_val - i) for i in range(int(max_val) + 1)]
+        lut = [(max_val - i if i >= threshold * max_val else i) for i in range(int(max_val) + 1)]
 
         prev_shape = img.shape
         img = sz_lut(img, np.array(lut, dtype=dtype), inplace=False)
 
-        return np.expand_dims(img, -1) if len(prev_shape) != len(img.shape) else img
+        return np.expand_dims(img, -1) if len(prev_shape) != img.ndim else img
+
+    img = img.copy()
 
     cond = img >= threshold
     img[cond] = max_val - img[cond]
@@ -158,12 +167,12 @@ def solarize(img: np.ndarray, threshold: int) -> np.ndarray:
 
 @uint8_io
 @clipped
-def posterize(img: np.ndarray, bits: Literal[0, 1, 2, 3, 4, 5, 6, 7, 8]) -> np.ndarray:
+def posterize(img: np.ndarray, bits: Literal[1, 2, 3, 4, 5, 6, 7, 8]) -> np.ndarray:
     """Reduce the number of bits for each color channel.
 
     Args:
         img: image to posterize.
-        bits: number of high bits. Must be in range [0, 8]
+        bits: number of high bits. Must be in range [1, 8]
 
     Returns:
         Image with reduced color channels.
@@ -172,8 +181,6 @@ def posterize(img: np.ndarray, bits: Literal[0, 1, 2, 3, 4, 5, 6, 7, 8]) -> np.n
     bits_array = np.uint8(bits)
 
     if not bits_array.shape or len(bits_array) == 1:
-        if bits_array == 0:
-            return np.zeros_like(img)
         if bits_array == EIGHT:
             return img
 
@@ -185,9 +192,7 @@ def posterize(img: np.ndarray, bits: Literal[0, 1, 2, 3, 4, 5, 6, 7, 8]) -> np.n
 
     result_img = np.empty_like(img)
     for i, channel_bits in enumerate(bits_array):
-        if channel_bits == 0:
-            result_img[..., i] = np.zeros_like(img[..., i])
-        elif channel_bits == EIGHT:
+        if channel_bits == EIGHT:
             result_img[..., i] = img[..., i].copy()
         else:
             lut = np.arange(0, 256, dtype=np.uint8)
@@ -247,10 +252,16 @@ def _equalize_cv(img: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
     return sz_lut(img, lut, inplace=True)
 
 
-def _check_preconditions(img: np.ndarray, mask: np.ndarray | None, by_channels: bool) -> None:
+def _check_preconditions(
+    img: np.ndarray,
+    mask: np.ndarray | None,
+    by_channels: bool,
+) -> None:
     if mask is not None:
         if is_rgb_image(mask) and is_grayscale_image(img):
-            raise ValueError(f"Wrong mask shape. Image shape: {img.shape}. Mask shape: {mask.shape}")
+            raise ValueError(
+                f"Wrong mask shape. Image shape: {img.shape}. Mask shape: {mask.shape}",
+            )
         if not by_channels and not is_grayscale_image(mask):
             msg = f"When by_channels=False only 1-channel mask supports. Mask shape: {mask.shape}"
             raise ValueError(msg)
@@ -352,17 +363,25 @@ def move_tone_curve(
     """
     t = np.linspace(0.0, 1.0, 256)
 
-    def evaluate_bez(t: np.ndarray, low_y: float | np.ndarray, high_y: float | np.ndarray) -> np.ndarray:
+    def evaluate_bez(
+        t: np.ndarray,
+        low_y: float | np.ndarray,
+        high_y: float | np.ndarray,
+    ) -> np.ndarray:
         one_minus_t = 1 - t
         return (3 * one_minus_t**2 * t * low_y + 3 * one_minus_t * t**2 * high_y + t**3) * 255
 
     num_channels = get_num_channels(img)
 
     if np.isscalar(low_y) and np.isscalar(high_y):
-        lut = clip(np.rint(evaluate_bez(t, low_y, high_y)), np.uint8)
+        lut = clip(np.rint(evaluate_bez(t, low_y, high_y)), np.uint8, inplace=False)
         return sz_lut(img, lut, inplace=False)
     if isinstance(low_y, np.ndarray) and isinstance(high_y, np.ndarray):
-        luts = clip(np.rint(evaluate_bez(t[:, np.newaxis], low_y, high_y).T), np.uint8)
+        luts = clip(
+            np.rint(evaluate_bez(t[:, np.newaxis], low_y, high_y).T),
+            np.uint8,
+            inplace=False,
+        )
         return cv2.merge(
             [sz_lut(img[:, :, i], np.ascontiguousarray(luts[i]), inplace=False) for i in range(num_channels)],
         )
@@ -373,13 +392,20 @@ def move_tone_curve(
 
 
 @clipped
-def linear_transformation_rgb(img: np.ndarray, transformation_matrix: np.ndarray) -> np.ndarray:
+def linear_transformation_rgb(
+    img: np.ndarray,
+    transformation_matrix: np.ndarray,
+) -> np.ndarray:
     return cv2.transform(img, transformation_matrix)
 
 
 @uint8_io
 @preserve_channel_dim
-def clahe(img: np.ndarray, clip_limit: float, tile_grid_size: tuple[int, int]) -> np.ndarray:
+def clahe(
+    img: np.ndarray,
+    clip_limit: float,
+    tile_grid_size: tuple[int, int],
+) -> np.ndarray:
     """Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to the input image.
 
     This function enhances the contrast of the input image using CLAHE. For color images,
@@ -432,20 +458,72 @@ def convolve(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
 
 @uint8_io
 @preserve_channel_dim
-def image_compression(img: np.ndarray, quality: int, image_type: Literal[".jpg", ".webp"]) -> np.ndarray:
-    if image_type == ".jpg":
-        quality_flag = cv2.IMWRITE_JPEG_QUALITY
-    elif image_type == ".webp":
-        quality_flag = cv2.IMWRITE_WEBP_QUALITY
-    else:
-        raise NotImplementedError("Only '.jpg' and '.webp' compression transforms are implemented. ")
+def image_compression(
+    img: np.ndarray,
+    quality: int,
+    image_type: Literal[".jpg", ".webp"],
+) -> np.ndarray:
+    """Apply compression to image.
 
-    _, encoded_img = cv2.imencode(image_type, img, (int(quality_flag), quality))
-    return cv2.imdecode(encoded_img, cv2.IMREAD_UNCHANGED)
+    Args:
+        img: Input image
+        quality: Compression quality (0-100)
+        image_type: Type of compression ('.jpg' or '.webp')
+
+    Returns:
+        Compressed image with same number of channels as input
+    """
+    quality_flag = cv2.IMWRITE_JPEG_QUALITY if image_type == ".jpg" else cv2.IMWRITE_WEBP_QUALITY
+
+    num_channels = get_num_channels(img)
+
+    if num_channels == 1:
+        # For grayscale, ensure we read back as single channel
+        _, encoded_img = cv2.imencode(image_type, img, (int(quality_flag), quality))
+        decoded = cv2.imdecode(encoded_img, cv2.IMREAD_GRAYSCALE)
+        return decoded[..., np.newaxis]  # Add channel dimension back
+
+    if num_channels == NUM_RGB_CHANNELS:
+        # Standard RGB image
+        _, encoded_img = cv2.imencode(image_type, img, (int(quality_flag), quality))
+        return cv2.imdecode(encoded_img, cv2.IMREAD_UNCHANGED)
+
+    # For 2,4 or more channels, we need to handle alpha/extra channels separately
+    if num_channels == 2:  # noqa: PLR2004
+        # For 2 channels, pad to 3 channels and take only first 2 after compression
+        padded = np.pad(img, ((0, 0), (0, 0), (0, 1)), mode="constant")
+        _, encoded_bgr = cv2.imencode(image_type, padded, (int(quality_flag), quality))
+        decoded_bgr = cv2.imdecode(encoded_bgr, cv2.IMREAD_UNCHANGED)
+        return decoded_bgr[..., :2]
+
+    # Process first 3 channels together
+    bgr = img[..., :NUM_RGB_CHANNELS]
+    _, encoded_bgr = cv2.imencode(image_type, bgr, (int(quality_flag), quality))
+    decoded_bgr = cv2.imdecode(encoded_bgr, cv2.IMREAD_UNCHANGED)
+
+    if num_channels > NUM_RGB_CHANNELS:
+        # Process additional channels one by one
+        extra_channels = []
+        for i in range(NUM_RGB_CHANNELS, num_channels):
+            channel = img[..., i]
+            _, encoded = cv2.imencode(image_type, channel, (int(quality_flag), quality))
+            decoded = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
+            if len(decoded.shape) == 2:  # noqa: PLR2004
+                decoded = decoded[..., np.newaxis]
+            extra_channels.append(decoded)
+
+        # Combine BGR with extra channels
+        return np.dstack([decoded_bgr, *extra_channels])
+
+    return decoded_bgr
 
 
 @uint8_io
-def add_snow_bleach(img: np.ndarray, snow_point: float, brightness_coeff: float) -> np.ndarray:
+def add_snow_bleach(
+    img: np.ndarray,
+    snow_point: float,
+    brightness_coeff: float,
+) -> np.ndarray:
     """Adds a simple snow effect to the image by bleaching out pixels.
 
     This function simulates a basic snow effect by increasing the brightness of pixels
@@ -502,7 +580,7 @@ def add_snow_bleach(img: np.ndarray, snow_point: float, brightness_coeff: float)
 
     image_hls[:, :, 1][image_hls[:, :, 1] < snow_point] *= brightness_coeff
 
-    image_hls[:, :, 1] = clip(image_hls[:, :, 1], np.uint8)
+    image_hls[:, :, 1] = clip(image_hls[:, :, 1], np.uint8, inplace=True)
 
     image_hls = np.array(image_hls, dtype=np.uint8)
 
@@ -596,7 +674,11 @@ def add_snow_texture(
     img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV).astype(np.float32)
 
     # Increase brightness
-    img_hsv[:, :, 2] = np.clip(img_hsv[:, :, 2] * (1 + brightness_coeff * snow_point), 0, max_value)
+    img_hsv[:, :, 2] = np.clip(
+        img_hsv[:, :, 2] * (1 + brightness_coeff * snow_point),
+        0,
+        max_value,
+    )
 
     # Generate snow texture
     snow_texture = cv2.GaussianBlur(snow_texture, (0, 0), sigmaX=1, sigmaY=1)
@@ -610,7 +692,9 @@ def add_snow_texture(
     snow_texture *= depth_effect
 
     # Apply snow texture
-    snow_layer = (np.dstack([snow_texture] * 3) * max_value * snow_point).astype(np.float32)
+    snow_layer = (np.dstack([snow_texture] * 3) * max_value * snow_point).astype(
+        np.float32,
+    )
 
     # Blend snow with original image
     img_with_snow = cv2.add(img_hsv, snow_layer)
@@ -618,7 +702,13 @@ def add_snow_texture(
     # Add a slight blue tint to simulate cool snow color
     blue_tint = np.full_like(img_with_snow, (0.6, 0.75, 1))  # Slight blue in HSV
 
-    img_with_snow = cv2.addWeighted(img_with_snow, 0.85, blue_tint, 0.15 * snow_point, 0)
+    img_with_snow = cv2.addWeighted(
+        img_with_snow,
+        0.85,
+        blue_tint,
+        0.15 * snow_point,
+        0,
+    )
 
     # Convert back to RGB
     img_with_snow = cv2.cvtColor(img_with_snow.astype(np.uint8), cv2.COLOR_HSV2RGB)
@@ -749,7 +839,7 @@ def add_fog(
 
     result = img * (1 - alpha) + fog_layer * alpha
 
-    return clip(result, np.uint8)
+    return clip(result, np.uint8, inplace=True)
 
 
 @uint8_io
@@ -941,8 +1031,18 @@ def add_sun_flare_physics_based(
 
     # Add chromatic aberration
     channels = list(cv2.split(flare_layer))
-    channels[0] = cv2.GaussianBlur(channels[0], (0, 0), sigmaX=3, sigmaY=3)  # Blue channel
-    channels[2] = cv2.GaussianBlur(channels[2], (0, 0), sigmaX=5, sigmaY=5)  # Red channel
+    channels[0] = cv2.GaussianBlur(
+        channels[0],
+        (0, 0),
+        sigmaX=3,
+        sigmaY=3,
+    )  # Blue channel
+    channels[2] = cv2.GaussianBlur(
+        channels[2],
+        (0, 0),
+        sigmaX=5,
+        sigmaY=5,
+    )  # Red channel
     flare_layer = cv2.merge(channels)
 
     # Blend the flare with the original image using screen blending
@@ -951,7 +1051,11 @@ def add_sun_flare_physics_based(
 
 @uint8_io
 @preserve_channel_dim
-def add_shadow(img: np.ndarray, vertices_list: list[np.ndarray], intensities: np.ndarray) -> np.ndarray:
+def add_shadow(
+    img: np.ndarray,
+    vertices_list: list[np.ndarray],
+    intensities: np.ndarray,
+) -> np.ndarray:
     """Add shadows to the image by reducing the intensity of the pixel values in specified regions.
 
     Args:
@@ -982,9 +1086,11 @@ def add_shadow(img: np.ndarray, vertices_list: list[np.ndarray], intensities: np
         # Apply shadow to the channels directly
         # It could be tempting to convert to HLS and apply the shadow to the L channel, but it creates artifacts
         shadowed_indices = mask[:, :, 0] == max_value
+        darkness = 1 - shadow_intensity
         img_shadowed[shadowed_indices] = clip(
-            img_shadowed[shadowed_indices] * shadow_intensity,
+            img_shadowed[shadowed_indices] * darkness,
             np.uint8,
+            inplace=True,
         )
 
     return img_shadowed
@@ -1022,21 +1128,6 @@ def gamma_transform(img: np.ndarray, gamma: float) -> np.ndarray:
     return np.power(img, gamma)
 
 
-def brightness_contrast_adjust(
-    img: np.ndarray,
-    alpha: float = 1,
-    beta: float = 0,
-    beta_by_max: bool = False,
-) -> np.ndarray:
-    if beta_by_max:
-        max_value = MAX_VALUES_BY_DTYPE[img.dtype]
-        value = beta * max_value
-    else:
-        value = beta * np.mean(img)
-
-    return multiply_add(img, alpha, value, inplace=False)
-
-
 @float32_io
 @clipped
 def iso_noise(
@@ -1067,14 +1158,24 @@ def iso_noise(
     hls = cv2.cvtColor(image, cv2.COLOR_RGB2HLS)
     _, stddev = cv2.meanStdDev(hls)
 
-    luminance_noise = random_generator.poisson(stddev[1] * intensity, size=hls.shape[:2])
-    color_noise = random_generator.normal(0, color_shift * intensity, size=hls.shape[:2])
+    luminance_noise = random_generator.poisson(
+        stddev[1] * intensity,
+        size=hls.shape[:2],
+    )
+    color_noise = random_generator.normal(
+        0,
+        color_shift * intensity,
+        size=hls.shape[:2],
+    )
 
     hls[..., 0] += color_noise
-    hls[..., 1] = add_array(hls[..., 1], luminance_noise * intensity * (1.0 - hls[..., 1]))
+    hls[..., 1] = add_array(
+        hls[..., 1],
+        luminance_noise * intensity * (1.0 - hls[..., 1]),
+    )
 
     noised_hls = cv2.cvtColor(hls, cv2.COLOR_HLS2RGB)
-    return np.clip(noised_hls, 0, 1)  # Ensure output is in [0, 1] range
+    return np.clip(noised_hls, 0, 1, out=noised_hls)  # Ensure output is in [0, 1] range
 
 
 def to_gray_weighted_average(img: np.ndarray) -> np.ndarray:
@@ -1267,7 +1368,14 @@ def to_gray_pca(img: np.ndarray) -> np.ndarray:
 def to_gray(
     img: np.ndarray,
     num_output_channels: int,
-    method: Literal["weighted_average", "from_lab", "desaturation", "average", "max", "pca"],
+    method: Literal[
+        "weighted_average",
+        "from_lab",
+        "desaturation",
+        "average",
+        "max",
+        "pca",
+    ],
 ) -> np.ndarray:
     if method == "weighted_average":
         result = to_gray_weighted_average(img)
@@ -1287,7 +1395,10 @@ def to_gray(
     return grayscale_to_multichannel(result, num_output_channels)
 
 
-def grayscale_to_multichannel(grayscale_image: np.ndarray, num_output_channels: int = 3) -> np.ndarray:
+def grayscale_to_multichannel(
+    grayscale_image: np.ndarray,
+    num_output_channels: int = 3,
+) -> np.ndarray:
     """Convert a grayscale image to a multi-channel image.
 
     This function takes a 2D grayscale image or a 3D image with a single channel
@@ -1300,14 +1411,16 @@ def grayscale_to_multichannel(grayscale_image: np.ndarray, num_output_channels: 
         num_output_channels (int, optional): Number of channels in the output image. Defaults to 3.
 
     Returns:
-        np.ndarray: Multi-channel image with shape (height, width, num_channels).
-
-    Note:
-        If the input is already a multi-channel image with the desired number of channels,
-        it will be returned unchanged.
+        np.ndarray: Multi-channel image with shape (height, width, num_channels)
     """
-    grayscale_image = grayscale_image.copy().squeeze()
-    return np.stack([grayscale_image] * num_output_channels, axis=-1)
+    # If output should be single channel, just squeeze and return
+    if num_output_channels == 1:
+        return grayscale_image
+
+    # For multi-channel output, squeeze and stack
+    squeezed = np.squeeze(grayscale_image)
+
+    return cv2.merge([squeezed] * num_output_channels)
 
 
 @preserve_channel_dim
@@ -1326,7 +1439,13 @@ def downscale(
     if need_cast:
         img = to_float(img)
 
-    downscaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=down_interpolation)
+    downscaled = cv2.resize(
+        img,
+        None,
+        fx=scale,
+        fy=scale,
+        interpolation=down_interpolation,
+    )
     upscaled = cv2.resize(downscaled, (width, height), interpolation=up_interpolation)
 
     return from_float(upscaled, target_dtype=np.uint8) if need_cast else upscaled
@@ -1334,32 +1453,6 @@ def downscale(
 
 def noop(input_obj: Any, **params: Any) -> Any:
     return input_obj
-
-
-def swap_tiles_on_image(image: np.ndarray, tiles: np.ndarray, mapping: list[int] | None = None) -> np.ndarray:
-    """Swap tiles on the image according to the new format.
-
-    Args:
-        image: Input image.
-        tiles: Array of tiles with each tile as [start_y, start_x, end_y, end_x].
-        mapping: list of new tile indices.
-
-    Returns:
-        np.ndarray: Output image with tiles swapped according to the random shuffle.
-    """
-    # If no tiles are provided, return a copy of the original image
-    if tiles.size == 0 or mapping is None:
-        return image.copy()
-
-    # Create a copy of the image to retain original for reference
-    new_image = np.empty_like(image)
-    for num, new_index in enumerate(mapping):
-        start_y, start_x, end_y, end_x = tiles[new_index]
-        start_y_orig, start_x_orig, end_y_orig, end_x_orig = tiles[num]
-        # Assign the corresponding tile from the original image to the new image
-        new_image[start_y:end_y, start_x:end_x] = image[start_y_orig:end_y_orig, start_x_orig:end_x_orig]
-
-    return new_image
 
 
 @float32_io
@@ -1423,7 +1516,10 @@ def fancy_pca(img: np.ndarray, alpha_vector: np.ndarray) -> np.ndarray:
         eig_vecs = eig_vecs[:, sort_perm]
 
         # Create noise vector
-        noise = np.dot(np.dot(eig_vecs, np.diag(alpha_vector * eig_vals)), img_centered.T).T
+        noise = np.dot(
+            np.dot(eig_vecs, np.diag(alpha_vector * eig_vals)),
+            img_centered.T,
+        ).T
 
     # Add noise to the image
     img_pca = img_reshaped + noise
@@ -1432,7 +1528,7 @@ def fancy_pca(img: np.ndarray, alpha_vector: np.ndarray) -> np.ndarray:
     img_pca = img_pca.reshape(orig_shape)
 
     # Clip values to [0, 1] range
-    return np.clip(img_pca, 0, 1)
+    return np.clip(img_pca, 0, 1, out=img_pca)
 
 
 @preserve_channel_dim
@@ -1462,7 +1558,11 @@ def adjust_contrast_torchvision(img: np.ndarray, factor: float) -> np.ndarray:
 
 @clipped
 @preserve_channel_dim
-def adjust_saturation_torchvision(img: np.ndarray, factor: float, gamma: float = 0) -> np.ndarray:
+def adjust_saturation_torchvision(
+    img: np.ndarray,
+    factor: float,
+    gamma: float = 0,
+) -> np.ndarray:
     if factor == 1 or is_grayscale_image(img):
         return img
 
@@ -1570,7 +1670,11 @@ def unsharp_mask(
     alpha: float = 0.2,
     threshold: int = 10,
 ) -> np.ndarray:
-    blur_fn = maybe_process_in_chunks(cv2.GaussianBlur, ksize=(ksize, ksize), sigmaX=sigma)
+    blur_fn = maybe_process_in_chunks(
+        cv2.GaussianBlur,
+        ksize=(ksize, ksize),
+        sigmaX=sigma,
+    )
 
     if image.ndim == NUM_MULTI_CHANNEL_DIMENSIONS and get_num_channels(image) == 1:
         image = np.squeeze(image, axis=-1)
@@ -1584,15 +1688,23 @@ def unsharp_mask(
 
     sharp = image + alpha * residual
     # Avoid color noise artefacts.
-    sharp = np.clip(sharp, 0, 1)
+    sharp = np.clip(sharp, 0, 1, out=sharp)
 
     soft_mask = blur_fn(mask)
 
-    return add(multiply(sharp, soft_mask), multiply(image, 1 - soft_mask))
+    return add_array(
+        multiply(sharp, soft_mask),
+        multiply(image, 1 - soft_mask),
+        inplace=True,
+    )
 
 
 @preserve_channel_dim
-def pixel_dropout(image: np.ndarray, drop_mask: np.ndarray, drop_value: float | Sequence[float]) -> np.ndarray:
+def pixel_dropout(
+    image: np.ndarray,
+    drop_mask: np.ndarray,
+    drop_value: float | Sequence[float],
+) -> np.ndarray:
     if isinstance(drop_value, (int, float)) and drop_value == 0:
         drop_values = np.zeros_like(image)
     else:
@@ -1629,46 +1741,6 @@ def spatter(
     raise ValueError(f"Unsupported spatter mode: {mode}")
 
 
-def create_shape_groups(tiles: np.ndarray) -> dict[tuple[int, int], list[int]]:
-    """Groups tiles by their shape and stores the indices for each shape."""
-    shape_groups = defaultdict(list)
-    for index, (start_y, start_x, end_y, end_x) in enumerate(tiles):
-        shape = (end_y - start_y, end_x - start_x)
-        shape_groups[shape].append(index)
-    return shape_groups
-
-
-def shuffle_tiles_within_shape_groups(
-    shape_groups: dict[tuple[int, int], list[int]],
-    random_generator: np.random.Generator,
-) -> list[int]:
-    """Shuffles indices within each group of similar shapes and creates a list where each
-    index points to the index of the tile it should be mapped to.
-
-    Args:
-        shape_groups (dict[tuple[int, int], list[int]]): Groups of tile indices categorized by shape.
-        random_generator (np.random.Generator): The random generator to use for shuffling the indices.
-            If None, a new random generator will be used.
-
-    Returns:
-        list[int]: A list where each index is mapped to the new index of the tile after shuffling.
-    """
-    # Initialize the output list with the same size as the total number of tiles, filled with -1
-    num_tiles = sum(len(indices) for indices in shape_groups.values())
-    mapping = [-1] * num_tiles
-
-    # Prepare the random number generator
-
-    for indices in shape_groups.values():
-        shuffled_indices = indices.copy()
-        random_generator.shuffle(shuffled_indices)
-
-        for old, new in zip(indices, shuffled_indices):
-            mapping[old] = new
-
-    return mapping
-
-
 @uint8_io
 @clipped
 def chromatic_aberration(
@@ -1689,8 +1761,14 @@ def chromatic_aberration(
     camera_mat[1, 2] = height / 2.0
 
     # Build distortion coefficients
-    distortion_coeffs_red = np.array([primary_distortion_red, secondary_distortion_red, 0, 0], dtype=np.float32)
-    distortion_coeffs_blue = np.array([primary_distortion_blue, secondary_distortion_blue, 0, 0], dtype=np.float32)
+    distortion_coeffs_red = np.array(
+        [primary_distortion_red, secondary_distortion_red, 0, 0],
+        dtype=np.float32,
+    )
+    distortion_coeffs_blue = np.array(
+        [primary_distortion_blue, secondary_distortion_blue, 0, 0],
+        dtype=np.float32,
+    )
 
     # Distort the red and blue channels
     red_distorted = _distort_channel(
@@ -1748,7 +1826,11 @@ def dilate(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return cv2.dilate(img, kernel, iterations=1)
 
 
-def morphology(img: np.ndarray, kernel: np.ndarray, operation: Literal["dilation", "erosion"]) -> np.ndarray:
+def morphology(
+    img: np.ndarray,
+    kernel: np.ndarray,
+    operation: Literal["dilation", "erosion"],
+) -> np.ndarray:
     if operation == "dilation":
         return dilate(img, kernel)
     if operation == "erosion":
@@ -1757,7 +1839,7 @@ def morphology(img: np.ndarray, kernel: np.ndarray, operation: Literal["dilation
     raise ValueError(f"Unsupported operation: {operation}")
 
 
-@handle_empty_array
+@handle_empty_array("bboxes")
 def bboxes_morphology(
     bboxes: np.ndarray,
     kernel: np.ndarray,
@@ -1828,7 +1910,11 @@ PLANCKIAN_COEFFS: dict[str, dict[int, list[float]]] = {
 
 
 @clipped
-def planckian_jitter(img: np.ndarray, temperature: int, mode: Literal["blackbody", "cied"]) -> np.ndarray:
+def planckian_jitter(
+    img: np.ndarray,
+    temperature: int,
+    mode: Literal["blackbody", "cied"],
+) -> np.ndarray:
     img = img.copy()
     # Get the min and max temperatures for the given mode
     min_temp = min(PLANCKIAN_COEFFS[mode].keys())
@@ -1839,8 +1925,14 @@ def planckian_jitter(img: np.ndarray, temperature: int, mode: Literal["blackbody
 
     # Linearly interpolate between 2 closest temperatures
     step = 500
-    t_left = max((temperature // step) * step, min_temp)  # Ensure t_left doesn't go below min_temp
-    t_right = min((temperature // step + 1) * step, max_temp)  # Ensure t_right doesn't exceed max_temp
+    t_left = max(
+        (temperature // step) * step,
+        min_temp,
+    )  # Ensure t_left doesn't go below min_temp
+    t_right = min(
+        (temperature // step + 1) * step,
+        max_temp,
+    )  # Ensure t_right doesn't exceed max_temp
 
     # Handle the case where temperature is at or near min_temp or max_temp
     if t_left == t_right:
@@ -1848,115 +1940,35 @@ def planckian_jitter(img: np.ndarray, temperature: int, mode: Literal["blackbody
     else:
         w_right = (temperature - t_left) / (t_right - t_left)
         w_left = 1 - w_right
-        coeffs = w_left * np.array(PLANCKIAN_COEFFS[mode][t_left]) + w_right * np.array(PLANCKIAN_COEFFS[mode][t_right])
+        coeffs = w_left * np.array(PLANCKIAN_COEFFS[mode][t_left]) + w_right * np.array(
+            PLANCKIAN_COEFFS[mode][t_right],
+        )
 
-    img[:, :, 0] = multiply_by_constant(img[:, :, 0], coeffs[0] / coeffs[1], inplace=True)
-    img[:, :, 2] = multiply_by_constant(img[:, :, 2], coeffs[2] / coeffs[1], inplace=True)
+    img[:, :, 0] = multiply_by_constant(
+        img[:, :, 0],
+        coeffs[0] / coeffs[1],
+        inplace=True,
+    )
+    img[:, :, 2] = multiply_by_constant(
+        img[:, :, 2],
+        coeffs[2] / coeffs[1],
+        inplace=True,
+    )
 
     return img
 
 
-def generate_approx_gaussian_noise(
-    shape: tuple[int, ...],
-    mean: float,
-    sigma: float,
-    scale: float,
-    random_generator: np.random.Generator,
-) -> np.ndarray:
-    # Determine the low-resolution shape
-    downscaled_height = int(shape[0] * scale)
-    downsaled_width = int(shape[1] * scale)
-
-    if len(shape) == NUM_MULTI_CHANNEL_DIMENSIONS:
-        low_res_noise = random_generator.normal(mean, sigma, (downscaled_height, downsaled_width, shape[-1]))
-    else:
-        low_res_noise = random_generator.normal(mean, sigma, (downscaled_height, downsaled_width))
-
-    # Upsample the noise to the original shape using OpenCV
-    result = cv2.resize(low_res_noise, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
-    return result.reshape(shape)
-
-
 @clipped
 def add_noise(img: np.ndarray, noise: np.ndarray) -> np.ndarray:
-    return add_array(img, noise)
+    return add(img, noise, inplace=False)
 
 
-def swap_tiles_on_keypoints(
-    keypoints: np.ndarray,
-    tiles: np.ndarray,
-    mapping: np.ndarray,
+def slic(
+    image: np.ndarray,
+    n_segments: int,
+    compactness: float = 10.0,
+    max_iterations: int = 10,
 ) -> np.ndarray:
-    """Swap the positions of keypoints based on a tile mapping.
-
-    This function takes a set of keypoints and repositions them according to a mapping of tile swaps.
-    Keypoints are moved from their original tiles to new positions in the swapped tiles.
-
-    Args:
-        keypoints (np.ndarray): A 2D numpy array of shape (N, 2) where N is the number of keypoints.
-                                Each row represents a keypoint's (x, y) coordinates.
-        tiles (np.ndarray): A 2D numpy array of shape (M, 4) where M is the number of tiles.
-                            Each row represents a tile's (start_y, start_x, end_y, end_x) coordinates.
-        mapping (np.ndarray): A 1D numpy array of shape (M,) where M is the number of tiles.
-                              Each element i contains the index of the tile that tile i should be swapped with.
-
-    Returns:
-        np.ndarray: A 2D numpy array of the same shape as the input keypoints, containing the new positions
-                    of the keypoints after the tile swap.
-
-    Raises:
-        RuntimeWarning: If any keypoint is not found within any tile.
-
-    Notes:
-        - Keypoints that do not fall within any tile will remain unchanged.
-        - The function assumes that the tiles do not overlap and cover the entire image space.
-    """
-    if not keypoints.size:
-        return keypoints
-
-    # Broadcast keypoints and tiles for vectorized comparison
-    kp_x = keypoints[:, 0][:, np.newaxis]  # Shape: (num_keypoints, 1)
-    kp_y = keypoints[:, 1][:, np.newaxis]  # Shape: (num_keypoints, 1)
-
-    start_y, start_x, end_y, end_x = tiles.T  # Each shape: (num_tiles,)
-
-    # Check if each keypoint is inside each tile
-    in_tile = (kp_y >= start_y) & (kp_y < end_y) & (kp_x >= start_x) & (kp_x < end_x)
-
-    # Find which tile each keypoint belongs to
-    tile_indices = np.argmax(in_tile, axis=1)
-
-    # Check if any keypoint is not in any tile
-    not_in_any_tile = ~np.any(in_tile, axis=1)
-    if np.any(not_in_any_tile):
-        warn(
-            "Some keypoints are not in any tile. They will be returned unchanged. This is unexpected and should be "
-            "investigated.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-    # Get the new tile indices
-    new_tile_indices = np.array(mapping)[tile_indices]
-
-    # Calculate the offsets
-    old_start_x = tiles[tile_indices, 1]
-    old_start_y = tiles[tile_indices, 0]
-    new_start_x = tiles[new_tile_indices, 1]
-    new_start_y = tiles[new_tile_indices, 0]
-
-    # Apply the transformation
-    new_keypoints = keypoints.copy()
-    new_keypoints[:, 0] = (keypoints[:, 0] - old_start_x) + new_start_x
-    new_keypoints[:, 1] = (keypoints[:, 1] - old_start_y) + new_start_y
-
-    # Keep original coordinates for keypoints not in any tile
-    new_keypoints[not_in_any_tile] = keypoints[not_in_any_tile]
-
-    return new_keypoints
-
-
-def slic(image: np.ndarray, n_segments: int, compactness: float = 10.0, max_iterations: int = 10) -> np.ndarray:
     """Simple Linear Iterative Clustering (SLIC) superpixel segmentation using OpenCV and NumPy.
 
     Args:
@@ -1981,7 +1993,9 @@ def slic(image: np.ndarray, n_segments: int, compactness: float = 10.0, max_iter
     grid_step = int((num_pixels / n_segments) ** 0.5)
     x_range = np.arange(grid_step // 2, width, grid_step)
     y_range = np.arange(grid_step // 2, height, grid_step)
-    centers = np.array([(x, y) for y in y_range for x in x_range if x < width and y < height])
+    centers = np.array(
+        [(x, y) for y in y_range for x in x_range if x < width and y < height],
+    )
 
     # Initialize labels and distances
     labels = -1 * np.ones((height, width), dtype=np.int32)
@@ -2016,3 +2030,758 @@ def slic(image: np.ndarray, n_segments: int, compactness: float = 10.0, max_iter
                 centers[i] = np.mean(np.argwhere(mask), axis=0)[::-1]
 
     return labels
+
+
+@preserve_channel_dim
+@float32_io
+def shot_noise(
+    img: np.ndarray,
+    scale: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Apply shot noise to the image by simulating photon counting in linear light space.
+
+    This function simulates photon shot noise, which occurs due to the quantum nature of light.
+    The process:
+    1. Converts image to linear light space (removes gamma correction)
+    2. Scales pixel values to represent expected photon counts
+    3. Samples actual photon counts from Poisson distribution
+    4. Converts back to display space (reapplies gamma)
+
+    The simulation is performed in linear light space because photon shot noise is a physical
+    process that occurs before gamma correction is applied by cameras/displays.
+
+    Args:
+        img: Input image in range [0, 1]. Can be single or multi-channel.
+        scale: Reciprocal of the number of photons (noise intensity).
+            - Larger values = fewer photons = more noise
+            - Smaller values = more photons = less noise
+            For example:
+            - scale = 0.1 simulates ~100 photons per unit intensity
+            - scale = 10.0 simulates ~0.1 photons per unit intensity
+        random_generator: NumPy random generator for Poisson sampling
+
+    Returns:
+        Image with shot noise applied, same shape and range [0, 1] as input.
+        The noise characteristics will follow Poisson statistics in linear space:
+        - Variance equals mean in linear space
+        - More noise in brighter regions (but less relative noise)
+        - Less noise in darker regions (but more relative noise)
+
+    Note:
+        - Uses gamma value of 2.2 for linear/display space conversion
+        - Adds small constant (1e-6) to avoid issues with zero values
+        - Clips final values to [0, 1] range
+        - Operates on the image in-place for memory efficiency
+        - Preserves float32 precision throughout calculations
+
+    References:
+        - https://en.wikipedia.org/wiki/Shot_noise
+        - https://en.wikipedia.org/wiki/Gamma_correction
+    """
+    # Apply inverse gamma correction to work in linear space
+    img_linear = cv2.pow(img, 2.2)
+
+    # Scale image values and add small constant to avoid zero values
+    scaled_img = (img_linear + scale * 1e-6) / scale
+
+    # Generate Poisson noise
+    noisy_img = multiply_by_constant(
+        random_generator.poisson(scaled_img).astype(np.float32),
+        scale,
+        inplace=True,
+    )
+
+    # Scale back and apply gamma correction
+    return power(np.clip(noisy_img, 0, 1, out=noisy_img), 1 / 2.2)
+
+
+def get_safe_brightness_contrast_params(
+    alpha: float,
+    beta: float,
+    max_value: float,
+) -> tuple[float, float]:
+    """Calculate safe alpha and beta values to prevent overflow/underflow.
+
+    For any pixel value x, we want: 0 <= alpha * x + beta <= max_value
+
+    Args:
+        alpha: Contrast factor (1 means no change)
+        beta: Brightness offset
+        max_value: Maximum allowed value (255 for uint8, 1 for float32)
+
+    Returns:
+        tuple[float, float]: Safe (alpha, beta) values that prevent overflow/underflow
+    """
+    if alpha > 0:
+        # For x = max_value: alpha * max_value + beta <= max_value
+        # For x = 0: beta >= 0
+        safe_beta = np.clip(beta, 0, max_value)
+        # From alpha * max_value + safe_beta <= max_value
+        safe_alpha = min(alpha, (max_value - safe_beta) / max_value)
+    else:
+        # For x = 0: beta <= max_value
+        # For x = max_value: alpha * max_value + beta >= 0
+        safe_beta = min(beta, max_value)
+        # From alpha * max_value + safe_beta >= 0
+        safe_alpha = max(alpha, -safe_beta / max_value)
+
+    return safe_alpha, safe_beta
+
+
+def generate_noise(
+    noise_type: Literal["uniform", "gaussian", "laplace", "beta"],
+    spatial_mode: Literal["constant", "per_pixel", "shared"],
+    shape: tuple[int, ...],
+    params: dict[str, Any] | None,
+    max_value: float,
+    approximation: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    if params is None:
+        return np.zeros(shape, dtype=np.float32)
+    """Generate noise with optional approximation for speed."""
+    if spatial_mode == "constant":
+        return generate_constant_noise(
+            noise_type,
+            shape,
+            params,
+            max_value,
+            random_generator,
+        )
+
+    if approximation == 1.0:
+        if spatial_mode == "shared":
+            return generate_shared_noise(
+                noise_type,
+                shape,
+                params,
+                max_value,
+                random_generator,
+            )
+        return generate_per_pixel_noise(
+            noise_type,
+            shape,
+            params,
+            max_value,
+            random_generator,
+        )
+
+    # Calculate reduced size for noise generation
+    height, width = shape[:2]
+    reduced_height = max(1, int(height * approximation))
+    reduced_width = max(1, int(width * approximation))
+    reduced_shape = (reduced_height, reduced_width) + shape[2:]
+
+    # Generate noise at reduced resolution
+    if spatial_mode == "shared":
+        noise = generate_shared_noise(
+            noise_type,
+            reduced_shape,
+            params,
+            max_value,
+            random_generator,
+        )
+    else:  # per_pixel
+        noise = generate_per_pixel_noise(
+            noise_type,
+            reduced_shape,
+            params,
+            max_value,
+            random_generator,
+        )
+
+    # Resize noise to original size using existing resize function
+    return fgeometric.resize(noise, (height, width), interpolation=cv2.INTER_LINEAR)
+
+
+def generate_constant_noise(
+    noise_type: Literal["uniform", "gaussian", "laplace", "beta"],
+    shape: tuple[int, ...],
+    params: dict[str, Any],
+    max_value: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Generate one value per channel."""
+    num_channels = shape[-1] if len(shape) > MONO_CHANNEL_DIMENSIONS else 1
+    return sample_noise(
+        noise_type,
+        (num_channels,),
+        params,
+        max_value,
+        random_generator,
+    )
+
+
+def generate_per_pixel_noise(
+    noise_type: Literal["uniform", "gaussian", "laplace", "beta"],
+    shape: tuple[int, ...],
+    params: dict[str, Any],
+    max_value: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Generate separate noise map for each channel."""
+    return sample_noise(noise_type, shape, params, max_value, random_generator)
+
+
+def sample_noise(
+    noise_type: Literal["uniform", "gaussian", "laplace", "beta"],
+    size: tuple[int, ...],
+    params: dict[str, Any],
+    max_value: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Sample from specific noise distribution."""
+    if noise_type == "uniform":
+        return sample_uniform(size, params, random_generator) * max_value
+    if noise_type == "gaussian":
+        return sample_gaussian(size, params, random_generator) * max_value
+    if noise_type == "laplace":
+        return sample_laplace(size, params, random_generator) * max_value
+    if noise_type == "beta":
+        return sample_beta(size, params, random_generator) * max_value
+
+    raise ValueError(f"Unknown noise type: {noise_type}")
+
+
+def sample_uniform(
+    size: tuple[int, ...],
+    params: dict[str, Any],
+    random_generator: np.random.Generator,
+) -> np.ndarray | float:
+    """Sample from uniform distribution.
+
+    Args:
+        size: Output shape. If length is 1, generates constant noise per channel.
+        params: Must contain 'ranges' key with list of (min, max) tuples.
+            If only one range is provided, it will be used for all channels.
+        random_generator: NumPy random generator instance
+
+    Returns:
+        Noise array of specified size. For single-channel constant mode,
+        returns scalar instead of array with shape (1,).
+    """
+    if len(size) == 1:  # constant mode
+        ranges = params["ranges"]
+        num_channels = size[0]
+
+        if len(ranges) == 1:
+            ranges = ranges * num_channels
+        elif len(ranges) < num_channels:
+            raise ValueError(
+                f"Not enough ranges provided. Expected {num_channels}, got {len(ranges)}",
+            )
+
+        return np.array(
+            [random_generator.uniform(low, high) for low, high in ranges[:num_channels]],
+        )
+
+    # use first range for spatial noise
+    low, high = params["ranges"][0]
+    return random_generator.uniform(low, high, size=size)
+
+
+def sample_gaussian(
+    size: tuple[int, ...],
+    params: dict[str, Any],
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Sample from Gaussian distribution."""
+    mean = random_generator.uniform(*params["mean_range"])
+    std = random_generator.uniform(*params["std_range"])
+    return random_generator.normal(mean, std, size=size)
+
+
+def sample_laplace(
+    size: tuple[int, ...],
+    params: dict[str, Any],
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Sample from Laplace distribution.
+
+    The Laplace distribution is also known as the double exponential distribution.
+    It has heavier tails than the Gaussian distribution.
+    """
+    loc = random_generator.uniform(*params["mean_range"])
+    scale = random_generator.uniform(*params["scale_range"])
+    return random_generator.laplace(loc=loc, scale=scale, size=size)
+
+
+def sample_beta(
+    size: tuple[int, ...],
+    params: dict[str, Any],
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Sample from Beta distribution.
+
+    The Beta distribution is bounded by [0, 1] and then scaled and shifted to [-scale, scale].
+    Alpha and beta parameters control the shape of the distribution.
+    """
+    alpha = random_generator.uniform(*params["alpha_range"])
+    beta = random_generator.uniform(*params["beta_range"])
+    scale = random_generator.uniform(*params["scale_range"])
+
+    # Sample from Beta[0,1] and transform to [-scale,scale]
+    samples = random_generator.beta(alpha, beta, size=size)
+    return (2 * samples - 1) * scale
+
+
+def generate_shared_noise(
+    noise_type: Literal["uniform", "gaussian", "laplace", "beta"],
+    shape: tuple[int, ...],
+    params: dict[str, Any],
+    max_value: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Generate one noise map and broadcast to all channels.
+
+    Args:
+        noise_type: Type of noise distribution to use
+        shape: Shape of the input image (H, W) or (H, W, C)
+        params: Parameters for the noise distribution
+        max_value: Maximum value for the noise distribution
+        random_generator: NumPy random generator instance
+
+    Returns:
+        Noise array of shape (H, W) or (H, W, C) where the same noise
+        pattern is shared across all channels
+    """
+    # Generate noise for (H, W)
+    height, width = shape[:2]
+    noise_map = sample_noise(
+        noise_type,
+        (height, width),
+        params,
+        max_value,
+        random_generator,
+    )
+
+    # If input is multichannel, broadcast noise to all channels
+    if len(shape) > MONO_CHANNEL_DIMENSIONS:
+        return np.broadcast_to(noise_map[..., None], shape)
+    return noise_map
+
+
+@clipped
+@preserve_channel_dim
+def sharpen_gaussian(
+    img: np.ndarray,
+    alpha: float,
+    kernel_size: int,
+    sigma: float,
+) -> np.ndarray:
+    """Sharpen image using Gaussian blur."""
+    blurred = cv2.GaussianBlur(
+        img,
+        ksize=(kernel_size, kernel_size),
+        sigmaX=sigma,
+        sigmaY=sigma,
+    )
+    # Unsharp mask formula: original + alpha * (original - blurred)
+    # This is equivalent to: original * (1 + alpha) - alpha * blurred
+    return img + alpha * (img - blurred)
+
+
+def apply_salt_and_pepper(
+    img: np.ndarray,
+    salt_mask: np.ndarray,
+    pepper_mask: np.ndarray,
+) -> np.ndarray:
+    """Apply salt and pepper noise to image using pre-computed masks.
+
+    Args:
+        img: Input image
+        salt_mask: Boolean mask for salt (white) noise
+        pepper_mask: Boolean mask for pepper (black) noise
+
+    Returns:
+        Image with applied salt and pepper noise
+    """
+    result = img.copy()
+
+    result[salt_mask] = MAX_VALUES_BY_DTYPE[img.dtype]
+    result[pepper_mask] = 0
+    return result
+
+
+def get_grid_size(size: int, target_shape: tuple[int, int]) -> int:
+    """Round up to nearest power of 2."""
+    return 2 ** int(np.ceil(np.log2(max(size, *target_shape))))
+
+
+def random_offset(
+    current_size: int,
+    total_size: int,
+    roughness: float,
+    random_generator: np.random.Generator,
+) -> float:
+    """Calculate random offset based on current grid size."""
+    return (random_generator.random() - 0.5) * (current_size / total_size) ** (roughness / 2)
+
+
+def initialize_grid(
+    grid_size: int,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Initialize grid with random corners."""
+    pattern = np.zeros((grid_size + 1, grid_size + 1), dtype=np.float32)
+    for corner in [(0, 0), (0, -1), (-1, 0), (-1, -1)]:
+        pattern[corner] = random_generator.random()
+    return pattern
+
+
+def square_step(
+    pattern: np.ndarray,
+    y: int,
+    x: int,
+    step: int,
+    grid_size: int,
+    roughness: float,
+    random_generator: np.random.Generator,
+) -> float:
+    """Compute center value during square step."""
+    corners = [
+        pattern[y, x],  # top-left
+        pattern[y, x + step],  # top-right
+        pattern[y + step, x],  # bottom-left
+        pattern[y + step, x + step],  # bottom-right
+    ]
+    return sum(corners) / 4.0 + random_offset(
+        step,
+        grid_size,
+        roughness,
+        random_generator,
+    )
+
+
+def diamond_step(
+    pattern: np.ndarray,
+    y: int,
+    x: int,
+    half: int,
+    grid_size: int,
+    roughness: float,
+    random_generator: np.random.Generator,
+) -> float:
+    """Compute edge value during diamond step."""
+    points = []
+    if y >= half:
+        points.append(pattern[y - half, x])
+    if y + half <= grid_size:
+        points.append(pattern[y + half, x])
+    if x >= half:
+        points.append(pattern[y, x - half])
+    if x + half <= grid_size:
+        points.append(pattern[y, x + half])
+
+    return sum(points) / len(points) + random_offset(
+        half * 2,
+        grid_size,
+        roughness,
+        random_generator,
+    )
+
+
+def generate_plasma_pattern(
+    target_shape: tuple[int, int],
+    size: int,
+    roughness: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Generate a plasma fractal pattern using the Diamond-Square algorithm.
+
+    The Diamond-Square algorithm creates a natural-looking noise pattern by recursively
+    subdividing a grid and adding random displacements at each step. The roughness
+    parameter controls how quickly the random displacements decrease with each iteration.
+
+    Args:
+        target_shape: Final shape (height, width) of the pattern
+        size: Initial size of the pattern grid. Will be rounded up to nearest power of 2.
+            Larger values create more detailed patterns.
+        roughness: Controls pattern roughness. Higher values create more rough/sharp transitions.
+            Typical values are between 1.0 and 5.0.
+        random_generator: NumPy random generator.
+
+    Returns:
+        Normalized plasma pattern array of shape target_shape with values in [0, 1]
+    """
+    # Initialize grid
+    grid_size = get_grid_size(size, target_shape)
+    pattern = initialize_grid(grid_size, random_generator)
+
+    # Diamond-Square algorithm
+    step_size = grid_size
+    while step_size > 1:
+        half_step = step_size // 2
+
+        # Square step
+        for y in range(0, grid_size, step_size):
+            for x in range(0, grid_size, step_size):
+                if half_step > 0:
+                    pattern[y + half_step, x + half_step] = square_step(
+                        pattern,
+                        y,
+                        x,
+                        step_size,
+                        half_step,
+                        roughness,
+                        random_generator,
+                    )
+
+        # Diamond step
+        for y in range(0, grid_size + 1, half_step):
+            for x in range((y + half_step) % step_size, grid_size + 1, step_size):
+                pattern[y, x] = diamond_step(
+                    pattern,
+                    y,
+                    x,
+                    half_step,
+                    grid_size,
+                    roughness,
+                    random_generator,
+                )
+
+        step_size = half_step
+
+    min_pattern = pattern.min()
+
+    # Normalize to [0, 1] range
+    pattern = (pattern - min_pattern) / (pattern.max() - min_pattern)
+
+    return (
+        fgeometric.resize(pattern, target_shape, interpolation=cv2.INTER_LINEAR)
+        if pattern.shape != target_shape
+        else pattern
+    )
+
+
+@clipped
+def apply_plasma_brightness_contrast(
+    img: np.ndarray,
+    brightness_factor: float,
+    contrast_factor: float,
+    plasma_pattern: np.ndarray,
+) -> np.ndarray:
+    """Apply plasma-based brightness and contrast adjustments.
+
+    The plasma pattern is used to create spatially-varying adjustments:
+    1. Brightness is modified by adding the pattern * brightness_factor
+    2. Contrast is modified by interpolating between mean and original
+       using the pattern * contrast_factor
+    """
+    result = img.copy()
+
+    max_value = MAX_VALUES_BY_DTYPE[img.dtype]
+
+    # Expand plasma pattern to match image dimensions
+    plasma_pattern = plasma_pattern[..., np.newaxis] if img.ndim > MONO_CHANNEL_DIMENSIONS else plasma_pattern
+
+    # Apply brightness adjustment
+    if brightness_factor != 0:
+        brightness_adjustment = plasma_pattern * brightness_factor * max_value
+        result = np.clip(result + brightness_adjustment, 0, max_value)
+
+    # Apply contrast adjustment
+    if contrast_factor != 0:
+        mean = result.mean()
+        contrast_weights = plasma_pattern * contrast_factor + 1
+        result = np.clip(mean + (result - mean) * contrast_weights, 0, max_value)
+
+    return result
+
+
+@clipped
+def apply_plasma_shadow(
+    img: np.ndarray,
+    intensity: float,
+    plasma_pattern: np.ndarray,
+) -> np.ndarray:
+    """Apply plasma-based shadow effect by darkening.
+
+    Args:
+        img: Input image
+        intensity: Shadow intensity in [0, 1]
+        plasma_pattern: Generated plasma pattern of shape (H, W)
+
+    Returns:
+        Image with applied shadow effect
+    """
+    result = img.copy()
+
+    # Expand dimensions to match image
+    plasma_pattern = plasma_pattern[..., np.newaxis] if img.ndim > MONO_CHANNEL_DIMENSIONS else plasma_pattern
+
+    # Apply shadow by darkening (multiplying by values < 1)
+    shadow_mask = 1 - plasma_pattern * intensity
+
+    return result * shadow_mask
+
+
+def prepare_illumination_input(img: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """Prepare image for illumination effect.
+
+    Args:
+        img: Input image
+
+    Returns:
+        tuple of:
+        - float32 image
+        - height
+        - width
+    """
+    result = img.astype(np.float32)
+    height, width = img.shape[:2]
+    return result, height, width
+
+
+def apply_illumination_pattern(
+    img: np.ndarray,
+    pattern: np.ndarray,
+    intensity: float,
+) -> np.ndarray:
+    """Apply illumination pattern to image.
+
+    Args:
+        img: Input image
+        pattern: Illumination pattern of shape (H, W)
+        intensity: Effect strength (-0.2 to 0.2)
+
+    Returns:
+        Image with applied illumination
+    """
+    if img.ndim == NUM_MULTI_CHANNEL_DIMENSIONS:
+        pattern = pattern[..., np.newaxis]
+    return img * (1 + intensity * pattern)
+
+
+@clipped
+def apply_linear_illumination(
+    img: np.ndarray,
+    intensity: float,
+    angle: float,
+) -> np.ndarray:
+    """Apply linear gradient illumination effect."""
+    result, height, width = prepare_illumination_input(img)
+
+    # Create gradient coordinates
+    y, x = np.ogrid[:height, :width]
+
+    # Calculate gradient direction
+    angle_rad = np.deg2rad(angle)
+    dx, dy = np.cos(angle_rad), np.sin(angle_rad)
+
+    # Create normalized gradient
+    gradient = (x * dx + y * dy) / np.sqrt(height * height + width * width)
+    gradient = (gradient + 1) / 2  # Normalize to [0, 1]
+
+    return apply_illumination_pattern(result, gradient, intensity)
+
+
+@clipped
+def apply_corner_illumination(
+    img: np.ndarray,
+    intensity: float,
+    corner: Literal[0, 1, 2, 3],
+) -> np.ndarray:
+    """Apply corner-based illumination effect."""
+    result, height, width = prepare_illumination_input(img)
+
+    # Create distance map coordinates
+    y, x = np.ogrid[:height, :width]
+
+    # Adjust coordinates based on corner
+    if corner == 1:  # top-right
+        x = width - 1 - x
+    elif corner == 2:  # bottom-right  # noqa: PLR2004
+        x = width - 1 - x
+        y = height - 1 - y
+    elif corner == 3:  # bottom-left  # noqa: PLR2004
+        y = height - 1 - y
+
+    # Calculate normalized distance
+    distance = np.sqrt(x * x + y * y) / np.sqrt(height * height + width * width)
+    pattern = 1 - distance  # Invert so corner is brightest
+
+    return apply_illumination_pattern(result, pattern, intensity)
+
+
+@clipped
+def apply_gaussian_illumination(
+    img: np.ndarray,
+    intensity: float,
+    center: tuple[float, float],
+    sigma: float,
+) -> np.ndarray:
+    """Apply gaussian illumination effect."""
+    result, height, width = prepare_illumination_input(img)
+
+    # Create coordinate grid
+    y, x = np.ogrid[:height, :width]
+
+    # Calculate gaussian pattern
+    center_x = width * center[0]
+    center_y = height * center[1]
+    sigma_pixels = max(height, width) * sigma
+    gaussian = np.exp(
+        -((x - center_x) ** 2 + (y - center_y) ** 2) / (2 * sigma_pixels**2),
+    )
+
+    return apply_illumination_pattern(result, gaussian, intensity)
+
+
+@uint8_io
+def auto_contrast(img: np.ndarray) -> np.ndarray:
+    """Apply auto contrast to the image.
+
+    Auto contrast enhances image contrast by stretching the intensity range
+    to use the full range while preserving relative intensities.
+
+    Args:
+        img: Input image in uint8 or float32 format.
+
+    Returns:
+        Contrast-enhanced image in the same dtype as input.
+
+    Note:
+        The function:
+        1. Computes histogram for each channel
+        2. Creates cumulative distribution
+        3. Normalizes to full intensity range
+        4. Uses lookup table for scaling
+    """
+    result = img.copy()
+    num_channels = get_num_channels(img)
+    max_value = MAX_VALUES_BY_DTYPE[img.dtype]
+
+    for i in range(num_channels):
+        channel = img[..., i] if img.ndim > MONO_CHANNEL_DIMENSIONS else img
+
+        # Compute histogram
+        hist = np.histogram(channel.flatten(), bins=256, range=(0, max_value))[0]
+
+        # Calculate cumulative distribution
+        cdf = hist.cumsum()
+
+        # Find the minimum and maximum non-zero values in the CDF
+        if cdf[cdf > 0].size == 0:
+            continue  # Skip if the channel is constant or empty
+
+        cdf_min = cdf[cdf > 0].min()
+        cdf_max = cdf.max()
+
+        if cdf_min == cdf_max:
+            continue
+
+        # Normalize CDF
+        cdf = (cdf - cdf_min) * max_value / (cdf_max - cdf_min)
+
+        # Create lookup table
+        lut = np.clip(np.around(cdf), 0, max_value).astype(np.uint8)
+
+        # Apply lookup table
+        if img.ndim > MONO_CHANNEL_DIMENSIONS:
+            result[..., i] = sz_lut(channel, lut)
+        else:
+            result = sz_lut(channel, lut)
+
+    return result

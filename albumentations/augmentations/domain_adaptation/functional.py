@@ -14,9 +14,9 @@ from albumentations.augmentations.utils import PCA
 from albumentations.core.types import MONO_CHANNEL_DIMENSIONS
 
 __all__ = [
-    "fourier_domain_adaptation",
-    "apply_histogram",
     "adapt_pixel_distribution",
+    "apply_histogram",
+    "fourier_domain_adaptation",
 ]
 
 
@@ -133,7 +133,7 @@ class DomainAdapter:
     def from_colorspace(self, img: np.ndarray) -> np.ndarray:
         if self.color_out is None:
             return img
-        return cv2.cvtColor(clip(img, np.uint8), self.color_out)
+        return cv2.cvtColor(clip(img, np.uint8, inplace=True), self.color_out)
 
     def flatten(self, img: np.ndarray) -> np.ndarray:
         img = self.to_colorspace(img)
@@ -141,7 +141,7 @@ class DomainAdapter:
         return img.reshape(-1, self.num_channels)
 
     def reconstruct(self, pixels: np.ndarray, height: int, width: int) -> np.ndarray:
-        pixels = (np.clip(pixels, 0, 1) * 255).astype("uint8")
+        pixels = clip(pixels, np.uint8, inplace=True)
         if self.num_channels == 1:
             return self.from_colorspace(pixels.reshape(height, width))
         return self.from_colorspace(pixels.reshape(height, width, self.num_channels))
@@ -277,9 +277,9 @@ def fourier_domain_adaptation(img: np.ndarray, target_img: np.ndarray, beta: flo
     src_img = img.astype(np.float32)
     trg_img = target_img.astype(np.float32)
 
-    if len(src_img.shape) == MONO_CHANNEL_DIMENSIONS:
+    if src_img.ndim == MONO_CHANNEL_DIMENSIONS:
         src_img = np.expand_dims(src_img, axis=-1)
-    if len(trg_img.shape) == MONO_CHANNEL_DIMENSIONS:
+    if trg_img.ndim == MONO_CHANNEL_DIMENSIONS:
         trg_img = np.expand_dims(trg_img, axis=-1)
 
     num_channels = src_img.shape[-1]

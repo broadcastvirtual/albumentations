@@ -21,8 +21,8 @@ from albumentations.core.transforms_interface import BaseTransformInitSchema, Ba
 from albumentations.core.types import ScaleFloatType
 
 __all__ = [
-    "HistogramMatching",
     "FDA",
+    "HistogramMatching",
     "PixelDistributionAdaptation",
     "TemplateTransform",
 ]
@@ -98,8 +98,8 @@ class HistogramMatching(ImageOnlyTransform):
         reference_images: Sequence[Any],
         blend_ratio: tuple[float, float] = (0.5, 1.0),
         read_fn: Callable[[Any], np.ndarray] = read_rgb_image,
-        always_apply: bool | None = None,
         p: float = 0.5,
+        always_apply: bool | None = None,
     ):
         super().__init__(p=p, always_apply=always_apply)
         self.reference_images = reference_images
@@ -198,8 +198,8 @@ class FDA(ImageOnlyTransform):
         reference_images: Sequence[Any],
         beta_limit: ScaleFloatType = (0, 0.1),
         read_fn: Callable[[Any], np.ndarray] = read_rgb_image,
-        always_apply: bool | None = None,
         p: float = 0.5,
+        always_apply: bool | None = None,
     ):
         super().__init__(p=p, always_apply=always_apply)
         self.reference_images = reference_images
@@ -310,8 +310,8 @@ class PixelDistributionAdaptation(ImageOnlyTransform):
         blend_ratio: tuple[float, float] = (0.25, 1.0),
         read_fn: Callable[[Any], np.ndarray] = read_rgb_image,
         transform_type: Literal["pca", "standard", "minmax"] = "pca",
-        always_apply: bool | None = None,
         p: float = 0.5,
+        always_apply: bool | None = None,
     ):
         super().__init__(p=p, always_apply=always_apply)
         self.reference_images = reference_images
@@ -459,8 +459,8 @@ class TemplateTransform(ImageOnlyTransform):
         template_weight: None = None,
         template_transform: Compose | BasicTransform | None = None,
         name: str | None = None,
-        always_apply: bool | None = None,
         p: float = 0.5,
+        always_apply: bool | None = None,
     ):
         super().__init__(p=p, always_apply=always_apply)
         self.templates = templates
@@ -488,33 +488,33 @@ class TemplateTransform(ImageOnlyTransform):
         }
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        img = data["image"] if "image" in data else data["images"][0]
+        image = data["image"] if "image" in data else data["images"][0]
 
         template = self.py_random.choice(self.templates)
 
         if self.template_transform is not None:
             template = self.template_transform(image=template)["image"]
 
-        if get_num_channels(template) not in [1, get_num_channels(img)]:
+        if get_num_channels(template) not in [1, get_num_channels(image)]:
             msg = (
                 "Template must be a single channel or "
                 "has the same number of channels as input "
-                f"image ({get_num_channels(img)}), got {get_num_channels(template)}"
+                f"image ({get_num_channels(image)}), got {get_num_channels(template)}"
             )
             raise ValueError(msg)
 
-        if template.dtype != img.dtype:
+        if template.dtype != image.dtype:
             msg = "Image and template must be the same image type"
             raise ValueError(msg)
 
-        if img.shape[:2] != template.shape[:2]:
-            template = fgeometric.resize(template, img.shape[:2], interpolation=cv2.INTER_AREA)
+        if image.shape[:2] != template.shape[:2]:
+            template = fgeometric.resize(template, image.shape[:2], interpolation=cv2.INTER_AREA)
 
-        if get_num_channels(template) == 1 and get_num_channels(img) > 1:
-            template = np.stack((template,) * get_num_channels(img), axis=-1)
-
+        if get_num_channels(template) == 1 and get_num_channels(image) > 1:
+            # Replicate single channel template across all channels to match input image
+            template = cv2.merge([template] * get_num_channels(image))
         # in order to support grayscale image with dummy dim
-        template = template.reshape(img.shape)
+        template = template.reshape(image.shape)
 
         return {"template": template}
 
