@@ -7,6 +7,7 @@ from torchvision.transforms import ColorJitter
 import albumentations as A
 from albumentations.pytorch.transforms import ToTensorV2
 from tests.conftest import RECTANGULAR_UINT8_IMAGE, UINT8_IMAGES
+
 from .utils import set_seed
 
 
@@ -184,8 +185,8 @@ def test_color_jitter(brightness, contrast, saturation, hue):
                 saturation=[saturation, saturation],
                 hue=[hue, hue],
                 p=1,
-            )
-        ]
+            ),
+        ],
     )
 
     pil_transform = ColorJitter(
@@ -250,11 +251,14 @@ def test_to_tensor_v2_on_non_contiguous_array():
 
 
 def test_to_tensor_v2_on_non_contiguous_array_with_horizontal_flip():
-    transform= A.Compose([
-        A.HorizontalFlip(p=1),
-        A.ToFloat(max_value=255),
-        ToTensorV2()
-    ],is_check_shapes=False)
+    transform = A.Compose(
+        [
+            A.HorizontalFlip(p=1),
+            A.ToFloat(max_value=255),
+            ToTensorV2(),
+        ],
+        is_check_shapes=False,
+    )
 
     image = RECTANGULAR_UINT8_IMAGE
 
@@ -262,14 +266,20 @@ def test_to_tensor_v2_on_non_contiguous_array_with_horizontal_flip():
 
     transform(image=image, masks=masks)
 
+
 def test_to_tensor_v2_on_non_contiguous_array_with_random_rotate90():
-    transforms = A.Compose([
-    A.RandomRotate90(p=1.0),
-    ToTensorV2(),
-    ])
+    transforms = A.Compose(
+        [
+            A.RandomRotate90(p=1.0),
+            ToTensorV2(),
+        ],
+    )
 
     img = np.random.randint(0, 256, (640, 480, 3)).astype(np.uint8)
     masks = [np.random.randint(0, 2, (640, 480)).astype(np.uint8) for _ in range(4)]
-    transformed = transforms(image=img, masks=masks)
-    assert transformed["image"].numpy().shape == (3, 640, 480)
-    assert transformed["masks"][0].shape == (640, 480)
+    for _ in range(10):
+        transformed = transforms(image=img, masks=masks)
+        assert isinstance(transformed["image"], torch.Tensor)
+        assert isinstance(transformed["masks"][0], torch.Tensor)
+        assert transformed["image"].numpy().shape in ((3, 640, 480), (3, 480, 640))
+        assert transformed["masks"][0].shape in ((640, 480), (480, 640))

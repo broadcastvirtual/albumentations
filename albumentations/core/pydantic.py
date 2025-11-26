@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Tuple, overload
+from typing import Annotated, overload
 
 import cv2
 from pydantic import Field
 from pydantic.functional_validators import AfterValidator
-from typing_extensions import Annotated
 
 from albumentations.core.types import NumericType, ScalarType, ScaleFloatType, ScaleIntType, ScaleType
 from albumentations.core.utils import to_tuple
@@ -47,6 +46,12 @@ def check_valid_border_modes(value: int) -> int:
     return value
 
 
+def nondecreasing(value: tuple[NumericType, NumericType]) -> tuple[NumericType, NumericType]:
+    if not value[0] <= value[1]:
+        raise ValueError(f"First value should be less than the second value, got {value} instead")
+    return value
+
+
 BorderModeType = Annotated[int, Field(description="Border Mode"), AfterValidator(check_valid_border_modes)]
 
 ProbabilityType = Annotated[float, Field(description="Probability of applying the transform", ge=0, le=1)]
@@ -64,7 +69,11 @@ def float2int(value: tuple[float, float]) -> tuple[int, int]:
     return int(value[0]), int(value[1])
 
 
-NonNegativeFloatRangeType = Annotated[ScaleType, AfterValidator(process_non_negative_range)]
+NonNegativeFloatRangeType = Annotated[
+    ScaleType,
+    AfterValidator(process_non_negative_range),
+    AfterValidator(nondecreasing),
+]
 NonNegativeIntRangeType = Annotated[ScaleType, AfterValidator(process_non_negative_range), AfterValidator(float2int)]
 
 
@@ -99,12 +108,6 @@ def check_0plus(value: tuple[NumericType, NumericType]) -> tuple[NumericType, Nu
     return value
 
 
-def nondecreasing(value: tuple[NumericType, NumericType]) -> tuple[NumericType, NumericType]:
-    if not value[0] <= value[1]:
-        raise ValueError(f"First value should be less than the second value, got {value} instead")
-    return value
-
-
 OnePlusFloatRangeType = Annotated[ScaleType, AfterValidator(convert_to_1plus_range), AfterValidator(check_1plus)]
 OnePlusIntRangeType = Annotated[
     ScaleType,
@@ -114,7 +117,7 @@ OnePlusIntRangeType = Annotated[
 ]
 
 OnePlusIntNonDecreasingRangeType = Annotated[
-    Tuple[ScalarType, ScalarType],
+    tuple[ScalarType, ScalarType],
     AfterValidator(check_1plus),
     AfterValidator(nondecreasing),
     AfterValidator(float2int),
@@ -131,4 +134,13 @@ def check_01(value: tuple[NumericType, NumericType]) -> tuple[NumericType, Numer
     return value
 
 
-ZeroOneRangeType = Annotated[ScaleType, AfterValidator(convert_to_0plus_range), AfterValidator(check_01)]
+ZeroOneRangeType = Annotated[
+    ScaleType,
+    AfterValidator(convert_to_0plus_range),
+    AfterValidator(check_01),
+    AfterValidator(nondecreasing),
+]
+
+
+def repeat_if_scalar(value: ScaleType) -> tuple[float, float]:
+    return (value, value) if isinstance(value, (int, float)) else value

@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Literal, Sequence, Tuple, TypedDict, cast
+from collections.abc import Sequence
+from typing import Any, Callable, Literal, TypedDict, cast
 
 import cv2
 import numpy as np
-import skimage.transform
-from albucore import clipped, get_num_channels, hflip, maybe_process_in_chunks, preserve_channel_dim, vflip
+from albucore import get_num_channels, hflip, maybe_process_in_chunks, preserve_channel_dim, vflip
 
 from albumentations import random_utils
 from albumentations.augmentations.utils import angle_2pi_range, handle_empty_array
-from albumentations.core.bbox_utils import bboxes_from_masks, denormalize_bboxes, masks_from_bboxes, normalize_bboxes
+from albumentations.core.bbox_utils import bboxes_from_masks, denormalize_bboxes, normalize_bboxes
 from albumentations.core.types import (
-    MONO_CHANNEL_DIMENSIONS,
+    NUM_BBOXES_COLUMNS_IN_ALBUMENTATIONS,
     NUM_KEYPOINTS_COLUMNS_IN_ALBUMENTATIONS,
     NUM_MULTI_CHANNEL_DIMENSIONS,
     REFLECT_BORDER_MODES,
@@ -22,13 +22,11 @@ from albumentations.core.types import (
 )
 
 __all__ = [
-    "distortion",
-    "distortion",
-    "distortion_keypoints",
-    "distortion_bboxes",
+    "remap",
+    "remap_keypoints",
+    "remap_bboxes",
     "pad",
     "pad_with_params",
-    "rotate",
     "resize",
     "scale",
     "_func_max_size",
@@ -38,13 +36,10 @@ __all__ = [
     "rotation2d_matrix_to_euler_angles",
     "is_identity_matrix",
     "warp_affine",
-    "piecewise_affine",
     "to_distance_maps",
     "from_distance_maps",
     "transpose",
     "d4",
-    "bboxes_rotate",
-    "keypoints_rotate",
     "bboxes_d4",
     "keypoints_d4",
     "bboxes_rot90",
@@ -252,128 +247,6 @@ def keypoints_d4(
 
 
 @preserve_channel_dim
-def rotate(
-    img: np.ndarray,
-    angle: float,
-    interpolation: int,
-    border_mode: int,
-    value: ColorType | None = None,
-) -> np.ndarray:
-    image_shape = img.shape[:2]
-
-    image_center = center(image_shape)
-    matrix = cv2.getRotationMatrix2D(image_center, angle, 1.0)
-
-    height, width = image_shape
-
-    warp_fn = maybe_process_in_chunks(
-        warp_affine_with_value_extension,
-        matrix=matrix,
-        dsize=(width, height),
-        flags=interpolation,
-        border_mode=border_mode,
-        border_value=value,
-    )
-    return warp_fn(img)
-
-
-@handle_empty_array
-def bboxes_rotate(
-    bboxes: np.ndarray,
-    angle: float,
-    method: Literal["largest_box", "ellipse"],
-    image_shape: tuple[int, int],
-) -> np.ndarray:
-    """Rotates bounding boxes by angle degrees.
-
-    Args:
-        bboxes: A numpy array of bounding boxes with shape (num_bboxes, 4+).
-                Each row represents a bounding box (x_min, y_min, x_max, y_max, ...).
-        angle: Angle of rotation in degrees.
-        method: Rotation method used. Should be one of: "largest_box", "ellipse".
-        image_shape: Image shape (height, width).
-
-    Returns:
-        np.ndarray: A numpy array of rotated bounding boxes with the same shape as input.
-
-    Reference:
-        https://arxiv.org/abs/2109.13488
-    """
-    bboxes = bboxes.copy()
-    rows, cols = image_shape[:2]
-    x_min, y_min, x_max, y_max = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
-    scale = cols / float(rows)
-
-    if method == "largest_box":
-        x = np.column_stack([x_min, x_max, x_max, x_min]) - 0.5
-        y = np.column_stack([y_min, y_min, y_max, y_max]) - 0.5
-    elif method == "ellipse":
-        w = (x_max - x_min) / 2
-        h = (y_max - y_min) / 2
-        data = np.arange(0, 360, dtype=np.float32)
-        x = w[:, np.newaxis] * np.sin(np.radians(data)) + (w + x_min - 0.5)[:, np.newaxis]
-        y = h[:, np.newaxis] * np.cos(np.radians(data)) + (h + y_min - 0.5)[:, np.newaxis]
-    else:
-        raise ValueError(f"Method {method} is not a valid rotation method.")
-
-    angle_rad = np.deg2rad(angle)
-    x_t = (np.cos(angle_rad) * x * scale + np.sin(angle_rad) * y) / scale
-    y_t = -np.sin(angle_rad) * x * scale + np.cos(angle_rad) * y
-    x_t = x_t + 0.5
-    y_t = y_t + 0.5
-
-    # Update the first 4 columns of the input array
-    bboxes[:, 0] = np.min(x_t, axis=1)
-    bboxes[:, 1] = np.min(y_t, axis=1)
-    bboxes[:, 2] = np.max(x_t, axis=1)
-    bboxes[:, 3] = np.max(y_t, axis=1)
-
-    return bboxes
-
-
-@handle_empty_array
-@angle_2pi_range
-def keypoints_rotate(
-    keypoints: np.ndarray,
-    angle: float,
-    image_shape: tuple[int, int],
-) -> np.ndarray:
-    """Rotate keypoints by a specified angle.
-
-    Args:
-        keypoints (np.ndarray): An array of keypoints with shape (N, 4+) in the format (x, y, angle, scale, ...).
-        angle (float): The angle by which to rotate the keypoints, in degrees.
-        image_shape (tuple[int, int]): The shape of the image the keypoints belong to (height, width).
-        **params: Additional parameters.
-
-    Returns:
-        np.ndarray: The rotated keypoints with the same shape as the input.
-
-    Note:
-        The rotation is performed around the center of the image.
-    """
-    image_center = center(image_shape)
-    matrix = cv2.getRotationMatrix2D(image_center, angle, 1.0)
-
-    # Create a copy of the input keypoints to avoid modifying the original array
-    rotated_keypoints = keypoints.copy().astype(np.float32)
-
-    # Extract x and y coordinates
-    xy = rotated_keypoints[:, :2]
-
-    # Rotate x and y coordinates
-    xy_rotated = cv2.transform(xy.reshape(-1, 1, 2), matrix).squeeze()
-
-    # Update x and y coordinates
-    rotated_keypoints[:, :2] = xy_rotated
-
-    # Update angles
-    rotated_keypoints[:, 2] += np.radians(angle)
-
-    return rotated_keypoints
-
-
-@preserve_channel_dim
 def resize(img: np.ndarray, target_shape: tuple[int, int], interpolation: int) -> np.ndarray:
     if target_shape == img.shape[:2]:
         return img
@@ -456,7 +329,7 @@ def perspective(
     keep_size: bool,
     interpolation: int,
 ) -> np.ndarray:
-    image_shape = img.shape[:2]
+    height, width = img.shape[:2]
     perspective_func = maybe_process_in_chunks(
         cv2.warpPerspective,
         M=matrix,
@@ -468,7 +341,19 @@ def perspective(
     warped = perspective_func(img)
 
     if keep_size:
-        return resize(warped, image_shape, interpolation=interpolation)
+        scale_x = width / max_width
+        scale_y = height / max_height
+        scale_matrix = np.array([[scale_x, 0, 0], [0, scale_y, 0], [0, 0, 1]])
+        adjusted_matrix = np.dot(scale_matrix, matrix)
+
+        warped = cv2.warpPerspective(
+            img,
+            adjusted_matrix,
+            (width, height),
+            borderMode=border_mode,
+            borderValue=border_val,
+            flags=interpolation,
+        )
 
     return warped
 
@@ -514,39 +399,29 @@ def perspective_bboxes(
         >>> transformed_bboxes = perspective_bboxes(bboxes, image_shape, matrix, 150, 150, False)
     """
     height, width = image_shape[:2]
-
-    # Create a copy of the input bboxes to avoid modifying the original array
     transformed_bboxes = bboxes.copy()
-
-    # Denormalize bboxes
     denormalized_coords = denormalize_bboxes(bboxes[:, :4], image_shape)
 
-    # Create points for each bbox
     x_min, y_min, x_max, y_max = denormalized_coords.T
     points = np.array([[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]]).transpose(2, 0, 1)
-    # Shape is: (num_bboxes, 4, 2)
+    points_reshaped = points.reshape(-1, 1, 2)
 
-    # Reshape points to (num_bboxes * 4, 2)
-    points_reshaped = points.reshape(-1, 2)
+    transformed_points = cv2.perspectiveTransform(points_reshaped.astype(np.float32), matrix)
+    transformed_points = transformed_points.reshape(-1, 4, 2)
 
-    # Pad points_reshaped with two columns of zeros
-    points_padded = np.pad(points_reshaped, ((0, 0), (0, 2)), mode="constant")
-
-    # Apply perspective transformation to all points at once
-    transformed_points = perspective_keypoints(points_padded, image_shape, matrix, max_width, max_height, keep_size)
-
-    # Reshape back to (num_bboxes, 4, 2)
-    transformed_points = transformed_points[:, :2].reshape(-1, 4, 2)
-    # Get new bounding boxes
     new_coords = np.array(
         [[np.min(box[:, 0]), np.min(box[:, 1]), np.max(box[:, 0]), np.max(box[:, 1])] for box in transformed_points],
     )
 
-    # Normalize the new bounding boxes
-    output_shape = (height if keep_size else max_height, width if keep_size else max_width)
-    normalized_coords = normalize_bboxes(new_coords, output_shape)
+    if keep_size:
+        scale_x, scale_y = width / max_width, height / max_height
+        new_coords[:, [0, 2]] *= scale_x
+        new_coords[:, [1, 3]] *= scale_y
+        output_shape = image_shape
+    else:
+        output_shape = (max_height, max_width)
 
-    # Update only the first 4 columns of the bboxes array
+    normalized_coords = normalize_bboxes(new_coords, output_shape)
     transformed_bboxes[:, :4] = normalized_coords
 
     return transformed_bboxes
@@ -600,7 +475,6 @@ def perspective_keypoints(
     scale *= max(scale_x, scale_y)
 
     if keep_size:
-        width, height = image_shape[:2]
         scale_x = width / max_width
         scale_y = height / max_height
         x *= scale_x
@@ -619,14 +493,22 @@ def perspective_keypoints(
     return transformed_keypoints
 
 
-def is_identity_matrix(matrix: skimage.transform.ProjectiveTransform) -> bool:
-    return np.allclose(matrix.params, np.eye(3, dtype=np.float32))
+def is_identity_matrix(matrix: np.ndarray) -> bool:
+    """Check if the given matrix is an identity matrix.
+
+    Args:
+        matrix (np.ndarray): A 3x3 affine transformation matrix.
+
+    Returns:
+        bool: True if the matrix is an identity matrix, False otherwise.
+    """
+    return np.allclose(matrix, np.eye(3, dtype=matrix.dtype))
 
 
 def warp_affine_with_value_extension(
     image: np.ndarray,
     matrix: np.ndarray,
-    dsize: Sequence[int],
+    dsize: tuple[int, int],
     flags: int,
     border_mode: int,
     border_value: ColorType,
@@ -647,11 +529,11 @@ def warp_affine_with_value_extension(
 @preserve_channel_dim
 def warp_affine(
     image: np.ndarray,
-    matrix: skimage.transform.ProjectiveTransform,
+    matrix: np.ndarray,
     interpolation: int,
     cval: ColorType,
     mode: int,
-    output_shape: Sequence[int],
+    output_shape: tuple[int, int],
 ) -> np.ndarray:
     if is_identity_matrix(matrix):
         return image
@@ -659,12 +541,12 @@ def warp_affine(
     height = int(np.round(output_shape[0]))
     width = int(np.round(output_shape[1]))
 
-    dsize = (width, height)
+    cv2_matrix = matrix[:2, :]
 
     warp_fn = maybe_process_in_chunks(
         warp_affine_with_value_extension,
-        matrix=matrix.params[:2],
-        dsize=dsize,
+        matrix=cv2_matrix,
+        dsize=(width, height),
         flags=interpolation,
         border_mode=mode,
         border_value=cval,
@@ -676,9 +558,9 @@ def warp_affine(
 @angle_2pi_range
 def keypoints_affine(
     keypoints: np.ndarray,
-    matrix: skimage.transform.ProjectiveTransform,
+    matrix: np.ndarray,
     image_shape: tuple[int, int],
-    scale: dict[str, Any],
+    scale: dict[str, float],
     mode: int,
 ) -> np.ndarray:
     """Apply an affine transformation to keypoints.
@@ -689,10 +571,10 @@ def keypoints_affine(
     Args:
         keypoints (np.ndarray): Array of keypoints with shape (N, 4+) where N is the number of keypoints.
                                 Each keypoint is represented as [x, y, angle, scale, ...].
-        matrix (skimage.transform.ProjectiveTransform): The affine transformation matrix.
+        matrix (np.ndarray): The 2x3 or 3x3 affine transformation matrix.
         image_shape (tuple[int, int]): Shape of the image (height, width).
-        scale (dict[str, Any]): Dictionary containing scale factors for x and y directions.
-                                Expected keys are 'x' and 'y'.
+        scale (dict[str, float]): Dictionary containing scale factors for x and y directions.
+                                  Expected keys are 'x' and 'y'.
         mode (int): Border mode for handling keypoints near image edges.
                     Use cv2.BORDER_REFLECT_101, cv2.BORDER_REFLECT, etc.
 
@@ -708,7 +590,7 @@ def keypoints_affine(
 
     Example:
         >>> keypoints = np.array([[100, 100, 0, 1]])
-        >>> matrix = skimage.transform.ProjectiveTransform(...)
+        >>> matrix = np.array([[1.5, 0, 10], [0, 1.2, 20]])
         >>> scale = {'x': 1.5, 'y': 1.2}
         >>> transformed_keypoints = keypoints_affine(keypoints, matrix, (480, 640), scale, cv2.BORDER_REFLECT_101)
     """
@@ -726,11 +608,15 @@ def keypoints_affine(
     # Extract x, y coordinates
     xy = keypoints[:, :2]
 
+    # Ensure matrix is 2x3
+    if matrix.shape == (3, 3):
+        matrix = matrix[:2]
+
     # Transform x, y coordinates
-    xy_transformed = cv2.transform(xy.reshape(-1, 1, 2), matrix.params[:2]).squeeze()
+    xy_transformed = cv2.transform(xy.reshape(-1, 1, 2), matrix).squeeze()
 
     # Calculate angle adjustment
-    angle_adjustment = rotation2d_matrix_to_euler_angles(matrix.params[:2], y_up=False)
+    angle_adjustment = rotation2d_matrix_to_euler_angles(matrix[:2, :2], y_up=False)
 
     # Update angles
     keypoints[:, 2] = keypoints[:, 2] + angle_adjustment
@@ -746,9 +632,37 @@ def keypoints_affine(
     return keypoints
 
 
+@handle_empty_array
+def apply_affine_to_points(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    """Apply affine transformation to a set of points.
+
+    This function handles potential division by zero by replacing zero values
+    in the homogeneous coordinate with a small epsilon value.
+
+    Args:
+        points (np.ndarray): Array of points with shape (N, 2).
+        matrix (np.ndarray): 3x3 affine transformation matrix.
+
+    Returns:
+        np.ndarray: Transformed points with shape (N, 2).
+    """
+    homogeneous_points = np.column_stack([points, np.ones(points.shape[0])])
+    transformed_points = homogeneous_points @ matrix.T
+
+    # Handle potential division by zero
+    epsilon = np.finfo(transformed_points.dtype).eps
+    transformed_points[:, 2] = np.where(
+        np.abs(transformed_points[:, 2]) < epsilon,
+        np.sign(transformed_points[:, 2]) * epsilon,
+        transformed_points[:, 2],
+    )
+
+    return transformed_points[:, :2] / transformed_points[:, 2:]
+
+
 def calculate_affine_transform_padding(
-    matrix: skimage.transform.ProjectiveTransform,
-    image_shape: Sequence[int],
+    matrix: np.ndarray,
+    image_shape: tuple[int, int],
 ) -> tuple[int, int, int, int]:
     """Calculate the necessary padding for an affine transformation to avoid empty spaces."""
     height, width = image_shape[:2]
@@ -761,19 +675,22 @@ def calculate_affine_transform_padding(
     corners = np.array([[0, 0], [width, 0], [width, height], [0, height]])
 
     # Transform corners
-    transformed_corners = matrix(corners)
+    transformed_corners = apply_affine_to_points(corners, matrix)
+
+    # Ensure transformed_corners is 2D
+    transformed_corners = transformed_corners.reshape(-1, 2)
 
     # Find box that includes both original and transformed corners
     all_corners = np.vstack((corners, transformed_corners))
     min_x, min_y = all_corners.min(axis=0)
     max_x, max_y = all_corners.max(axis=0)
+
     # Compute the inverse transform
-    inverse_matrix = matrix.inverse
+    inverse_matrix = np.linalg.inv(matrix)
 
     # Apply inverse transform to all corners of the bounding box
     bbox_corners = np.array([[min_x, min_y], [max_x, min_y], [max_x, max_y], [min_x, max_y]])
-
-    inverse_corners = inverse_matrix(bbox_corners)
+    inverse_corners = apply_affine_to_points(bbox_corners, inverse_matrix).reshape(-1, 2)
 
     min_x, min_y = inverse_corners.min(axis=0)
     max_x, max_y = inverse_corners.max(axis=0)
@@ -787,7 +704,7 @@ def calculate_affine_transform_padding(
 
 
 @handle_empty_array
-def bboxes_affine_largest_box(bboxes: np.ndarray, matrix: skimage.transform.ProjectiveTransform) -> np.ndarray:
+def bboxes_affine_largest_box(bboxes: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     """Apply an affine transformation to bounding boxes and return the largest enclosing boxes.
 
     This function transforms each corner of every bounding box using the given affine transformation
@@ -797,7 +714,7 @@ def bboxes_affine_largest_box(bboxes: np.ndarray, matrix: skimage.transform.Proj
         bboxes (np.ndarray): An array of bounding boxes with shape (N, 4+) where N is the number of
                              bounding boxes. Each row should contain [x_min, y_min, x_max, y_max]
                              followed by any additional attributes (e.g., class labels).
-        matrix (skimage.transform.ProjectiveTransform): The affine transformation matrix to apply.
+        matrix (np.ndarray): The 3x3 affine transformation matrix to apply.
 
     Returns:
         np.ndarray: An array of transformed bounding boxes with the same shape as the input.
@@ -815,7 +732,7 @@ def bboxes_affine_largest_box(bboxes: np.ndarray, matrix: skimage.transform.Proj
 
     Example:
         >>> bboxes = np.array([[10, 10, 20, 20, 1], [30, 30, 40, 40, 2]])  # Two boxes with class labels
-        >>> matrix = skimage.transform.AffineTransform(scale=(2, 2), translation=(5, 5))
+        >>> matrix = np.array([[2, 0, 5], [0, 2, 5], [0, 0, 1]])  # Scale by 2 and translate by (5, 5)
         >>> transformed_bboxes = bboxes_affine_largest_box(bboxes, matrix)
         >>> print(transformed_bboxes)
         [[ 25.  25.  45.  45.   1.]
@@ -823,15 +740,13 @@ def bboxes_affine_largest_box(bboxes: np.ndarray, matrix: skimage.transform.Proj
     """
     # Extract corners of all bboxes
     x_min, y_min, x_max, y_max = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
-    corners = np.array([[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]]).transpose(
-        2,
-        0,
-        1,
-    )  # Shape: (num_bboxes, 4, 2)
+
+    corners = (
+        np.array([[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]]).transpose(2, 0, 1).reshape(-1, 2)
+    )
 
     # Transform all corners at once
-    transformed_corners = skimage.transform.matrix_transform(corners.reshape(-1, 2), matrix.params)
-    transformed_corners = transformed_corners.reshape(-1, 4, 2)
+    transformed_corners = apply_affine_to_points(corners, matrix).reshape(-1, 4, 2)
 
     # Compute new bounding boxes
     new_x_min = np.min(transformed_corners[:, :, 0], axis=1)
@@ -843,7 +758,7 @@ def bboxes_affine_largest_box(bboxes: np.ndarray, matrix: skimage.transform.Proj
 
 
 @handle_empty_array
-def bboxes_affine_ellipse(bboxes: np.ndarray, matrix: skimage.transform.ProjectiveTransform) -> np.ndarray:
+def bboxes_affine_ellipse(bboxes: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     """Apply an affine transformation to bounding boxes using an ellipse approximation method.
 
     This function transforms bounding boxes by approximating each box with an ellipse,
@@ -854,7 +769,7 @@ def bboxes_affine_ellipse(bboxes: np.ndarray, matrix: skimage.transform.Projecti
         bboxes (np.ndarray): An array of bounding boxes with shape (N, 4+) where N is the number of
                              bounding boxes. Each row should contain [x_min, y_min, x_max, y_max]
                              followed by any additional attributes (e.g., class labels).
-        matrix (skimage.transform.ProjectiveTransform): The affine transformation matrix to apply.
+        matrix (np.ndarray): The 3x3 affine transformation matrix to apply.
 
     Returns:
         np.ndarray: An array of transformed bounding boxes with the same shape as the input.
@@ -869,14 +784,6 @@ def bboxes_affine_ellipse(bboxes: np.ndarray, matrix: skimage.transform.Projecti
           accuracy and computational efficiency.
         - Any additional attributes beyond the first 4 coordinates are preserved unchanged.
         - This method may be more suitable for objects that are roughly elliptical in shape.
-
-    Example:
-        >>> bboxes = np.array([[10, 10, 30, 20, 1], [40, 40, 60, 60, 2]])  # Two boxes with class labels
-        >>> matrix = skimage.transform.AffineTransform(rotation=np.pi/4)  # 45-degree rotation
-        >>> transformed_bboxes = bboxes_affine_ellipse(bboxes, matrix)
-        >>> print(transformed_bboxes)
-        [[ 5.86  5.86 34.14 24.14  1.  ]
-         [30.   30.   70.   70.    2.  ]]
     """
     x_min, y_min, x_max, y_max = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
     bbox_width = (x_max - x_min) / 2
@@ -893,23 +800,8 @@ def bboxes_affine_ellipse(bboxes: np.ndarray, matrix: skimage.transform.Projecti
     y = bbox_height[:, np.newaxis] * cos_angles + center_y[:, np.newaxis]
     points = np.stack([x, y], axis=-1).reshape(-1, 2)
 
-    # Transform all points at once
-    # Replacing skimage.transform.matrix_transform with numpy ops:
-    # points reshape from N, 2 to N, 3 with extra dim filled with 1
-    points = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)
-
-    # change matrix.params.T to matrix.T if matrix is np.ndarray and no longer skimage.transform.ProjectiveTransform
-    transformed_points = points @ matrix.params.T
-
-    # set zero to very small number before homogeneous divide
-    transformed_points[:, -1:] = np.where(
-        transformed_points[:, -1:] == 0,
-        np.finfo(float).eps,
-        transformed_points[:, -1:],
-    )
-
-    # homogeneous divide and then get x, y
-    transformed_points = (transformed_points / transformed_points[:, -1:])[:, :2]
+    # Transform all points at once using the helper function
+    transformed_points = apply_affine_to_points(points, matrix)
 
     transformed_points = transformed_points.reshape(len(bboxes), -1, 2)
 
@@ -925,7 +817,7 @@ def bboxes_affine_ellipse(bboxes: np.ndarray, matrix: skimage.transform.Projecti
 @handle_empty_array
 def bboxes_affine(
     bboxes: np.ndarray,
-    matrix: skimage.transform.ProjectiveTransform,
+    matrix: np.ndarray,
     rotate_method: Literal["largest_box", "ellipse"],
     image_shape: tuple[int, int],
     border_mode: int,
@@ -944,7 +836,7 @@ def bboxes_affine(
 
     Args:
         bboxes (np.ndarray): Input bounding boxes
-        matrix (skimage.transform.ProjectiveTransform): Affine transformation matrix
+        matrix (np.ndarray): Affine transformation matrix
         rotate_method (str): Method for rotating bounding boxes ('largest_box' or 'ellipse')
         image_shape (Sequence[int]): Shape of the input image
         border_mode (int): OpenCV border mode
@@ -976,27 +868,6 @@ def bboxes_affine(
     validated_bboxes = validate_bboxes(transformed_bboxes, output_shape)
 
     return normalize_bboxes(validated_bboxes, output_shape)
-
-
-@clipped
-def piecewise_affine(
-    img: np.ndarray,
-    matrix: skimage.transform.PiecewiseAffineTransform | None,
-    interpolation: int,
-    mode: str,
-    cval: float,
-) -> np.ndarray:
-    if matrix is None:
-        return img
-    return skimage.transform.warp(
-        img,
-        matrix,
-        order=interpolation,
-        mode=mode,
-        cval=cval,
-        preserve_range=True,
-        output_shape=img.shape,
-    )
 
 
 def to_distance_maps(
@@ -1168,101 +1039,6 @@ def from_distance_maps(
             return keypoints[valid_mask]
 
     return keypoints
-
-
-@handle_empty_array
-def keypoints_piecewise_affine(
-    keypoints: np.ndarray,
-    matrix: skimage.transform.PiecewiseAffineTransform | None,
-    image_shape: tuple[int, int],
-    keypoints_threshold: float,
-) -> np.ndarray:
-    if matrix is None:
-        return keypoints
-
-    a, s = keypoints[:, 2], keypoints[:, 3]
-
-    # Create distance maps for all keypoints
-    dist_maps = to_distance_maps(keypoints[:, :2], image_shape, True)
-
-    # Apply piecewise affine transformation to all distance maps
-    dist_maps = piecewise_affine(dist_maps, matrix, 0, "constant", 0)
-
-    # Convert distance maps back to keypoints
-    transformed_xy = from_distance_maps(dist_maps, True, {"x": -1, "y": -1}, keypoints_threshold)
-
-    # Combine transformed x, y with original a, s
-    transformed_keypoints = np.column_stack([transformed_xy, a, s])
-
-    # If there are additional columns, preserve them
-    if keypoints.shape[1] > NUM_KEYPOINTS_COLUMNS_IN_ALBUMENTATIONS:
-        return np.column_stack(
-            [transformed_keypoints, keypoints[:, NUM_KEYPOINTS_COLUMNS_IN_ALBUMENTATIONS:]],
-        )
-
-    return transformed_keypoints
-
-
-@handle_empty_array
-def bboxes_piecewise_affine(
-    bboxes: np.ndarray,
-    matrix: skimage.transform.PiecewiseAffineTransform,
-    image_shape: tuple[int, int],
-    keypoints_threshold: float,
-) -> np.ndarray:
-    if matrix is None:
-        return bboxes
-
-    height, width = image_shape[:2]
-
-    # Denormalize bboxes
-    denorm_bboxes = denormalize_bboxes(bboxes, image_shape)
-
-    # Create keypoints for all bboxes
-    keypoints = np.array(
-        [
-            denorm_bboxes[:, [0, 1]],  # x_min, y_min
-            denorm_bboxes[:, [2, 1]],  # x_max, y_min
-            denorm_bboxes[:, [2, 3]],  # x_max, y_max
-            denorm_bboxes[:, [0, 3]],  # x_min, y_max
-        ],
-    )
-    keypoints = keypoints.transpose(1, 0, 2).reshape(-1, 2)
-
-    # Create distance maps for all keypoints
-    dist_maps = to_distance_maps(keypoints, image_shape, True)
-
-    # Apply piecewise affine transformation to all distance maps
-    dist_maps = piecewise_affine(dist_maps, matrix, 0, "constant", 0)
-
-    # Convert distance maps back to keypoints
-    transformed_keypoints = from_distance_maps(dist_maps, True, {"x": -1, "y": -1}, keypoints_threshold)
-
-    # Reshape transformed keypoints back to (N, 4, 2) where N is the number of bboxes
-    transformed_keypoints = transformed_keypoints.reshape(-1, 4, 2)
-
-    # Filter out keypoints outside the image
-    mask = (
-        (transformed_keypoints[:, :, 0] >= 0)
-        & (transformed_keypoints[:, :, 0] < width)
-        & (transformed_keypoints[:, :, 1] >= 0)
-        & (transformed_keypoints[:, :, 1] < height)
-    )
-
-    # Compute new bboxes
-    new_bboxes = np.zeros_like(bboxes)
-    for i in range(len(bboxes)):
-        valid_points = transformed_keypoints[i][mask[i]]
-        if len(valid_points) > 0:
-            new_bboxes[i, 0] = valid_points[:, 0].min()
-            new_bboxes[i, 1] = valid_points[:, 1].min()
-            new_bboxes[i, 2] = valid_points[:, 0].max()
-            new_bboxes[i, 3] = valid_points[:, 1].max()
-        else:
-            new_bboxes[i] = bboxes[i]  # Keep original bbox if all points are outside
-
-    # Normalize the new bboxes
-    return normalize_bboxes(new_bboxes, image_shape)
 
 
 def d4(img: np.ndarray, group_member: D4Type) -> np.ndarray:
@@ -1608,7 +1384,7 @@ def pad_with_params(
 
 
 @preserve_channel_dim
-def distortion(
+def remap(
     img: np.ndarray,
     map_x: np.ndarray,
     map_y: np.ndarray,
@@ -1616,11 +1392,15 @@ def distortion(
     border_mode: int,
     value: ColorType | None = None,
 ) -> np.ndarray:
-    return cv2.remap(img, map_x, map_y, interpolation, borderMode=border_mode, borderValue=value)
+    # Combine map_x and map_y into a single map array of type CV_32FC2
+    map_xy = np.stack([map_x, map_y], axis=-1).astype(np.float32)
+
+    # Call remap with the combined map and empty second map
+    return cv2.remap(img, map_xy, None, interpolation, borderMode=border_mode, borderValue=value)
 
 
 @handle_empty_array
-def distortion_keypoints(
+def remap_keypoints(
     keypoints: np.ndarray,
     map_x: np.ndarray,
     map_y: np.ndarray,
@@ -1655,26 +1435,52 @@ def distortion_keypoints(
 
 
 @handle_empty_array
-def distortion_bboxes(
+def remap_bboxes(
     bboxes: np.ndarray,
     map_x: np.ndarray,
     map_y: np.ndarray,
     image_shape: tuple[int, int],
-    border_mode: int,
 ) -> np.ndarray:
-    result = bboxes.copy()
+    height, width = image_shape[:2]
 
-    masks = np.transpose(masks_from_bboxes(bboxes, image_shape), (1, 2, 0))
-    transformed_masks = cv2.remap(masks, map_x, map_y, cv2.INTER_NEAREST, borderMode=border_mode, borderValue=0)
+    # Convert bboxes to corner points: (N, 4) -> (N*2, 2)
+    corners = np.vstack(
+        [
+            bboxes[:, [0, 1]],  # top-left corners
+            bboxes[:, [2, 3]],  # bottom-right corners
+        ],
+    )
 
-    if transformed_masks.ndim == MONO_CHANNEL_DIMENSIONS:
-        transformed_masks = np.expand_dims(transformed_masks, axis=0)
-    else:
-        transformed_masks = np.transpose(transformed_masks, (2, 0, 1))
+    # Transform corners using distortion_keypoints
+    transformed_corners = remap_keypoints(
+        np.column_stack([corners, np.zeros(len(corners)), np.zeros(len(corners))]),  # add dummy angle and scale
+        map_x,
+        map_y,
+        image_shape,
+    )
 
-    result[:, :4] = bboxes_from_masks(transformed_masks)
+    # Reshape back to bboxes format: (N*2, 2) -> (N, 4)
+    num_boxes = len(bboxes)
+    transformed_corners = transformed_corners[:, :2].reshape(2, num_boxes, 2)
 
-    return result
+    # Get min/max coordinates to form new bounding boxes
+    mins = transformed_corners[0]  # top-left corners
+    maxs = transformed_corners[1]  # bottom-right corners
+
+    new_bboxes = np.column_stack(
+        [
+            np.minimum(mins[:, 0], maxs[:, 0]),  # x_min
+            np.minimum(mins[:, 1], maxs[:, 1]),  # y_min
+            np.maximum(mins[:, 0], maxs[:, 0]),  # x_max
+            np.maximum(mins[:, 1], maxs[:, 1]),  # y_max
+        ],
+    )
+
+    return (
+        np.column_stack([new_bboxes, bboxes[:, 4:]])
+        if bboxes.shape[1] > NUM_BBOXES_COLUMNS_IN_ALBUMENTATIONS
+        else new_bboxes
+    )
 
 
 def generate_displacement_fields(
@@ -1683,19 +1489,19 @@ def generate_displacement_fields(
     sigma: float,
     same_dxdy: bool,
     kernel_size: tuple[int, int],
-    random_state: np.random.RandomState,
+    random_generator: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate displacement fields for elastic transform."""
     height, width = image_shape[:2]
 
-    dx = random_state.rand(height, width).astype(np.float32) * 2 - 1
+    dx = random_utils.rand(height, width, random_generator=random_generator).astype(np.float32) * 2 - 1
     cv2.GaussianBlur(dx, kernel_size, sigma, dst=dx)
     dx *= alpha
 
     if same_dxdy:
         dy = dx
     else:
-        dy = random_state.rand(height, width).astype(np.float32) * 2 - 1
+        dy = random_utils.rand(height, width, random_generator=random_generator).astype(np.float32) * 2 - 1
         cv2.GaussianBlur(dy, kernel_size, sigma, dst=dy)
         dy *= alpha
 
@@ -2306,71 +2112,65 @@ def create_affine_transformation_matrix(
     scale: ScaleDict,
     rotate: float,
     shift: tuple[float, float],
-) -> skimage.transform.ProjectiveTransform:
+) -> np.ndarray:
     """Create an affine transformation matrix combining translation, shear, scale, and rotation.
 
-    This function creates a complex affine transformation by combining multiple transformations
-    in a specific order. The transformations are applied as follows:
-    1. Shift to top-left: Moves the center of transformation to (0, 0)
-    2. Apply main transformations: scale, rotation, shear, and translation
-    3. Shift back to center: Moves the center of transformation back to its original position
-
-    The order of these transformations is crucial as matrix multiplications are not commutative.
-
     Args:
-        translate (TranslateDict): Translation in x and y directions.
-                                   Keys: 'x', 'y'. Values: translation amounts in pixels.
-        shear (ShearDict): Shear in x and y directions.
-                           Keys: 'x', 'y'. Values: shear angles in degrees.
-        scale (ScaleDict): Scale factors for x and y directions.
-                           Keys: 'x', 'y'. Values: scale factors (1.0 means no scaling).
-        rotate (float): Rotation angle in degrees. Positive values rotate counter-clockwise.
+        translate (dict[str, float]): Translation in x and y directions.
+        shear (dict[str, float]): Shear in x and y directions (in degrees).
+        scale (dict[str, float]): Scale factors for x and y directions.
+        rotate (float): Rotation angle in degrees.
         shift (tuple[float, float]): Shift to apply before and after transformations.
-                                     Typically the image center (width/2, height/2).
 
     Returns:
-        skimage.transform.ProjectiveTransform: The resulting affine transformation matrix.
-
-    Note:
-        - All angle inputs (rotate, shear) are in degrees and are converted to radians internally.
-        - The order of transformations in the AffineTransform is: scale, rotation, shear, translation.
-        - The resulting transformation can be applied to coordinates using the __call__ method.
+        np.ndarray: The resulting 3x3 affine transformation matrix.
     """
-    # Step 1: Create matrix to shift to top-left
-    # This moves the center of transformation to (0, 0)
-    matrix_to_topleft = skimage.transform.SimilarityTransform(translation=[shift[0], shift[1]])
+    # Convert angles to radians
+    rotate_rad = np.deg2rad(rotate % 360)
 
-    # Step 2: Create matrix for main transformations
-    # This includes scaling, translation, rotation, and x-shear
-    matrix_transforms = skimage.transform.AffineTransform(
-        scale=(scale["x"], scale["y"]),
-        rotation=np.deg2rad(rotate),
-        shear=(np.deg2rad(shear["x"]), np.deg2rad(shear["y"])),  # Both x and y shear
-        translation=(translate["x"], translate["y"]),
+    shear_x_rad = np.deg2rad(shear["x"])
+    shear_y_rad = np.deg2rad(shear["y"])
+
+    # Create individual transformation matrices
+    # 1. Shift to top-left
+    m_shift_topleft = np.array([[1, 0, -shift[0]], [0, 1, -shift[1]], [0, 0, 1]])
+
+    # 2. Scale
+    m_scale = np.array([[scale["x"], 0, 0], [0, scale["y"], 0], [0, 0, 1]])
+
+    # 3. Rotation
+    m_rotate = np.array(
+        [[np.cos(rotate_rad), np.sin(rotate_rad), 0], [-np.sin(rotate_rad), np.cos(rotate_rad), 0], [0, 0, 1]],
     )
 
-    # Step 3: Create matrix to shift back to center
-    # This is the inverse of the top-left shift
-    matrix_to_center = matrix_to_topleft.inverse
+    # 4. Shear
+    m_shear = np.array([[1, np.tan(shear_x_rad), 0], [np.tan(shear_y_rad), 1, 0], [0, 0, 1]])
+
+    # 5. Translation
+    m_translate = np.array([[1, 0, translate["x"]], [0, 1, translate["y"]], [0, 0, 1]])
+
+    # 6. Shift back to center
+    m_shift_center = np.array([[1, 0, shift[0]], [0, 1, shift[1]], [0, 0, 1]])
 
     # Combine all transformations
     # The order is important: transformations are applied from right to left
-    return (
-        matrix_to_center  # 3. Shift back to original center
-        + matrix_transforms  # 2. Apply main transformations
-        + matrix_to_topleft  # 1. Shift to top-left
-    )
+    m = m_shift_center @ m_translate @ m_shear @ m_rotate @ m_scale @ m_shift_topleft
+
+    # Ensure the last row is exactly [0, 0, 1]
+    m[2] = [0, 0, 1]
+
+    return m
 
 
 def compute_transformed_image_bounds(
-    matrix: skimage.transform.ProjectiveTransform,
+    matrix: np.ndarray,
     image_shape: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute the bounds of an image after applying an affine transformation.
 
     Args:
-        matrix (skimage.transform.ProjectiveTransform): The affine transformation matrix.
-        image_shape (tuple[int, int]): The shape of the image as (height, width).
+        matrix (np.ndarray): The 3x3 affine transformation matrix.
+        image_shape (Tuple[int, int]): The shape of the image as (height, width).
 
     Returns:
         tuple[np.ndarray, np.ndarray]: A tuple containing:
@@ -2380,10 +2180,11 @@ def compute_transformed_image_bounds(
     height, width = image_shape[:2]
 
     # Define the corners of the image
-    corners = np.array([[0, 0], [width, 0], [width, height], [0, height]])
+    corners = np.array([[0, 0, 1], [width, 0, 1], [width, height, 1], [0, height, 1]])
 
     # Transform the corners
-    transformed_corners = matrix(corners)
+    transformed_corners = corners @ matrix.T
+    transformed_corners = transformed_corners[:, :2] / transformed_corners[:, 2:]
 
     # Calculate the bounding box of the transformed corners
     min_coords = np.floor(transformed_corners.min(axis=0)).astype(int)
@@ -2393,13 +2194,13 @@ def compute_transformed_image_bounds(
 
 
 def compute_affine_warp_output_shape(
-    matrix: skimage.transform.ProjectiveTransform,
+    matrix: np.ndarray,
     input_shape: tuple[int, ...],
-) -> tuple[skimage.transform.ProjectiveTransform, tuple[int, int]]:
+) -> tuple[np.ndarray, tuple[int, int]]:
     height, width = input_shape[:2]
 
     if height == 0 or width == 0:
-        return matrix, cast(Tuple[int, int], input_shape[:2])
+        return matrix, cast(tuple[int, int], input_shape[:2])
 
     min_coords, max_coords = compute_transformed_image_bounds(matrix, (height, width))
     minc, minr = min_coords
@@ -2414,11 +2215,12 @@ def compute_affine_warp_output_shape(
         output_shape = np.ceil((out_height, out_width))
 
     output_shape_tuple = tuple(int(v) for v in output_shape.tolist())
+
     # fit output image in new shape
-    translation = -minc, -minr
-    matrix_to_fit = skimage.transform.SimilarityTransform(translation=translation)
-    matrix += matrix_to_fit
-    return matrix, cast(Tuple[int, int], output_shape_tuple)
+    translation = np.array([[1, 0, -minc], [0, 1, -minr], [0, 0, 1]])
+    matrix = translation @ matrix
+
+    return matrix, cast(tuple[int, int], output_shape_tuple)
 
 
 def center(image_shape: tuple[int, int]) -> tuple[float, float]:
@@ -2574,34 +2376,35 @@ def almost_equal_intervals(n: int, parts: int) -> np.ndarray:
 def generate_shuffled_splits(
     size: int,
     divisions: int,
-    random_state: np.random.RandomState | None = None,
+    random_generator: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Generate shuffled splits for a given dimension size and number of divisions.
 
     Args:
         size (int): Total size of the dimension (height or width).
         divisions (int): Number of divisions (rows or columns).
-        random_state (Optional[np.random.RandomState]): Seed for the random number generator for reproducibility.
+        random_generator (np.random.Generator | None): The random generator to use for shuffling the splits.
+            If None, the splits are not shuffled.
 
     Returns:
         np.ndarray: Cumulative edges of the shuffled intervals.
     """
     intervals = almost_equal_intervals(size, divisions)
-    intervals = random_utils.shuffle(intervals, random_state=random_state)
+    intervals = random_utils.shuffle(intervals, random_generator=random_generator)
     return np.insert(np.cumsum(intervals), 0, 0)
 
 
 def split_uniform_grid(
     image_shape: tuple[int, int],
     grid: tuple[int, int],
-    random_state: np.random.RandomState | None = None,
+    random_generator: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Splits an image shape into a uniform grid specified by the grid dimensions.
 
     Args:
         image_shape (tuple[int, int]): The shape of the image as (height, width).
         grid (tuple[int, int]): The grid size as (rows, columns).
-        random_state (Optional[np.random.RandomState]): The random state to use for shuffling the splits.
+        random_generator (np.random.Generator | None): The random generator to use for shuffling the splits.
             If None, the splits are not shuffled.
 
     Returns:
@@ -2613,8 +2416,8 @@ def split_uniform_grid(
     """
     n_rows, n_cols = grid
 
-    height_splits = generate_shuffled_splits(image_shape[0], grid[0], random_state)
-    width_splits = generate_shuffled_splits(image_shape[1], grid[1], random_state)
+    height_splits = generate_shuffled_splits(image_shape[0], grid[0], random_generator=random_generator)
+    width_splits = generate_shuffled_splits(image_shape[1], grid[1], random_generator=random_generator)
 
     # Calculate tiles coordinates
     tiles = [
@@ -2629,10 +2432,10 @@ def split_uniform_grid(
 def generate_perspective_points(
     image_shape: tuple[int, int],
     scale: float,
-    random_state: np.random.RandomState | None = None,
+    random_generator: np.random.Generator | None = None,
 ) -> np.ndarray:
     height, width = image_shape[:2]
-    points = random_utils.normal(0, scale, (4, 2), random_state=random_state)
+    points = random_utils.normal(0, scale, (4, 2), random_generator=random_generator)
     points = np.mod(np.abs(points), 0.32)
 
     # top left -- no changes needed, just use jitter
@@ -2667,7 +2470,8 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     return np.array([tl, tr, br, bl], dtype=np.float32)
 
 
-def compute_perspective_params(points: np.ndarray) -> tuple[np.ndarray, int, int]:
+def compute_perspective_params(points: np.ndarray, image_shape: tuple[int, int]) -> tuple[np.ndarray, int, int]:
+    height, width = image_shape
     top_left, top_right, bottom_right, bottom_left = points
 
     def adjust_dimension(dim1: np.ndarray, dim2: np.ndarray, min_size: int = 2) -> float:
@@ -2684,12 +2488,10 @@ def compute_perspective_params(points: np.ndarray) -> tuple[np.ndarray, int, int
     max_width = max(adjust_dimension(top_right, top_left), adjust_dimension(bottom_right, bottom_left))
     max_height = max(adjust_dimension(bottom_right, top_right), adjust_dimension(bottom_left, top_left))
 
-    max_width, max_height = int(max_width), int(max_height)
-
-    dst = np.array([[0, 0], [max_width, 0], [max_width, max_height], [0, max_height]], dtype=np.float32)
+    dst = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
     matrix = cv2.getPerspectiveTransform(points, dst)
 
-    return matrix, max_width, max_height
+    return matrix, int(max_width), int(max_height)
 
 
 def expand_transform(matrix: np.ndarray, shape: tuple[int, int]) -> tuple[np.ndarray, int, int]:
@@ -2703,3 +2505,68 @@ def expand_transform(matrix: np.ndarray, shape: tuple[int, int]) -> tuple[np.nda
     matrix_expanded = cv2.getPerspectiveTransform(rect, dst)
     max_width, max_height = dst.max(axis=0)
     return matrix_expanded, int(max_width), int(max_height)
+
+
+def create_piecewise_affine_maps(
+    image_shape: tuple[int, int],
+    grid: tuple[int, int],
+    scale: float,
+    absolute_scale: bool = False,
+    random_generator: np.random.Generator | None = None,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Create maps for piecewise affine transformation using OpenCV's remap function."""
+    height, width = image_shape[:2]
+    nb_rows, nb_cols = grid
+
+    # Input validation
+    if height <= 0 or width <= 0 or nb_rows <= 0 or nb_cols <= 0:
+        raise ValueError("Dimensions must be positive")
+    if scale <= 0:
+        return None, None
+
+    # Create source points grid
+    y = np.linspace(0, height - 1, nb_rows, dtype=np.float32)
+    x = np.linspace(0, width - 1, nb_cols, dtype=np.float32)
+    xx_src, yy_src = np.meshgrid(x, y)
+
+    # Initialize destination maps at full resolution
+    map_x = np.zeros((height, width), dtype=np.float32)
+    map_y = np.zeros((height, width), dtype=np.float32)
+
+    # Generate jitter for control points
+    jitter_scale = scale / 3 if absolute_scale else scale * min(width, height) / 3
+
+    jitter = random_utils.normal(0, jitter_scale, (nb_rows, nb_cols, 2), random_generator=random_generator).astype(
+        np.float32,
+    )
+
+    # Create control points with jitter
+    control_points = np.zeros((nb_rows * nb_cols, 4), dtype=np.float32)
+    for i in range(nb_rows):
+        for j in range(nb_cols):
+            idx = i * nb_cols + j
+            # Source points
+            control_points[idx, 0] = xx_src[i, j]
+            control_points[idx, 1] = yy_src[i, j]
+            # Destination points with jitter
+            control_points[idx, 2] = np.clip(xx_src[i, j] + jitter[i, j, 1], 0, width - 1)
+            control_points[idx, 3] = np.clip(yy_src[i, j] + jitter[i, j, 0], 0, height - 1)
+
+    # Create full resolution maps
+    for i in range(height):
+        for j in range(width):
+            # Find nearest control points and interpolate
+            dx = j - control_points[:, 0]
+            dy = i - control_points[:, 1]
+            dist = dx * dx + dy * dy
+            weights = 1 / (dist + 1e-8)
+            weights = weights / np.sum(weights)
+
+            map_x[i, j] = np.sum(weights * control_points[:, 2])
+            map_y[i, j] = np.sum(weights * control_points[:, 3])
+
+    # Ensure output is within bounds
+    map_x = np.clip(map_x, 0, width - 1)
+    map_y = np.clip(map_y, 0, height - 1)
+
+    return map_x, map_y

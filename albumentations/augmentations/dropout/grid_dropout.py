@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from warnings import warn
 
 from pydantic import AfterValidator, Field, model_validator
-from typing_extensions import Annotated, Self
+from typing_extensions import Self
 
 import albumentations.augmentations.dropout.functional as fdropout
-from albumentations import random_utils
 from albumentations.augmentations.dropout.transforms import BaseDropout
 from albumentations.core.pydantic import check_0plus, check_1plus, nondecreasing
 from albumentations.core.types import MIN_UNIT_SIZE, ColorType
@@ -158,7 +157,6 @@ class GridDropout(BaseDropout):
             grid,
             self.ratio,
             self.random_offset,
-            random_utils.get_random_state(),
             self.shift_xy,
         )
         return {"holes": holes}

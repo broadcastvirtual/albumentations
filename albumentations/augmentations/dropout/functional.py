@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cv2
 import numpy as np
 from albucore import MAX_VALUES_BY_DTYPE, is_grayscale_image, preserve_channel_dim
 from typing_extensions import Literal
@@ -38,7 +39,7 @@ def channel_dropout(
 def generate_random_fill(
     dtype: np.dtype,
     shape: tuple[int, ...],
-    random_state: np.random.RandomState | None,
+    random_generator: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Generate a random fill array based on the given dtype and target shape.
 
@@ -49,8 +50,8 @@ def generate_random_fill(
     Args:
         dtype (np.dtype): The data type of the array to be generated.
         shape (tuple[int, ...]): The shape of the array to be generated.
-        random_state (np.random.RandomState | None): The random state to use for generating values.
-            If None, the default numpy random state is used.
+        random_generator (np.random.Generator | None): The random generator to use for generating values.
+            If None, the default numpy random generator is used.
 
     Returns:
         np.ndarray: A numpy array of the specified shape and dtype, filled with random values.
@@ -68,9 +69,9 @@ def generate_random_fill(
     """
     max_value = MAX_VALUES_BY_DTYPE[dtype]
     if np.issubdtype(dtype, np.integer):
-        return random_utils.randint(0, max_value + 1, size=shape, dtype=dtype, random_state=random_state)
+        return random_utils.randint(0, max_value + 1, size=shape, dtype=dtype, random_generator=random_generator)
     if np.issubdtype(dtype, np.floating):
-        return random_utils.uniform(0, max_value, size=shape, random_state=random_state).astype(dtype)
+        return random_utils.uniform(0, max_value, size=shape, random_generator=random_generator).astype(dtype)
     raise ValueError(f"Unsupported dtype: {dtype}")
 
 
@@ -78,7 +79,7 @@ def cutout(
     img: np.ndarray,
     holes: np.ndarray,
     fill_value: ColorType | Literal["random"],
-    random_state: np.random.RandomState | None = None,
+    random_generator: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Apply cutout augmentation to the image by cutting out holes and filling them
     with either a given value or random noise.
@@ -90,8 +91,8 @@ def cutout(
         fill_value (Union[ColorType, Literal["random"]], optional): The fill value to use for the holes.
             Can be a single integer, a tuple or list of numbers for multichannel images,
             or the string "random" to fill with random noise.
-        random_state (np.random.RandomState | None, optional): The random state to use for generating
-            random fill values. If None, a new random state will be used. Defaults to None.
+        random_generator (np.random.Generator | None, optional): The random generator to use for generating
+            random fill values. If None, a new random generator will be used. Defaults to None.
 
     Returns:
         np.ndarray: The augmented image with cutout holes applied.
@@ -124,7 +125,7 @@ def cutout(
                 if img.ndim == MONO_CHANNEL_DIMENSIONS
                 else (y_max - y_min, x_max - x_min, img.shape[2])
             )
-            random_fill = generate_random_fill(img.dtype, shape, random_state)
+            random_fill = generate_random_fill(img.dtype, shape, random_generator)
             img[y_min:y_max, x_min:x_max] = random_fill
         else:
             img[y_min:y_max, x_min:x_max] = fill_value
@@ -281,8 +282,8 @@ def generate_grid_holes(
     grid: tuple[int, int],
     ratio: float,
     random_offset: bool,
-    random_state: np.random.RandomState | None,
     shift_xy: tuple[int, int],
+    random_generator: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Generate a list of holes for GridDropout using a uniform grid.
 
@@ -297,10 +298,10 @@ def generate_grid_holes(
             A ratio of 1 means the hole will fill the entire grid cell.
         random_offset (bool): If True, applies random offsets to each hole within its grid cell.
             If False, uses the global shift specified by shift_xy.
-        random_state (np.random.RandomState | None): The random state for generating random offsets
-            and shuffling. If None, a new RandomState will be created.
         shift_xy (tuple[int, int]): The global shift to apply to all holes as (shift_x, shift_y).
             Only used when random_offset is False.
+        random_generator (np.random.Generator | None): The random generator for generating random offsets
+            and shuffling. If None, a new Generator will be created.
 
     Returns:
         np.ndarray: An array of hole coordinates, where each hole is represented as
@@ -330,7 +331,7 @@ def generate_grid_holes(
     height, width = image_shape[:2]
 
     # Generate the uniform grid
-    cells = split_uniform_grid(image_shape, grid, random_state)
+    cells = split_uniform_grid(image_shape, grid, random_generator)
 
     # Calculate hole sizes based on the ratio
     cell_heights = cells[:, 2] - cells[:, 0]
@@ -342,10 +343,10 @@ def generate_grid_holes(
     max_offset_y = cell_heights - hole_heights
     max_offset_x = cell_widths - hole_widths
 
-    if random_offset and random_state is not None:
+    if random_offset and random_generator is not None:
         # Generate random offsets for each hole
-        offset_y = random_state.randint(0, max_offset_y + 1)
-        offset_x = random_state.randint(0, max_offset_x + 1)
+        offset_y = random_utils.randint(0, max_offset_y + 1, random_generator=random_generator)
+        offset_x = random_utils.randint(0, max_offset_x + 1, random_generator=random_generator)
     else:
         # Use global shift
         offset_y = np.full_like(max_offset_y, shift_xy[1])
@@ -410,3 +411,46 @@ def mask_dropout_bboxes(
 def mask_dropout_keypoints(keypoints: np.ndarray, dropout_mask: np.ndarray) -> np.ndarray:
     keep_indices = np.array([not dropout_mask[int(kp[1]), int(kp[0])] for kp in keypoints])
     return keypoints[keep_indices]
+
+
+def label(mask: np.ndarray, return_num: bool = False, connectivity: int = 2) -> np.ndarray | tuple[np.ndarray, int]:
+    """Label connected regions of an integer array.
+
+    This function uses OpenCV's connectedComponents under the hood but mimics
+    the behavior of scikit-image's label function.
+
+    Args:
+        mask (np.ndarray): The array to label. Must be of integer type.
+        return_num (bool): If True, return the number of labels (default: False).
+        connectivity (int): Maximum number of orthogonal hops to consider a pixel/voxel
+                            as a neighbor. Accepted values are 1 or 2. Default is 2.
+
+    Returns:
+        np.ndarray | tuple[np.ndarray, int]: Labeled array, where all connected regions are
+        assigned the same integer value. If return_num is True, it also returns the number of labels.
+    """
+    # Create a copy of the original mask
+    labeled = np.zeros_like(mask, dtype=np.int32)
+
+    # Get unique non-zero values from the original mask
+    unique_values = np.unique(mask[mask != 0])
+
+    # Label each unique value separately
+    next_label = 1
+    for value in unique_values:
+        binary_mask = (mask == value).astype(np.uint8)
+
+        # Set connectivity for OpenCV (4 or 8)
+        cv2_connectivity = 4 if connectivity == 1 else 8
+
+        # Use OpenCV's connectedComponents
+        num_labels, labels = cv2.connectedComponents(binary_mask, connectivity=cv2_connectivity)
+
+        # Assign new labels
+        for i in range(1, num_labels):
+            labeled[labels == i] = next_label
+            next_label += 1
+
+    num_labels = next_label - 1
+
+    return (labeled, num_labels) if return_num else labeled

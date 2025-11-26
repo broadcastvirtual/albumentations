@@ -3,12 +3,10 @@ from __future__ import annotations
 import random
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
-from PIL import ImageFont
 from pydantic import AfterValidator
-from typing_extensions import Annotated
 
 import albumentations.augmentations.text.functional as ftext
 from albumentations.core.bbox_utils import check_bboxes, denormalize_bboxes
@@ -152,6 +150,12 @@ class TextImage(ImageOnlyTransform):
         text: str,
         bbox_index: int,
     ) -> dict[str, Any]:
+        try:
+            from PIL import ImageFont
+        except ImportError as err:
+            raise ImportError(
+                "ImageFont from PIL is required to use TextImage transform. Install it with `pip install Pillow`.",
+            ) from err
         check_bboxes(np.array([bbox]))
         denormalized_bbox = denormalize_bboxes(np.array([bbox]), image.shape[:2])[0]
 

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Literal, Sequence
+from collections.abc import Sequence
+from typing import Any, Literal
 from warnings import warn
 
 import cv2
 import numpy as np
-import skimage
 from albucore import (
     MAX_VALUES_BY_DTYPE,
     add,
@@ -24,6 +24,7 @@ from albucore import (
     multiply_add,
     normalize_per_image,
     preserve_channel_dim,
+    sz_lut,
     to_float,
     uint8_io,
 )
@@ -88,54 +89,14 @@ __all__ = [
 ]
 
 
-def _shift_hsv_uint8(
-    img: np.ndarray,
-    hue_shift: np.ndarray,
-    sat_shift: np.ndarray,
-    val_shift: np.ndarray,
-) -> np.ndarray:
-    dtype = img.dtype
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-    hue, sat, val = cv2.split(img)
-
-    if hue_shift != 0:
-        lut_hue = np.arange(0, 256, dtype=np.int16)
-        lut_hue = np.mod(lut_hue + hue_shift, 180).astype(dtype)
-        hue = cv2.LUT(hue, lut_hue)
-
-    sat = add(sat, sat_shift)
-    val = add(val, val_shift)
-
-    img = cv2.merge((hue, sat, val)).astype(dtype)
-    return cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
-
-
-def _shift_hsv_non_uint8(
-    img: np.ndarray,
-    hue_shift: np.ndarray,
-    sat_shift: np.ndarray,
-    val_shift: np.ndarray,
-) -> np.ndarray:
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-    hue, sat, val = cv2.split(img)
-
-    if hue_shift != 0:
-        hue = cv2.add(hue, hue_shift)
-        hue = np.mod(hue, 360)  # OpenCV fails with negative values
-
-    sat = add(sat, sat_shift)
-    val = add(val, val_shift)
-
-    img = cv2.merge((hue, sat, val))
-    return cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
-
-
+@uint8_io
 @preserve_channel_dim
-def shift_hsv(img: np.ndarray, hue_shift: np.ndarray, sat_shift: np.ndarray, val_shift: np.ndarray) -> np.ndarray:
+def shift_hsv(img: np.ndarray, hue_shift: float, sat_shift: float, val_shift: float) -> np.ndarray:
     if hue_shift == 0 and sat_shift == 0 and val_shift == 0:
         return img
 
     is_gray = is_grayscale_image(img)
+
     if is_gray:
         if hue_shift != 0 or sat_shift != 0:
             hue_shift = 0
@@ -147,16 +108,28 @@ def shift_hsv(img: np.ndarray, hue_shift: np.ndarray, sat_shift: np.ndarray, val
             )
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
 
-    if img.dtype == np.uint8:
-        img = _shift_hsv_uint8(img, hue_shift, sat_shift, val_shift)
-    else:
-        img = _shift_hsv_non_uint8(img, hue_shift, sat_shift, val_shift)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+    hue, sat, val = cv2.split(img)
+
+    if hue_shift != 0:
+        lut_hue = np.arange(0, 256, dtype=np.int16)
+        lut_hue = np.mod(lut_hue + hue_shift, 180).astype(np.uint8)
+        hue = sz_lut(hue, lut_hue, inplace=False)
+
+    if sat_shift != 0:
+        sat = add(sat, sat_shift, inplace=False)
+
+    if val_shift != 0:
+        val = add(val, val_shift, inplace=False)
+
+    img = cv2.merge((hue, sat, val))
+    img = cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
 
     return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if is_gray else img
 
 
 @clipped
-def solarize(img: np.ndarray, threshold: int = 128) -> np.ndarray:
+def solarize(img: np.ndarray, threshold: int) -> np.ndarray:
     """Invert all pixel values above a threshold.
 
     Args:
@@ -174,16 +147,13 @@ def solarize(img: np.ndarray, threshold: int = 128) -> np.ndarray:
         lut = [(i if i < threshold else max_val - i) for i in range(int(max_val) + 1)]
 
         prev_shape = img.shape
-        img = cv2.LUT(img, np.array(lut, dtype=dtype))
+        img = sz_lut(img, np.array(lut, dtype=dtype), inplace=False)
 
-        if len(prev_shape) != len(img.shape):
-            img = np.expand_dims(img, -1)
-        return img
+        return np.expand_dims(img, -1) if len(prev_shape) != len(img.shape) else img
 
-    result_img = img.copy()
     cond = img >= threshold
-    result_img[cond] = max_val - result_img[cond]
-    return result_img
+    img[cond] = max_val - img[cond]
+    return img
 
 
 @uint8_io
@@ -212,7 +182,7 @@ def posterize(img: np.ndarray, bits: Literal[0, 1, 2, 3, 4, 5, 6, 7, 8]) -> np.n
         mask = ~np.uint8(2 ** (8 - bits_array) - 1)
         lut &= mask
 
-        return cv2.LUT(img, lut)
+        return sz_lut(img, lut, inplace=False)
 
     result_img = np.empty_like(img)
     for i, channel_bits in enumerate(bits_array):
@@ -225,7 +195,7 @@ def posterize(img: np.ndarray, bits: Literal[0, 1, 2, 3, 4, 5, 6, 7, 8]) -> np.n
             mask = ~np.uint8(2 ** (8 - channel_bits) - 1)
             lut &= mask
 
-            result_img[..., i] = cv2.LUT(img[..., i], lut)
+            result_img[..., i] = sz_lut(img[..., i], lut, inplace=True)
 
     return result_img
 
@@ -247,7 +217,7 @@ def _equalize_pil(img: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray
         lut[i] = min(n // step, 255)
         n += histogram[i]
 
-    return cv2.LUT(img, np.array(lut))
+    return sz_lut(img, np.array(lut), inplace=True)
 
 
 def _equalize_cv(img: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
@@ -275,7 +245,7 @@ def _equalize_cv(img: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
         _sum += histogram[idx]
         lut[idx] = clip(round(_sum * scale), np.uint8)
 
-    return cv2.LUT(img, lut)
+    return sz_lut(img, lut, inplace=True)
 
 
 def _check_preconditions(img: np.ndarray, mask: np.ndarray | None, by_channels: bool) -> None:
@@ -392,10 +362,12 @@ def move_tone_curve(
 
     if np.isscalar(low_y) and np.isscalar(high_y):
         lut = clip(np.rint(evaluate_bez(t, low_y, high_y)), np.uint8)
-        return cv2.LUT(img, lut)
+        return sz_lut(img, lut, inplace=False)
     if isinstance(low_y, np.ndarray) and isinstance(high_y, np.ndarray):
         luts = clip(np.rint(evaluate_bez(t[:, np.newaxis], low_y, high_y).T), np.uint8)
-        return cv2.merge([cv2.LUT(img[:, :, i], luts[i]) for i in range(num_channels)])
+        return cv2.merge(
+            [sz_lut(img[:, :, i], np.ascontiguousarray(luts[i]), inplace=False) for i in range(num_channels)],
+        )
 
     raise TypeError(
         f"low_y and high_y must both be of type float or np.ndarray. Got {type(low_y)} and {type(high_y)}",
@@ -613,7 +585,7 @@ def add_snow_texture(img: np.ndarray, snow_point: float, brightness_coeff: float
     snow_layer = (np.dstack([snow_texture] * 3) * max_value * snow_point).astype(np.float32)
 
     # Blend snow with original image
-    img_with_snow = cv2.addWeighted(img_hsv, 1, snow_layer, 1, 0)
+    img_with_snow = cv2.add(img_hsv, snow_layer)
 
     # Add a slight blue tint to simulate cool snow color
     blue_tint = np.full_like(img_with_snow, (0.6, 0.75, 1))  # Slight blue in HSV
@@ -688,7 +660,7 @@ def add_fog(
     fog_intensity: float,
     alpha_coef: float,
     fog_particle_positions: list[tuple[int, int]],
-    random_state: np.random.RandomState,
+    random_generator: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Add fog to the input image.
 
@@ -697,7 +669,8 @@ def add_fog(
         fog_intensity (float): Intensity of the fog effect, between 0 and 1.
         alpha_coef (float): Base alpha (transparency) value for fog particles.
         fog_particle_positions (list[tuple[int, int]]): List of (x, y) coordinates for fog particles.
-        random_state (np.random.RandomState): Random state used
+        random_generator (np.random.Generator): Random generator used.
+
     Returns:
         np.ndarray: Image with added fog effect.
     """
@@ -717,7 +690,7 @@ def add_fog(
 
     for x, y in fog_particle_positions:
         min_radius = max(1, max_fog_radius // 2)
-        radius = random_utils.randint(min_radius, max_fog_radius, random_state=random_state)
+        radius = random_utils.randint(min_radius, max_fog_radius, random_generator=random_generator)
         color = max_value if num_channels == 1 else (max_value,) * num_channels
         cv2.circle(
             fog_layer,
@@ -813,6 +786,7 @@ def add_sun_flare_overlay(
     num_times = src_radius // 10
     alpha = np.linspace(0.0, 1, num=num_times)
     rad = np.linspace(1, src_radius, num=num_times)
+
     for i in range(num_times):
         cv2.circle(overlay, point, int(rad[i]), src_color, -1)
         alp = alpha[num_times - i - 1] * alpha[num_times - i - 1] * alpha[num_times - i - 1]
@@ -1002,7 +976,8 @@ def channel_shuffle(img: np.ndarray, channels_shuffled: np.ndarray) -> np.ndarra
 def gamma_transform(img: np.ndarray, gamma: float) -> np.ndarray:
     if img.dtype == np.uint8:
         table = (np.arange(0, 256.0 / 255, 1.0 / 255) ** gamma) * 255
-        return cv2.LUT(img, table.astype(np.uint8))
+        return sz_lut(img, table.astype(np.uint8), inplace=False)
+
     return np.power(img, gamma)
 
 
@@ -1018,25 +993,25 @@ def brightness_contrast_adjust(
     else:
         value = beta * np.mean(img)
 
-    return multiply_add(img, alpha, value)
+    return multiply_add(img, alpha, value, inplace=False)
 
 
 @float32_io
 @clipped
 def iso_noise(
     image: np.ndarray,
-    color_shift: float = 0.05,
-    intensity: float = 0.5,
-    random_state: np.random.RandomState | None = None,
+    color_shift: float,
+    intensity: float,
+    random_generator: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Apply poisson noise to an image to simulate camera sensor noise.
 
     Args:
         image (np.ndarray): Input image. Currently, only RGB images are supported.
-        color_shift (float): The amount of color shift to apply. Default is 0.05.
+        color_shift (float): The amount of color shift to apply.
         intensity (float): Multiplication factor for noise values. Values of ~0.5 produce a noticeable,
-                           yet acceptable level of noise. Default is 0.5.
-        random_state (np.random.RandomState | None): If specified, this will be random state used
+                           yet acceptable level of noise.
+        random_generator (np.random.Generator | None): If specified, this will be random generator used
             for noise generation.
 
     Returns:
@@ -1051,17 +1026,14 @@ def iso_noise(
     hls = cv2.cvtColor(image, cv2.COLOR_RGB2HLS)
     _, stddev = cv2.meanStdDev(hls)
 
-    luminance_noise = random_utils.poisson(stddev[1] * intensity * 255, size=hls.shape[:2], random_state=random_state)
-    color_noise = random_utils.normal(0, color_shift * 360 * intensity, size=hls.shape[:2], random_state=random_state)
+    luminance_noise = random_utils.poisson(stddev[1] * intensity, size=hls.shape[:2], random_generator=random_generator)
+    color_noise = random_utils.normal(0, color_shift * intensity, size=hls.shape[:2], random_generator=random_generator)
 
-    hue = hls[..., 0]
-    hue += color_noise
-    hue %= 360
+    hls[..., 0] += color_noise
+    hls[..., 1] = add_array(hls[..., 1], luminance_noise * intensity * (1.0 - hls[..., 1]))
 
-    luminance = hls[..., 1]
-    luminance += (luminance_noise / 255) * (1.0 - luminance)
-
-    return cv2.cvtColor(hls, cv2.COLOR_HLS2RGB)
+    noised_hls = cv2.cvtColor(hls, cv2.COLOR_HLS2RGB)
+    return np.clip(noised_hls, 0, 1)  # Ensure output is in [0, 1] range
 
 
 def to_gray_weighted_average(img: np.ndarray) -> np.ndarray:
@@ -1429,7 +1401,7 @@ def adjust_brightness_torchvision(img: np.ndarray, factor: np.ndarray) -> np:
     if factor == 1:
         return img
 
-    return multiply(img, factor)
+    return multiply(img, factor, inplace=False)
 
 
 @preserve_channel_dim
@@ -1444,25 +1416,19 @@ def adjust_contrast_torchvision(img: np.ndarray, factor: float) -> np.ndarray:
             mean = int(mean + 0.5)
         return np.full_like(img, mean, dtype=img.dtype)
 
-    return multiply_add(img, factor, mean * (1 - factor))
+    return multiply_add(img, factor, mean * (1 - factor), inplace=False)
 
 
 @clipped
 @preserve_channel_dim
 def adjust_saturation_torchvision(img: np.ndarray, factor: float, gamma: float = 0) -> np.ndarray:
-    if factor == 1:
-        return img
-
-    if is_grayscale_image(img):
+    if factor == 1 or is_grayscale_image(img):
         return img
 
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     gray = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
 
-    if factor == 0:
-        return gray
-
-    return cv2.addWeighted(img, factor, gray, 1 - factor, gamma=gamma)
+    return gray if factor == 0 else cv2.addWeighted(img, factor, gray, 1 - factor, gamma=gamma)
 
 
 def _adjust_hue_torchvision_uint8(img: np.ndarray, factor: float) -> np.ndarray:
@@ -1470,7 +1436,7 @@ def _adjust_hue_torchvision_uint8(img: np.ndarray, factor: float) -> np.ndarray:
 
     lut = np.arange(0, 256, dtype=np.int16)
     lut = np.mod(lut + 180 * factor, 180).astype(np.uint8)
-    img[..., 0] = cv2.LUT(img[..., 0], lut)
+    img[..., 0] = sz_lut(img[..., 0], lut, inplace=False)
 
     return cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
 
@@ -1487,6 +1453,7 @@ def adjust_hue_torchvision(img: np.ndarray, factor: float) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
 
 
+@uint8_io
 @preserve_channel_dim
 def superpixels(
     image: np.ndarray,
@@ -1507,11 +1474,10 @@ def superpixels(
             new_height, new_width = int(height * scale), int(width * scale)
             image = fgeometric.resize(image, (new_height, new_width), interpolation)
 
-    segments = skimage.segmentation.slic(
+    segments = slic(
         image,
         n_segments=n_segments,
         compactness=10,
-        channel_axis=-1 if image.ndim > MONO_CHANNEL_DIMENSIONS else None,
     )
 
     min_value = 0
@@ -1524,14 +1490,19 @@ def superpixels(
     num_channels = get_num_channels(image)
 
     for c in range(num_channels):
-        # segments+1 here because otherwise regionprops always misses the last label
-        regions = skimage.measure.regionprops(segments + 1, intensity_image=image[..., c])
-        for region_idx, region in enumerate(regions):
+        image_sp_c = image[..., c]
+        # Get unique segment labels (skip 0 if it exists as it's typically background)
+        unique_labels = np.unique(segments)
+        if unique_labels[0] == 0:
+            unique_labels = unique_labels[1:]
+
+        # Calculate mean intensity for each segment
+        for idx, label in enumerate(unique_labels):
             # with mod here, because slic can sometimes create more superpixel than requested.
             # replace_samples then does not have enough values, so we just start over with the first one again.
-            if replace_samples[region_idx % len(replace_samples)]:
-                mean_intensity = region.mean_intensity
-                image_sp_c = image[..., c]
+            if replace_samples[idx % len(replace_samples)]:
+                mask = segments == label
+                mean_intensity = np.mean(image_sp_c[mask])
 
                 if image_sp_c.dtype.kind in ["i", "u", "b"]:
                     # After rounding the value can end up slightly outside of the value_range. Hence, we need to clip.
@@ -1543,7 +1514,7 @@ def superpixels(
                 else:
                     value = mean_intensity
 
-                image_sp_c[segments == region_idx] = value
+                image_sp_c[mask] = value
 
     return fgeometric.resize(image, orig_shape[:2], interpolation) if orig_shape != image.shape else image
 
@@ -1628,14 +1599,15 @@ def create_shape_groups(tiles: np.ndarray) -> dict[tuple[int, int], list[int]]:
 
 def shuffle_tiles_within_shape_groups(
     shape_groups: dict[tuple[int, int], list[int]],
-    random_state: np.random.RandomState | None = None,
+    random_generator: np.random.Generator | None = None,
 ) -> list[int]:
     """Shuffles indices within each group of similar shapes and creates a list where each
     index points to the index of the tile it should be mapped to.
 
     Args:
         shape_groups (dict[tuple[int, int], list[int]]): Groups of tile indices categorized by shape.
-        random_state (Optional[np.random.RandomState]): Seed for the random number generator for reproducibility.
+        random_generator (np.random.Generator | None): The random generator to use for shuffling the indices.
+            If None, a new random generator will be used.
 
     Returns:
         list[int]: A list where each index is mapped to the new index of the tile after shuffling.
@@ -1647,7 +1619,7 @@ def shuffle_tiles_within_shape_groups(
     # Prepare the random number generator
 
     for indices in shape_groups.values():
-        shuffled_indices = random_utils.shuffle(indices.copy(), random_state=random_state)
+        shuffled_indices = random_utils.shuffle(indices.copy(), random_generator=random_generator)
         for old, new in zip(indices, shuffled_indices):
             mapping[old] = new
 
@@ -1939,3 +1911,65 @@ def swap_tiles_on_keypoints(
     new_keypoints[not_in_any_tile] = keypoints[not_in_any_tile]
 
     return new_keypoints
+
+
+def slic(image: np.ndarray, n_segments: int, compactness: float = 10.0, max_iterations: int = 10) -> np.ndarray:
+    """Simple Linear Iterative Clustering (SLIC) superpixel segmentation using OpenCV and NumPy.
+
+    Args:
+        image (np.ndarray): Input image (2D or 3D numpy array).
+        n_segments (int): Approximate number of superpixels to generate.
+        compactness (float): Balance between color proximity and space proximity.
+        max_iterations (int): Maximum number of iterations for k-means.
+
+    Returns:
+        np.ndarray: Segmentation mask where each superpixel has a unique label.
+    """
+    if image.ndim == MONO_CHANNEL_DIMENSIONS:
+        image = image[..., np.newaxis]
+
+    height, width = image.shape[:2]
+    num_pixels = height * width
+
+    # Normalize image to [0, 1] range
+    image_normalized = image.astype(np.float32) / np.max(image)
+
+    # Initialize cluster centers
+    grid_step = int((num_pixels / n_segments) ** 0.5)
+    x_range = np.arange(grid_step // 2, width, grid_step)
+    y_range = np.arange(grid_step // 2, height, grid_step)
+    centers = np.array([(x, y) for y in y_range for x in x_range if x < width and y < height])
+
+    # Initialize labels and distances
+    labels = -1 * np.ones((height, width), dtype=np.int32)
+    distances = np.full((height, width), np.inf)
+
+    for _ in range(max_iterations):
+        for i, center in enumerate(centers):
+            y, x = int(center[1]), int(center[0])
+
+            # Define the neighborhood
+            y_low, y_high = max(0, y - grid_step), min(height, y + grid_step + 1)
+            x_low, x_high = max(0, x - grid_step), min(width, x + grid_step + 1)
+
+            # Compute distances
+            crop = image_normalized[y_low:y_high, x_low:x_high]
+            color_diff = crop - image_normalized[y, x]
+            color_distance = np.sum(color_diff**2, axis=-1)
+
+            yy, xx = np.ogrid[y_low:y_high, x_low:x_high]
+            spatial_distance = ((yy - y) ** 2 + (xx - x) ** 2) / (grid_step**2)
+
+            distance = color_distance + compactness * spatial_distance
+
+            mask = distance < distances[y_low:y_high, x_low:x_high]
+            distances[y_low:y_high, x_low:x_high][mask] = distance[mask]
+            labels[y_low:y_high, x_low:x_high][mask] = i
+
+        # Update centers
+        for i in range(len(centers)):
+            mask = labels == i
+            if np.any(mask):
+                centers[i] = np.mean(np.argwhere(mask), axis=0)[::-1]
+
+    return labels

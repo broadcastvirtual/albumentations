@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Sequence
 from numbers import Real
-from typing import TYPE_CHECKING, Any, Literal, Sequence, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import numpy as np
 
@@ -131,16 +132,28 @@ class DataProcessor(ABC):
 
     def postprocess(self, data: dict[str, Any]) -> dict[str, Any]:
         image_shape = get_shape(data["image"])
+        data = self._process_data_fields(data, image_shape)
         data = self.remove_label_fields_from_data(data)
+        return self._convert_sequence_inputs(data)
 
+    def _process_data_fields(self, data: dict[str, Any], image_shape: tuple[int, int]) -> dict[str, Any]:
         for data_name in set(self.data_fields) & set(data.keys()):
-            data[data_name] = self.filter(data[data_name], image_shape)
+            data[data_name] = self._process_single_field(data_name, data[data_name], image_shape)
+        return data
 
-            if data_name == "keypoints" and len(data[data_name]) == 0:
-                data[data_name] = np.array([], dtype=np.float32).reshape(0, len(self.params.format))
+    def _process_single_field(self, data_name: str, field_data: Any, image_shape: tuple[int, int]) -> Any:
+        field_data = self.filter(field_data, image_shape)
 
-            data[data_name] = self.check_and_convert(data[data_name], image_shape, direction="from")
-            # Convert back to list of lists if original input was a list
+        if data_name == "keypoints" and len(field_data) == 0:
+            field_data = self._create_empty_keypoints_array()
+
+        return self.check_and_convert(field_data, image_shape, direction="from")
+
+    def _create_empty_keypoints_array(self) -> np.ndarray:
+        return np.array([], dtype=np.float32).reshape(0, len(self.params.format))
+
+    def _convert_sequence_inputs(self, data: dict[str, Any]) -> dict[str, Any]:
+        for data_name in set(self.data_fields) & set(data.keys()):
             if self.is_sequence_input.get(data_name, False):
                 data[data_name] = data[data_name].tolist()
         return data
@@ -307,6 +320,14 @@ def ensure_int_output(
     param: ScalarType,
 ) -> tuple[int, int] | tuple[float, float]:
     return (int(min_val), int(max_val)) if isinstance(param, int) else (float(min_val), float(max_val))
+
+
+def ensure_contiguous_output(arg: np.ndarray | Sequence[np.ndarray]) -> np.ndarray | list[np.ndarray]:
+    if isinstance(arg, np.ndarray):
+        arg = np.require(arg, requirements=["C_CONTIGUOUS"])
+    elif isinstance(arg, Sequence):
+        arg = list(map(ensure_contiguous_output, arg))
+    return arg
 
 
 @overload
