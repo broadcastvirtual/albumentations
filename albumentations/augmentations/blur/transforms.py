@@ -43,7 +43,7 @@ class Blur(ImageOnlyTransform):
         return F.blur(img, kernel)
 
     def get_params(self) -> Dict[str, Any]:
-        return {"ksize": int(random.choice(list(range(self.blur_limit[0], self.blur_limit[1] + 1, 2))))}
+        return {"kernel": int(random.choice(list(range(self.blur_limit[0], self.blur_limit[1] + 1, 2))))}
 
     def get_transform_init_args_names(self) -> Tuple[str, ...]:
         return ("blur_limit",)
